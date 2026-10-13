@@ -1,8 +1,8 @@
 """A peer connection's purpose is fixed once, by its accept exchange.
 
 A listener hands a connection only to the handler of a purpose it serves, with what it
-verified about the dialer; a dialer uses a non-resident connection only once the target
-has echoed its purpose.
+verified about the dialer; a dialer uses a connection only once the target has echoed
+its purpose, and a connection that opens without naming one is closed.
 """
 
 import asyncio
@@ -126,90 +126,13 @@ def test_a_listener_refuses_a_purpose_it_does_not_serve_before_any_frame(
             assert refused.value.outcome is None
         async with _listener(target, frozenset({PeerPurpose.CONTENT}), seen) as ep:
             with pytest.raises(PeerAcceptError) as refused:
-                await open_accepted_connection(ep, origin, _BUDGET)
+                await open_accepted_connection(
+                    ep, origin, _BUDGET, PeerPurpose.RESIDENT
+                )
             assert refused.value.outcome is None
 
     asyncio.run(run())
     assert seen == []
-
-
-def test_a_request_naming_no_purpose_is_a_resident_one(ca: _TestCa) -> None:
-    seen: list[tuple[PeerContext, RelayFrame]] = []
-
-    async def run() -> None:
-        target = ca.material("node-b", "127.0.0.1")
-        async with _listener(target, frozenset({PeerPurpose.RESIDENT}), seen) as ep:
-            reader, writer = await asyncio.open_connection(
-                "127.0.0.1",
-                int(ep.rpartition(":")[2]),
-                ssl=client_context(ca.material("node-a")),
-                server_hostname="127.0.0.1",
-            )
-            await write_accept(writer, AcceptStatus.REQUEST)
-            answer = await read_stream_frame(reader)
-            assert answer == AcceptFrame(AcceptStatus.ACCEPTED, PeerPurpose.RESIDENT)
-            await write_relay_frame(writer, _frame())
-            await _received(seen)
-            writer.close()
-
-    asyncio.run(run())
-    assert [ctx.purpose for ctx, _ in seen] == [PeerPurpose.RESIDENT]
-
-
-def test_an_acceptance_without_the_purpose_echo_is_never_used() -> None:
-    """A listener that predates purposes would carry the session as a resident one."""
-
-    async def run() -> None:
-        async def old_listener(
-            reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-        ) -> None:
-            await read_stream_frame(reader)
-            await write_accept(writer, AcceptStatus.ACCEPTED)
-            await reader.read()
-
-        server = await asyncio.start_server(old_listener, "127.0.0.1", 0)
-        port = server.sockets[0].getsockname()[1]
-        try:
-            with pytest.raises(PeerAcceptError) as unserved:
-                await open_accepted_connection(
-                    f"127.0.0.1:{port}", None, _BUDGET, PeerPurpose.CONTENT
-                )
-            assert unserved.value.outcome is None
-            _, writer = await open_accepted_connection(
-                f"127.0.0.1:{port}", None, _BUDGET
-            )
-            writer.close()
-        finally:
-            server.close()
-
-    asyncio.run(run())
-
-
-def test_a_resident_request_carries_no_purpose_on_the_wire() -> None:
-    async def run() -> AcceptFrame:
-        requests: list[AcceptFrame] = []
-
-        async def listener(
-            reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-        ) -> None:
-            request = await read_stream_frame(reader)
-            assert isinstance(request, AcceptFrame)
-            requests.append(request)
-            await write_accept(writer, AcceptStatus.ACCEPTED)
-            await reader.read()
-
-        server = await asyncio.start_server(listener, "127.0.0.1", 0)
-        port = server.sockets[0].getsockname()[1]
-        try:
-            _, writer = await open_accepted_connection(
-                f"127.0.0.1:{port}", None, _BUDGET
-            )
-            writer.close()
-        finally:
-            server.close()
-        return requests[0]
-
-    assert asyncio.run(run()) == AcceptFrame(AcceptStatus.REQUEST)
 
 
 def test_a_dialers_common_name_is_not_among_the_names_it_covers(ca: _TestCa) -> None:
@@ -235,7 +158,7 @@ def test_a_dialers_common_name_is_not_among_the_names_it_covers(ca: _TestCa) -> 
     assert ctx.names.covers("node-a.example")
 
 
-def test_an_unannounced_session_never_reaches_a_content_listener(ca: _TestCa) -> None:
+def test_a_session_opened_without_an_accept_request_is_closed(ca: _TestCa) -> None:
     seen: list[tuple[PeerContext, RelayFrame]] = []
 
     async def run() -> None:
@@ -253,3 +176,82 @@ def test_an_unannounced_session_never_reaches_a_content_listener(ca: _TestCa) ->
 
     asyncio.run(run())
     assert seen == []
+
+
+@pytest.mark.parametrize("purpose", [None, "archive"])
+def test_a_request_naming_no_known_purpose_is_unserved(
+    ca: _TestCa, purpose: str | None
+) -> None:
+    seen: list[tuple[PeerContext, RelayFrame]] = []
+
+    async def run() -> AcceptFrame:
+        target = ca.material("node-b", "127.0.0.1")
+        async with _listener(target, frozenset(PeerPurpose), seen) as ep:
+            reader, writer = await asyncio.open_connection(
+                "127.0.0.1",
+                int(ep.rpartition(":")[2]),
+                ssl=client_context(ca.material("node-a")),
+                server_hostname="127.0.0.1",
+            )
+            await write_accept(writer, AcceptStatus.REQUEST, purpose)
+            answer = await read_stream_frame(reader)
+            assert await reader.read() == b""
+            writer.close()
+        assert isinstance(answer, AcceptFrame)
+        return answer
+
+    assert asyncio.run(run()).status is AcceptStatus.UNSERVED
+    assert seen == []
+
+
+@pytest.mark.parametrize("purpose", list(PeerPurpose))
+def test_an_acceptance_without_the_purpose_echo_is_never_used(
+    purpose: PeerPurpose,
+) -> None:
+    async def run() -> None:
+        async def unechoing(
+            reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+        ) -> None:
+            await read_stream_frame(reader)
+            await write_accept(writer, AcceptStatus.ACCEPTED)
+            await reader.read()
+
+        server = await asyncio.start_server(unechoing, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            with pytest.raises(PeerAcceptError) as unserved:
+                await open_accepted_connection(
+                    f"127.0.0.1:{port}", None, _BUDGET, purpose
+                )
+            assert unserved.value.outcome is None
+        finally:
+            server.close()
+
+    asyncio.run(run())
+
+
+def test_every_request_names_its_purpose_on_the_wire() -> None:
+    async def run() -> AcceptFrame:
+        requests: list[AcceptFrame] = []
+
+        async def listener(
+            reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+        ) -> None:
+            request = await read_stream_frame(reader)
+            assert isinstance(request, AcceptFrame)
+            requests.append(request)
+            await write_accept(writer, AcceptStatus.ACCEPTED, request.purpose)
+            await reader.read()
+
+        server = await asyncio.start_server(listener, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            _, writer = await open_accepted_connection(
+                f"127.0.0.1:{port}", None, _BUDGET, PeerPurpose.RESIDENT
+            )
+            writer.close()
+        finally:
+            server.close()
+        return requests[0]
+
+    assert asyncio.run(run()) == AcceptFrame(AcceptStatus.REQUEST, PeerPurpose.RESIDENT)

@@ -72,11 +72,6 @@ class _HolderConnection(ConnectionHandler):
         self._holder.drop_connection(self._sink)
 
 
-def _is_registered_origin(identities: frozenset[str]) -> bool:
-    """Whether the dialer holds an identity the deployment CA issued."""
-    return bool(identities)
-
-
 class ContentLaneHost:
     """Hosts this worker's holder and hydration client on one loop."""
 
@@ -167,7 +162,6 @@ class ContentLaneHost:
             self._listener = MutualTlsFrameListener(
                 material=self._peer_material,
                 handler=lambda sink, peer: _HolderConnection(holder, sink, peer),
-                admits=_is_registered_origin,
                 purposes=frozenset({PeerPurpose.CONTENT}),
                 logger=self._logger,
             )

@@ -34,3 +34,9 @@ def test_a_common_name_never_covers_a_host() -> None:
     names = PeerNames.of(_cert(("DNS", "node-b.example"), cn="10.0.0.7"))
     assert not names.covers("10.0.0.7")
     assert names.covers("node-b.example")
+
+
+def test_an_undecodable_ip_name_is_skipped_and_the_rest_still_cover() -> None:
+    names = PeerNames.of(_cert(("IP Address", "<invalid>"), ("IP Address", "10.0.0.7")))
+    assert names.covers("10.0.0.7")
+    assert not names.covers("<invalid>")

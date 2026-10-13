@@ -58,11 +58,7 @@ class AcceptStatus(StrEnum):
 
 
 class PeerPurpose(StrEnum):
-    """What a peer connection carries, fixed once by its accept exchange.
-
-    A request naming no purpose is a resident one, the purpose every dialer carried
-    before connections named theirs.
-    """
+    """What a peer connection carries, fixed once by its accept exchange."""
 
     RESIDENT = "resident"
     CONTENT = "content"
@@ -72,9 +68,9 @@ class PeerPurpose(StrEnum):
 class AcceptFrame:
     """A connection accept step; a stream listener answers the request it reads.
 
-    A request names the purpose it asks for, and an acceptance echoes the purpose it
-    serves the connection under, so a dialer can tell a listener that predates purposes
-    from one that took its purpose. An unrecognized purpose is kept as its raw text.
+    A request names the purpose it asks for and an acceptance echoes it, so a dialer
+    uses only a connection the listener took for that purpose. An unrecognized purpose
+    is kept as its raw text.
     """
 
     status: AcceptStatus

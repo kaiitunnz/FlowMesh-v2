@@ -125,12 +125,11 @@ steers the next drive. Only transport failures demote — a fence, tenant, descr
 application, or engine rejection arrives as a frame and settles the boundary without
 touching the path.
 
-A connection's purpose — `resident` or `content` — is fixed once by its accept exchange,
-and a listener answers a purpose it does not serve as unserved before reading any
-session, so a session of one purpose never reaches another's handler. A request naming
-no purpose is resident. A dialer asking for any other purpose uses the connection only
-once the target echoes it, so a listener that predates purposes is never handed a
-session it would misroute.
+A connection's purpose, `resident` or `content`, is fixed by its accept exchange, so a
+session never reaches another purpose's handler: every dialer names its purpose, a
+listener answers a purpose it does not serve, or a request naming none, as `unserved`
+before reading a session, and a dialer uses the connection only once the target echoes
+its purpose. A connection that opens with a session frame instead is closed.
 
 ## Content transfers
 

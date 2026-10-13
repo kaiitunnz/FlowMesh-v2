@@ -14,6 +14,7 @@ into a transient worker attachment.
 
 import base64
 import binascii
+import contextlib
 import ipaddress
 import ssl
 import tempfile
@@ -133,10 +134,13 @@ class PeerNames:
         dns: set[str] = set()
         ips: set[str] = set()
         for kind, value in (peer_cert or {}).get("subjectAltName", ()):
-            if kind == "DNS":
-                dns.add(str(value).lower())
-            elif kind == "IP Address":
-                ips.add(_ip_text(str(value)))
+            match kind:
+                case "DNS":
+                    dns.add(str(value).lower())
+                case "IP Address":
+                    # Python renders an IP SAN it cannot decode as "<invalid>".
+                    with contextlib.suppress(ValueError):
+                        ips.add(_ip_text(str(value)))
         return cls(frozenset(dns), frozenset(ips))
 
     def covers(self, host: str) -> bool:

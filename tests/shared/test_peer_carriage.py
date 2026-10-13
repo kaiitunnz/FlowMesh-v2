@@ -9,6 +9,7 @@ import pytest
 from shared.network.frame_stream import (
     AcceptFrame,
     AcceptStatus,
+    PeerPurpose,
     read_relay_frame,
     read_stream_frame,
     write_accept,
@@ -62,8 +63,10 @@ def _plan(transport: str, endpoint: str) -> ResidentCarriagePlan:
 
 async def _accept(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     """Accept the dialer's connection, as a target listener does."""
-    assert await read_stream_frame(reader) == AcceptFrame(AcceptStatus.REQUEST)
-    await write_accept(writer, AcceptStatus.ACCEPTED)
+    assert await read_stream_frame(reader) == AcceptFrame(
+        AcceptStatus.REQUEST, PeerPurpose.RESIDENT
+    )
+    await write_accept(writer, AcceptStatus.ACCEPTED, PeerPurpose.RESIDENT)
 
 
 def _dial_over_mtls(target: MutualTlsMaterial, origin: MutualTlsMaterial):

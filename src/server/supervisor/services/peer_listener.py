@@ -94,11 +94,6 @@ class _UplinkConnection(ConnectionHandler):
         self._on_close(self)
 
 
-def _is_registered_origin(identities: frozenset[str]) -> bool:
-    """Whether the dialer holds an identity the deployment CA issued."""
-    return bool(identities)
-
-
 class NodePeerListener:
     """Serves the node's dialed peer connections into its local uplinks."""
 
@@ -118,7 +113,6 @@ class NodePeerListener:
         self._listener = MutualTlsFrameListener(
             material=material,
             handler=lambda sink, peer: self._open(bridges[peer.purpose], sink, peer),
-            admits=_is_registered_origin,
             purposes=frozenset(bridges),
             logger=logger or logging.getLogger("node-peer-listener"),
         )

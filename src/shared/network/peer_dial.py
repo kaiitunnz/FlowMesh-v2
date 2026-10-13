@@ -60,7 +60,7 @@ async def open_accepted_connection(
     endpoint: str,
     ssl_context: ssl.SSLContext | None,
     timeout: float,
-    purpose: PeerPurpose = PeerPurpose.RESIDENT,
+    purpose: PeerPurpose,
 ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
     """Open a stream to the peer listener at ``endpoint`` once the target accepts it.
 
@@ -69,20 +69,14 @@ async def open_accepted_connection(
     rejected the dialer's certificate after the dialer's side of the handshake
     completed, so that close records as a TLS failure.
 
-    A resident request names no purpose, as every listener reads it. Any other purpose
-    is accepted only with its echo: a listener that answers without one predates
-    purposes and would carry the session as a resident one, so the connection is
-    dropped as unserved rather than used.
+    The connection is used only when the acceptance echoes ``purpose``; any other
+    answer drops it as unserved.
     """
     writer: asyncio.StreamWriter | None = None
     try:
         async with asyncio.timeout(timeout):
             reader, writer = await open_peer_connection(endpoint, ssl_context)
-            await write_accept(
-                writer,
-                AcceptStatus.REQUEST,
-                None if purpose is PeerPurpose.RESIDENT else purpose,
-            )
+            await write_accept(writer, AcceptStatus.REQUEST, purpose)
             try:
                 answer = await read_stream_frame(reader)
             except asyncio.IncompleteReadError as exc:
@@ -104,9 +98,10 @@ async def open_accepted_connection(
             writer.transport.abort()
         raise
     status = answer.status if isinstance(answer, AcceptFrame) else None
-    if status is AcceptStatus.ACCEPTED and (
-        purpose is PeerPurpose.RESIDENT
-        or (isinstance(answer, AcceptFrame) and answer.purpose == purpose)
+    if (
+        isinstance(answer, AcceptFrame)
+        and status is AcceptStatus.ACCEPTED
+        and answer.purpose == purpose
     ):
         return reader, writer
     writer.transport.abort()

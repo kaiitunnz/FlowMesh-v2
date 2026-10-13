@@ -13,9 +13,9 @@ The listener is transport only: it reads a frame's framing and hands the frame o
 It answers two exchanges itself. The target accepts a dialer's connection before the
 dialer sends a session on it: a request is answered ``accepted``, echoing its purpose,
 while a connection over the cap, from an origin it does not admit, or for a purpose the
-listener does not serve is answered ``busy``, ``refused`` or ``unserved`` and closed, so
-the dialer learns of a refusal before it writes anything of the session. A dialer that
-sends a relay frame without an accept carries a resident session.
+listener does not serve, or that names none, is answered ``busy``, ``refused`` or
+``unserved`` and closed, so the dialer learns of a refusal before it writes anything of
+the session. A connection that opens with anything else is closed.
 A probe opening a connection is echoed and closed, so a reachability check covers the
 handshake, origin check and framing a session uses without reaching a handler.
 
@@ -92,6 +92,11 @@ ConnectionHandlerFactory = Callable[[FrameSink, PeerContext], ConnectionHandler]
 PeerAdmission = Callable[[frozenset[str]], bool]
 
 
+def is_registered_origin(identities: frozenset[str]) -> bool:
+    """Whether the dialer holds an identity the deployment CA issued."""
+    return bool(identities)
+
+
 class ConnectionFrameSink(FrameSink):
     """Answers over the connection a frame arrived on, one writer at a time."""
 
@@ -124,7 +129,7 @@ class MutualTlsFrameListener:
         *,
         material: MutualTlsMaterial | None,
         handler: ConnectionHandlerFactory,
-        admits: PeerAdmission,
+        admits: PeerAdmission = is_registered_origin,
         purposes: frozenset[PeerPurpose] = frozenset({PeerPurpose.RESIDENT}),
         max_connections: int = MAX_CONNECTIONS,
         logger: logging.Logger | None = None,
@@ -222,27 +227,22 @@ class MutualTlsFrameListener:
                 await write_probe(writer, first.payload)
                 writer.close()
                 return
-            purpose = PeerPurpose.RESIDENT
-            if isinstance(first, AcceptFrame):
-                if first.status is not AcceptStatus.REQUEST:
-                    raise FrameStreamError("a dialer sent an accept answer")
-                requested = _purpose_of(first.purpose)
-                if requested is None or requested not in self._purposes:
-                    self._logger.warning(
-                        "refusing a peer connection for an unserved purpose"
-                    )
-                    await write_accept(writer, AcceptStatus.UNSERVED, first.purpose)
-                    return
-                purpose = requested
-                await write_accept(writer, AcceptStatus.ACCEPTED, purpose)
-                first = await asyncio.wait_for(
-                    read_relay_frame(reader), HANDSHAKE_TIMEOUT_SEC
-                )
-            elif purpose not in self._purposes:
+            if (
+                not isinstance(first, AcceptFrame)
+                or first.status is not AcceptStatus.REQUEST
+            ):
+                raise FrameStreamError("a dialer opened without an accept request")
+            purpose = _purpose_of(first.purpose)
+            if purpose is None or purpose not in self._purposes:
                 self._logger.warning(
-                    "closing a resident session on a listener that serves none"
+                    "refusing a peer connection for an unserved purpose"
                 )
+                await write_accept(writer, AcceptStatus.UNSERVED, first.purpose)
                 return
+            await write_accept(writer, AcceptStatus.ACCEPTED, purpose)
+            first = await asyncio.wait_for(
+                read_relay_frame(reader), HANDSHAKE_TIMEOUT_SEC
+            )
             handler = self._handler(
                 ConnectionFrameSink(writer),
                 PeerContext(purpose, identities, PeerNames.of(peer_cert)),
@@ -283,11 +283,9 @@ class MutualTlsFrameListener:
 
 
 def _purpose_of(raw: str | None) -> PeerPurpose | None:
-    """The purpose an accept request names; absent is resident, unknown is None."""
-    if raw is None:
-        return PeerPurpose.RESIDENT
+    """The purpose an accept request names; None for none or an unknown one."""
     try:
-        return PeerPurpose(raw)
+        return PeerPurpose(raw) if raw is not None else None
     except ValueError:
         return None
 
@@ -302,4 +300,5 @@ __all__ = [
     "PeerAdmission",
     "PeerContext",
     "close_writer",
+    "is_registered_origin",
 ]

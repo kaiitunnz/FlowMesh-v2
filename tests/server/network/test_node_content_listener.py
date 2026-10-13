@@ -196,7 +196,9 @@ def test_a_holder_that_ends_ends_the_content_connections_to_it_at_once(
             kept_reader, kept = await open_accepted_connection(
                 endpoint, requester, 5.0, PeerPurpose.CONTENT
             )
-            res_reader, res = await open_accepted_connection(endpoint, requester, 5.0)
+            res_reader, res = await open_accepted_connection(
+                endpoint, requester, 5.0, PeerPurpose.RESIDENT
+            )
             await write_relay_frame(lost, _frame("rly-to-h"))
             await write_relay_frame(kept, _frame("rly-to-g"))
             await write_relay_frame(res, _frame("rly-to-h"))
