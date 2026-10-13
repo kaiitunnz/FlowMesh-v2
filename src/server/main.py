@@ -37,7 +37,7 @@ from shared.telemetry.semconv import (
 
 from .auth import reconcile_resources, resolve_system_principal
 from .clients import RedisClient
-from .clients.redis import resident_relay_client
+from .clients.redis import resident_relay_client, resident_relay_sync_client
 from .config import NodeRole, ServerConfig
 from .content import (
     ContentAccessBroker,
@@ -442,7 +442,9 @@ if IS_ROOT_NODE:
             authorizes=RUNTIME.content_binding_authorizes,
             grant_ttl_sec=config.content_store.grant_ttl_sec,
             sessions=ContentTransferSessions(
-                _relay_client, ttl_sec=config.content_store.grant_ttl_sec * 10
+                resident_relay_sync_client(config.redis),
+                _relay_client,
+                ttl_sec=config.content_store.grant_ttl_sec * 10,
             ),
             network=NETWORK_PLANE,
             logger=logger,

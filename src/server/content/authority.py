@@ -259,7 +259,7 @@ class ContentHydrationAuthority:
         )
         # The transfer's routing record: the relay and the holder's node bridge frames
         # between these two ends by it. It carries no object identity.
-        await self._sessions.open(
+        await self._sessions.open_async(
             grant.transfer_session_id,
             origin_node=requester.node_id,
             target_node=holder.node_id,

@@ -175,7 +175,9 @@ def _authority(
         ),
         grant_ttl_sec=60.0,
         sessions=ContentTransferSessions(
-            cast(Any, relay or _FakeRelayRedis()), ttl_sec=600.0
+            cast(Any, _FakeRelayRedis()),
+            cast(Any, relay or _FakeRelayRedis()),
+            ttl_sec=600.0,
         ),
         network=network,
     )
