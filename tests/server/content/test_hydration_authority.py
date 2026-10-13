@@ -106,11 +106,20 @@ class _Workers:
 
     def __init__(self, **incarnations: int) -> None:
         self._live = incarnations
+        self.reads = 0
         self.frames: list[tuple[str, str, dict[str, Any]]] = []
         # Workers serving a content listener, and so dialing peers.
         self.listening: set[str] = set()
 
     async def get_worker_async(self, worker_id: str) -> Any:
+        self.reads += 1
+        return self._worker(worker_id)
+
+    async def get_workers_async(self, worker_ids: list[str]) -> list[Any]:
+        self.reads += 1
+        return [self._worker(worker_id) for worker_id in worker_ids]
+
+    def _worker(self, worker_id: str) -> Any:
         if worker_id not in self._live:
             return None
         return SimpleNamespace(
@@ -350,15 +359,25 @@ class _Network:
         self.route_ttl_sec = 30.0
         self.observed: list[tuple[str, Transport, RouteObservationOutcome]] = []
         self.resolved: list[tuple[str, PolicyClass, str]] = []
+        self.targets: list[Any] = []
+        self.endpoint_reads = 0
+        self.peer_enabled = True
 
     async def endpoint_for(self, node_id: str) -> Any:
+        self.endpoint_reads += 1
         return SimpleNamespace(url=f"10.0.0.{node_id[-1]}:9101")
 
     def peer_trust(self, protocol: str) -> TrustedPeerPolicy:
-        return TrustedPeerPolicy(enabled=True, trust_domain="fm", protocol=protocol)
+        return TrustedPeerPolicy(
+            enabled=self.peer_enabled, trust_domain="fm", protocol=protocol
+        )
 
-    async def resolve(self, origin_node_id, target, *, trust, policy_class) -> Any:
+    async def resolve(
+        self, origin_node_id, target, *, trust, policy_class, endpoints
+    ) -> Any:
+        assert origin_node_id in endpoints and target.node_id in endpoints
         self.resolved.append((target.worker_id, policy_class, trust.protocol))
+        self.targets.append(target)
         ladder = self._ladders.get(target.worker_id, [Transport.CONTROL_RELAY])
         if not trust.enabled:
             ladder = [Transport.CONTROL_RELAY]
@@ -555,3 +574,78 @@ def test_the_binding_check_runs_on_the_thread_that_hands_the_request_over() -> N
 
     loop_thread = asyncio.run(run())
     assert checked_on and loop_thread not in checked_on
+
+
+def _many_holders(count: int) -> tuple[_Workers, list[str]]:
+    holders = [f"wkr-{index}" for index in range(3, 3 + count)]
+    workers = _peers(**{"wkr-2": 5, **{holder: 1 for holder in holders}})
+    return workers, holders
+
+
+@pytest.mark.parametrize("count", [1, 12])
+def test_without_a_peer_transport_a_grant_reads_each_holder_once_and_resolves_none(
+    count: int,
+) -> None:
+    workers, holders = _many_holders(count)
+    network = _Network({})
+    network.peer_enabled = False
+    authority = _authority(workers, network=network)
+    for holder in holders:
+        asyncio.run(authority.record_holding(holder, [_HELD]))
+    workers.reads = network.endpoint_reads = 0
+
+    asyncio.run(_authorize(authority, "wkr-2", _REFERENCE))
+
+    assert _granted(workers).holder_id in holders
+    # The requester, then every reported holder in one batch.
+    assert workers.reads == 2
+    assert network.endpoint_reads == 1
+    assert network.resolved == []
+
+
+@pytest.mark.parametrize("count", [1, 12])
+def test_with_peer_transports_a_grant_resolves_a_bounded_few_holders(
+    count: int,
+) -> None:
+    workers, holders = _many_holders(count)
+    network = _Network({})
+    authority = _authority(workers, network=network)
+    for holder in holders:
+        asyncio.run(authority.record_holding(holder, [_HELD]))
+    workers.reads = network.endpoint_reads = 0
+
+    asyncio.run(_authorize(authority, "wkr-2", _REFERENCE))
+
+    resolved = min(count, 4)
+    assert workers.reads == 2
+    assert len(network.resolved) == resolved
+    # Each node's endpoint is read once: the requester's, then each holder resolved.
+    nodes = {"nde-2"} | {target.node_id for target in network.targets}
+    assert network.endpoint_reads == len(nodes)
+
+
+@pytest.mark.parametrize(
+    ("routable", "listening", "address", "direct"),
+    [
+        (True, True, "10.0.0.3:41000", True),
+        (False, True, "10.0.0.3:41000", False),
+        (True, False, "content://wkr-3", False),
+    ],
+)
+def test_a_holders_content_listener_is_its_nodes_host_and_its_bound_port(
+    routable: bool, listening: bool, address: str, direct: bool
+) -> None:
+    workers = _peers(**{"wkr-3": 4, "wkr-2": 5})
+    if not listening:
+        workers.listening.discard("wkr-3")
+    network = _Network({})
+    network.worker_directly_routable = routable
+    authority = _authority(workers, network=network)
+    asyncio.run(authority.record_holding("wkr-3", [_HELD]))
+
+    asyncio.run(_authorize(authority, "wkr-2", _REFERENCE))
+
+    (target,) = network.targets
+    assert target.routes == (address,)
+    assert target.protocols == ((CONTENT_PEER_PROTOCOL,) if listening else ())
+    assert target.directly_routable is direct

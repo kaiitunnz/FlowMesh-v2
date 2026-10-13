@@ -31,7 +31,6 @@ from server.telemetry.tracing import (
     serve_trace_id_int,
 )
 from shared.inference import InputResolutionBinding
-from shared.network.frame_stream import split_host_port
 from shared.resident.carriage import CONTROL_RELAY, ResidentCarriagePlan
 from shared.resident.contracts import (
     AdmissionHandoff,
@@ -57,6 +56,7 @@ from shared.telemetry.semconv import (
 )
 from shared.utils.ids import new_relay_session_id
 
+from ..network.service import NetworkPlane
 from ..network.state import (
     NetworkEndpointAdvertisement,
     PolicyClass,
@@ -2020,10 +2020,10 @@ class ResidentCapacityControl:
         port = deps.resident_listener_port_of(worker_id)
         if port <= 0:
             return None
-        endpoint = await deps.network.endpoint_for(node_id)
-        if endpoint is None or not endpoint.url:
-            return None
-        return f"{split_host_port(endpoint.url)[0]}:{port}"
+        address = NetworkPlane.listener_address(
+            await deps.network.endpoint_for(node_id), port
+        )
+        return address or None
 
     def _family_definition(
         self,

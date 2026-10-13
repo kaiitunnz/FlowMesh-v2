@@ -8,7 +8,9 @@ reachability for diagnostics.
 
 import logging
 import time
+from collections.abc import Mapping
 
+from shared.network.frame_stream import split_host_port
 from shared.schemas.network import RESIDENT_PEER_PROTOCOL
 from shared.utils.ids import new_route_origin_id
 
@@ -132,6 +134,31 @@ class NetworkPlane:
             return None
         return stamp_endpoint(node.network_endpoint, node.id)
 
+    @staticmethod
+    def node_host(endpoint: NetworkEndpointAdvertisement | None) -> str:
+        """Return the host a node is reached at; empty when it advertises none."""
+        if endpoint is None or not endpoint.url:
+            return ""
+        return split_host_port(endpoint.url)[0]
+
+    @staticmethod
+    def listener_address(
+        endpoint: NetworkEndpointAdvertisement | None, port: int
+    ) -> str:
+        """Return the ``host:port`` a listener a worker bound on ``port`` is dialed at,
+        on its node's host; empty when it binds none or the node advertises no host."""
+        host = NetworkPlane.node_host(endpoint)
+        return f"{host}:{port}" if host and port > 0 else ""
+
+    async def _endpoint(
+        self,
+        node_id: str,
+        known: Mapping[str, NetworkEndpointAdvertisement | None],
+    ) -> NetworkEndpointAdvertisement | None:
+        if node_id in known:
+            return known[node_id]
+        return await self.endpoint_for(node_id)
+
     async def resolve(
         self,
         origin_node_id: str,
@@ -139,6 +166,7 @@ class NetworkPlane:
         *,
         trust: TrustedPeerPolicy | None = None,
         policy_class: PolicyClass = PolicyClass.DEFAULT,
+        endpoints: Mapping[str, NetworkEndpointAdvertisement | None] | None = None,
     ) -> tuple[RouteOrigin, ResolvedRoute] | None:
         """Resolve an ordered candidate ladder from origin to the target listener.
 
@@ -146,14 +174,17 @@ class NetworkPlane:
         every candidate — the peer transports included — is graded against. ``trust``
         overrides the deployment policy for a caller that probes reachability, or for
         an origin restricted to ``control_relay``. ``policy_class`` scopes the origin
-        and its evidence among the dialers sharing that node's endpoint.
+        and its evidence among the dialers sharing that node's endpoint. ``endpoints``
+        are advertisements the caller already read, by node id, so neither end is read
+        again.
 
         Returns ``None`` when the origin advertises no network endpoint.
         """
-        origin_endpoint = await self.endpoint_for(origin_node_id)
+        known = endpoints or {}
+        origin_endpoint = await self._endpoint(origin_node_id, known)
         if origin_endpoint is None:
             return None
-        target_endpoint = await self.endpoint_for(listener.node_id)
+        target_endpoint = await self._endpoint(listener.node_id, known)
         self._invalidate_on_rotation(target_endpoint)
 
         origin = self._route_origin(origin_endpoint, origin_node_id, policy_class)

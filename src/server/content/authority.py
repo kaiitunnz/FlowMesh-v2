@@ -38,7 +38,6 @@ from shared.content import (
     ContentReference,
     ContentRouteObservation,
 )
-from shared.network.frame_stream import split_host_port
 from shared.schemas.command import MediatedOpMessage
 from shared.schemas.network import (
     CONTENT_PEER_PROTOCOL,
@@ -50,10 +49,10 @@ from shared.utils.ids import new_hydration_grant_id, new_relay_session_id
 from ..network.service import NetworkPlane
 from ..network.state import (
     ContentListenerTarget,
+    NetworkEndpointAdvertisement,
     PolicyClass,
     ResolvedRoute,
     RouteOrigin,
-    TrustedPeerPolicy,
 )
 from ..registries.worker import Worker, WorkerRegistry
 from .directory import ContentHolderDirectory, ContentHolderRecord
@@ -63,6 +62,9 @@ from .sessions import ContentTransferSessions
 BindingCheck = Callable[[str, str, ContentReference], bool]
 
 _PEER_TRANSPORTS = frozenset({Transport.WORKER_DIRECT, Transport.NODE_RELAY})
+# How many live holders a request resolves a route to before settling for the relay:
+# each costs a resolution, and the first few say as much about reachability as all.
+_PEER_SCAN_LIMIT = 4
 
 
 class HydrationDenial(StrEnum):
@@ -226,9 +228,10 @@ class ContentHydrationAuthority:
             # holder's report has lapsed. Its consumer reads the shared store instead.
             await self._deny(requester, reference, HydrationDenial.NOT_TRACKED)
             return
-        requester_host = await self._dial_host(requester)
+        endpoints: dict[str, NetworkEndpointAdvertisement | None] = {}
+        requester_host = await self._dial_host(requester, endpoints)
         chosen = await self._choose_holder(
-            reference, reported, requester, requester_host
+            reference, reported, requester, requester_host, endpoints
         )
         if chosen is None:
             await self._deny(requester, reference, HydrationDenial.HOLDER_UNAVAILABLE)
@@ -294,15 +297,29 @@ class ContentHydrationAuthority:
                 transfer.origin, transfer.target, [(transport, outcome)]
             )
 
-    async def _dial_host(self, requester: Worker) -> str:
-        """The host a worker's dialed connections come from: its node's advertised
-        address, which that node's certificate covers. Empty when it dials none."""
+    async def _endpoint(
+        self, node_id: str, endpoints: dict[str, NetworkEndpointAdvertisement | None]
+    ) -> NetworkEndpointAdvertisement | None:
+        """Return a node's advertisement, read at most once per request."""
+        if self._network is None:
+            return None
+        if node_id not in endpoints:
+            endpoints[node_id] = await self._network.endpoint_for(node_id)
+        return endpoints[node_id]
+
+    async def _dial_host(
+        self,
+        requester: Worker,
+        endpoints: dict[str, NetworkEndpointAdvertisement | None],
+    ) -> str:
+        """Return the host the requester's dialed connections come from, its node's
+        advertised address, which that node's certificate covers; empty when it dials
+        none."""
         if self._network is None or requester.capabilities.content_listener_port <= 0:
             return ""
-        endpoint = await self._network.endpoint_for(requester.node_id)
-        if endpoint is None or not endpoint.url:
-            return ""
-        return split_host_port(endpoint.url)[0]
+        return NetworkPlane.node_host(
+            await self._endpoint(requester.node_id, endpoints)
+        )
 
     async def _choose_holder(
         self,
@@ -310,17 +327,19 @@ class ContentHydrationAuthority:
         reported: list[ContentHolderRecord],
         requester: Worker,
         requester_host: str,
+        endpoints: dict[str, NetworkEndpointAdvertisement | None],
     ) -> tuple[Worker, _Route | None] | None:
-        """A live holder and how the requester reaches it, preferring a peer route.
+        """Return a live holder and its route, preferring one a peer transport
+        reaches; None when none is live. Evidence, not authority.
 
-        The first live holder reached over a peer transport wins; otherwise the first
-        live holder at all, reached over the relay. Evidence, not authority.
+        Without a peer transport to offer, the first live holder serves over the relay
+        unresolved. Otherwise the first few live holders are resolved in turn, and the
+        first reached over a peer transport wins.
         """
-        fallback: tuple[Worker, _Route | None] | None = None
-        for record in reported:
-            if record.worker_id == requester.id:
-                continue
-            holder = await self._workers.get_worker_async(record.worker_id)
+        candidates = [r for r in reported if r.worker_id != requester.id]
+        found = await self._workers.get_workers_async([r.worker_id for r in candidates])
+        live: list[Worker] = []
+        for record, holder in zip(candidates, found, strict=True):
             if holder is None or holder.incarnation != record.generation:
                 # The reporting worker is gone or came back as another incarnation, so
                 # its report describes content no one can serve. A restarted worker
@@ -331,26 +350,42 @@ class ContentHydrationAuthority:
                     record.worker_id,
                 )
                 continue
-            route = await self._route(requester, requester_host, holder)
+            live.append(holder)
+        if not live:
+            return None
+        if not self._offers_peer(requester_host):
+            return live[0], None
+        fallback: tuple[Worker, _Route | None] | None = None
+        for holder in live[:_PEER_SCAN_LIMIT]:
+            route = await self._route(requester, requester_host, holder, endpoints)
             if route is not None and route.peer:
                 return holder, route
             if fallback is None:
                 fallback = (holder, route)
         return fallback
 
+    def _offers_peer(self, requester_host: str) -> bool:
+        """Whether any holder could be reached over a peer transport."""
+        return (
+            self._network is not None
+            and bool(requester_host)
+            and self._network.peer_trust(CONTENT_PEER_PROTOCOL).enabled
+        )
+
     async def _route(
-        self, requester: Worker, requester_host: str, holder: Worker
+        self,
+        requester: Worker,
+        requester_host: str,
+        holder: Worker,
+        endpoints: dict[str, NetworkEndpointAdvertisement | None],
     ) -> _Route | None:
-        """How the requester reaches the holder's content listener, if the network
-        plane can say."""
+        """Resolve the requester's route to the holder's content listener; None when
+        the network plane gives none."""
         if self._network is None:
             return None
-        endpoint = await self._network.endpoint_for(holder.node_id)
-        port = holder.capabilities.content_listener_port
-        address = (
-            f"{split_host_port(endpoint.url)[0]}:{port}"
-            if endpoint is not None and endpoint.url and port > 0
-            else ""
+        address = NetworkPlane.listener_address(
+            await self._endpoint(holder.node_id, endpoints),
+            holder.capabilities.content_listener_port,
         )
         target = ContentListenerTarget(
             worker_id=holder.id,
@@ -361,14 +396,13 @@ class ContentHydrationAuthority:
             protocols=(CONTENT_PEER_PROTOCOL,) if address else (),
             directly_routable=bool(address) and self._network.worker_directly_routable,
         )
-        # A requester with no address of its own to be bound to dials nothing.
-        trust = (
-            self._network.peer_trust(CONTENT_PEER_PROTOCOL)
-            if requester_host
-            else TrustedPeerPolicy()
-        )
+        await self._endpoint(requester.node_id, endpoints)
         resolved = await self._network.resolve(
-            requester.node_id, target, trust=trust, policy_class=PolicyClass.CONTENT
+            requester.node_id,
+            target,
+            trust=self._network.peer_trust(CONTENT_PEER_PROTOCOL),
+            policy_class=PolicyClass.CONTENT,
+            endpoints=endpoints,
         )
         if resolved is None or resolved[1].probe:
             return None
