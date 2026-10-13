@@ -20,6 +20,19 @@ from dataclasses import dataclass
 
 from ..clients.redis import RedisClient, content_holders_key
 
+# Deletes a holder's field only while it still records the given incarnation.
+_FORGET_GENERATION = """
+local value = redis.call('HGET', KEYS[1], ARGV[1])
+if not value then
+    return 0
+end
+local ok, report = pcall(cjson.decode, value)
+if ok and tonumber(report['generation']) == tonumber(ARGV[2]) then
+    return redis.call('HDEL', KEYS[1], ARGV[1])
+end
+return 0
+"""
+
 
 @dataclass(frozen=True)
 class ContentHolderRecord:
@@ -77,29 +90,6 @@ class ContentHolderDirectory:
             pipeline.expire(key, ttl)
         await pipeline.execute()
 
-    async def record(
-        self,
-        scope: str,
-        digest: str,
-        *,
-        worker_id: str,
-        node_id: str,
-        generation: int,
-    ) -> ContentHolderRecord:
-        """Note that a worker holds this object, refreshing an earlier report."""
-        record = ContentHolderRecord(
-            worker_id=worker_id,
-            node_id=node_id,
-            generation=generation,
-            expires_at_epoch=time.time() + self._ttl,
-        )
-        key = content_holders_key(scope, digest)
-        await self._rds.asyncio.hash_set(
-            key, {worker_id: self._field(record.expires_at_epoch, node_id, generation)}
-        )
-        await self._rds.asyncio.expire(key, int(self._ttl * 2) + 1)
-        return record
-
     async def holders(self, scope: str, digest: str) -> list[ContentHolderRecord]:
         """Every live holder reported for this object, freshest report first."""
         raw = (
@@ -123,8 +113,18 @@ class ContentHolderDirectory:
         records.sort(key=lambda r: r.expires_at_epoch, reverse=True)
         return records
 
-    async def forget(self, scope: str, digest: str, worker_id: str) -> None:
-        """Drop one holder's report, for a worker that can no longer serve it."""
-        await self._rds.asyncio.hash_delete(
-            content_holders_key(scope, digest), worker_id
+    async def forget(
+        self, scope: str, digest: str, worker_id: str, generation: int
+    ) -> None:
+        """Drop one holder's report, for a worker that can no longer serve it.
+
+        Only the report of that worker incarnation goes, so a restarted holder's fresh
+        report, landing meanwhile under the same worker, stays.
+        """
+        await self._rds.asyncio.eval(
+            _FORGET_GENERATION,
+            1,
+            content_holders_key(scope, digest),
+            worker_id,
+            str(generation),
         )

@@ -348,6 +348,7 @@ class ContentHydrationAuthority:
                     reference.authorization_scope,
                     reference.content_digest,
                     record.worker_id,
+                    record.generation,
                 )
                 continue
             live.append(holder)

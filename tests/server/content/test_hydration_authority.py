@@ -1,6 +1,7 @@
 """The control plane's decision to authorize one hydration, and what it refuses."""
 
 import asyncio
+import json
 import threading
 from collections.abc import Callable, Coroutine
 from types import SimpleNamespace
@@ -77,6 +78,15 @@ class _FakeRedis:
     async def hash_delete(self, key: str, *fields: str) -> None:
         for field in fields:
             self.hashes.get(key, {}).pop(field, None)
+
+    async def eval(self, script: str, numkeys: int, key: str, *args: str) -> int:
+        """The directory's one script: drop a holder's field of one incarnation."""
+        worker_id, generation = args
+        value = self.hashes.get(key, {}).get(worker_id)
+        if value is None or json.loads(value)["generation"] != int(generation):
+            return 0
+        del self.hashes[key][worker_id]
+        return 1
 
     async def expire(self, key: str, ttl_sec: int) -> bool:
         return True
