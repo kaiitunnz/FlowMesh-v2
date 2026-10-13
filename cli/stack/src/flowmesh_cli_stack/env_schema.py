@@ -1680,9 +1680,9 @@ STACK_ENV_SCHEMA = EnvSchema(
                 ),
                 EnvVar(
                     "MODEL_CLEANUP_AFTER_UPLOAD",
-                    "0",
-                    var_type=EnvVarType.INT,
-                    min_value=0,
+                    "false",
+                    description="Delete a task's local artifacts once published.",
+                    var_type=EnvVarType.BOOL,
                 ),
                 EnvVar(
                     "SERVE_DEFAULT_TTL_SEC",

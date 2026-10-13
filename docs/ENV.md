@@ -200,6 +200,7 @@ Spark), set `DOCKER_GPU_RUNTIME=` in the stack env.
 | `WORKER_TAGS` | `` | Scheduler hints |
 | `WORKER_COST_PER_HOUR` | `1.0` | Cost metadata |
 | `WORKER_UPLOAD_RESULTS` | `false` | Upload artifacts when no destination set |
+| `MODEL_CLEANUP_AFTER_UPLOAD` | `false` | Delete a task's local artifacts once published |
 | `WORKER_EXECUTOR_IDLE_CLEANUP_SEC` | `60` | Seconds a worker waits before unloading an idle executor to release the resources it holds; higher values avoid reload thrash between tasks but keep those resources reserved while idle |
 | `WORKER_FOREIGN_GPU_GATE` | `true` | Report a GPU as unavailable while a process outside FlowMesh uses it |
 | `WORKER_FOREIGN_GPU_MEM_MIB` | `1024` | Foreign GPU-memory threshold in MiB |

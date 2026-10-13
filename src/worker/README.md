@@ -57,14 +57,10 @@ At startup the worker:
 | `LOG_LEVEL` | `INFO` | Worker log level. |
 | `WORKER_COST_PER_HOUR` | `1.0` | Hourly cost in USD; reported with heartbeats. |
 | `FLOWMESH_BASE_URL` | `http://localhost:8000` | Server URL used to build artifact download links and to hydrate cross-node SSH input bundles. |
-| `MODEL_ARCHIVE_USE_PIGZ` | `1` | Enable multithreaded `pigz` compression (set `0`/`false` to disable). |
-| `MODEL_ARCHIVE_COMPRESSION_LEVEL` | `6` | Gzip compression level (`0-9`). |
-| `MODEL_ARCHIVE_PIGZ_THREADS` | – | Force a specific thread count for `pigz`; defaults to all CPUs. |
-| `MODEL_ARCHIVE_PIGZ_BIN` | `pigz` | Path to the `pigz` binary. |
-| `MODEL_ARCHIVE_TAR_BIN` | `tar` | Tar executable used before compression. |
 | `WORKER_NETWORK_BANDWIDTH_BYTES_PER_SEC` | empty | Network bandwidth the worker advertises. |
 | `WORKER_HB_FILE` | – | Full path to the worker heartbeat file. |
 | `WORKER_UPLOAD_RESULTS` | `false` | Whether the worker should always upload artifacts to the server if spec.output.destination is unspecified. |
+| `MODEL_CLEANUP_AFTER_UPLOAD` | `false` | Delete a task's local artifacts once they are published. |
 | `WORKER_EXECUTOR_IDLE_CLEANUP_SEC` | `60` | Seconds a worker waits before unloading an idle executor to release the resources it holds; higher values avoid reload thrash between tasks but keep those resources reserved while idle. |
 | `WORKER_FOREIGN_GPU_GATE` | `true` | Report a GPU as unavailable while a process outside FlowMesh uses it. |
 | `WORKER_FOREIGN_GPU_MEM_MIB` | `1024` | Foreign GPU-memory threshold in MiB. |
