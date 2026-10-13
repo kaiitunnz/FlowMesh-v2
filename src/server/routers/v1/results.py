@@ -1,19 +1,17 @@
 import asyncio
-import gzip
-import io
+import itertools
 import logging
 import mimetypes
 import os
-import stat
-import tarfile
-import tempfile
-import time
+import threading
+from collections.abc import Callable, Iterator
+from functools import partial
 from pathlib import Path
-from typing import BinaryIO
+from typing import Any, BinaryIO
 
+from anyio import to_thread
 from fastapi import (
     APIRouter,
-    BackgroundTasks,
     Depends,
     File,
     HTTPException,
@@ -21,10 +19,22 @@ from fastapi import (
     UploadFile,
     status,
 )
-from fastapi.responses import FileResponse, Response
-from starlette.types import Receive, Scope, Send
+from fastapi.responses import (
+    FileResponse,
+    PlainTextResponse,
+    Response,
+    StreamingResponse,
+)
+from starlette.datastructures import Headers, MutableHeaders
+from starlette.types import Message, Receive, Scope, Send
 
 from shared.schemas.result import RESULT_MEDIA_TYPE, AnyExecutorResult, result_file_path
+from shared.tasks.artifact_binding import (
+    FINAL_REVISION,
+    ArtifactBinding,
+    ArtifactKind,
+    is_revision,
+)
 from shared.utils.atomic import atomic_write_stream, is_atomic_temp
 from shared.utils.manifest import (
     ARTIFACTS_DIR,
@@ -39,7 +49,6 @@ from shared.utils.nofollow import (
     join_relative,
     open_below,
     open_dir,
-    open_dir_at,
     open_regular,
     walk,
 )
@@ -55,7 +64,17 @@ from ...auth.security import (
     require_permission,
 )
 from ...hooks import ResourceAction, ResourceKind
+from ...registries.artifacts import ArtifactBindings
+from ...schemas.artifacts import PublishedArtifact, PublishedArtifactList
 from ...schemas.common import PathResponse
+from ...task.artifact_reads import (
+    ArtifactDownload,
+    ArtifactNotFound,
+    BundleFile,
+    BundleStream,
+    artifact_bundle_files,
+    resolve_download,
+)
 from ...task.models import TERMINAL_TASK_STATUSES
 from ...task.results import ResultUnavailable, ResultUnreadable
 from ...task.runtime import TaskRuntime
@@ -65,6 +84,9 @@ _BUNDLE_SECTIONS_CONCRETE = ("results", "artifacts", "logs")
 _BUNDLE_SECTIONS_ACCEPTED = (*_BUNDLE_SECTIONS_CONCRETE, "all")
 _BUNDLE_SECTIONS_DEFAULT = ("results", "artifacts")
 _LOGS_NAME = "logs.jsonl"
+# Archive views and bundles streaming at once; each holds a thread.
+_STREAM_SLOTS = 4
+_RETRY_AFTER_SEC = 5
 
 router = APIRouter(prefix="/results", tags=["Results"])
 
@@ -159,15 +181,99 @@ def _store_artifact(file: UploadFile, base_dir: Path, relative_path: Path) -> No
 
 
 @router.get(
+    "/{task_id}/artifacts",
+    summary="List a result's artifacts",
+    description="List the artifacts a task published, optionally at one revision.",
+    response_description="Published artifacts",
+)
+async def list_result_artifacts(
+    task_id: str,
+    revision: str | None = Query(
+        default=None, description="Only this revision: final or step-<n>."
+    ),
+    principal: PrincipalContext = Depends(authenticate_connection),
+    runtime: TaskRuntime = Depends(get_runtime),
+    logger: logging.Logger = Depends(get_logger),
+) -> PublishedArtifactList:
+    await require_permission(
+        principal, ResourceKind.RESULT, task_id, ResourceAction.READ, logger
+    )
+    if revision is not None:
+        _check_revision(revision)
+    bindings = await _artifact_bindings(runtime, task_id)
+    return PublishedArtifactList(
+        task_id=task_id,
+        artifacts=[
+            _published(binding)
+            for (rev, _), binding in sorted(bindings.items(), key=_listing_order)
+            if revision is None or rev == revision
+        ],
+    )
+
+
+@router.get(
     "/{task_id}/files/{filename:path}",
     summary="Download a result artifact",
-    description="Download an artifact file for a task result.",
+    description=(
+        "Download a published artifact, a file inside a published directory, or the "
+        "task's results.json."
+    ),
     response_description="Result file",
-    response_class=FileResponse,
 )
 async def download_result_file(
     task_id: str,
     filename: str,
+    revision: str = Query(
+        default=FINAL_REVISION, description="Revision: final or step-<n>."
+    ),
+    principal: PrincipalContext = Depends(authenticate_connection),
+    runtime: TaskRuntime = Depends(get_runtime),
+    logger: logging.Logger = Depends(get_logger),
+) -> Response:
+    await require_permission(
+        principal, ResourceKind.RESULT, task_id, ResourceAction.READ, logger
+    )
+    _check_artifact_path(filename)
+    _check_revision(revision)
+    if filename == RESULTS_NAME and revision == FINAL_REVISION:
+        return Response(
+            await _read_result_bytes(runtime, task_id), media_type=RESULT_MEDIA_TYPE
+        )
+    bindings = await _artifact_bindings(runtime, task_id)
+    try:
+        download = await asyncio.to_thread(
+            resolve_download, runtime.result_reader, bindings, revision, filename
+        )
+    except ArtifactNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="artifact not found"
+        ) from exc
+    except ResultUnavailable as exc:
+        raise _store_unavailable(exc) from exc
+    except ResultUnreadable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to read artifact: {exc}",
+        ) from exc
+    release = _STREAMS.take() if download.is_view else None
+    return ArtifactResponse(download, release)
+
+
+@router.get(
+    "/{task_id}/bundle",
+    summary="Download a full result bundle",
+    description=(
+        "Download a gzip-compressed tar of a settled task's result, its published "
+        "artifacts at one revision, and its logs."
+    ),
+    response_description="Result bundle archive",
+)
+async def download_result_bundle(
+    task_id: str,
+    include: list[str] = Query(default_factory=list),
+    revision: str = Query(
+        default=FINAL_REVISION, description="Revision of the artifacts bundled."
+    ),
     principal: PrincipalContext = Depends(authenticate_connection),
     runtime: TaskRuntime = Depends(get_runtime),
     results_dir: Path = Depends(get_results_dir),
@@ -176,49 +282,8 @@ async def download_result_file(
     await require_permission(
         principal, ResourceKind.RESULT, task_id, ResourceAction.READ, logger
     )
-    sanitized = Path(filename)
-    base_dir = result_file_path(results_dir, task_id).parent
-    relative_path = _resolve_artifact_path(filename)
-
-    opened = await asyncio.to_thread(open_below, base_dir, relative_path)
-    if opened is None:
-        if len(sanitized.parts) != 1:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="artifact not found"
-            )
-        if sanitized.name == RESULTS_NAME:
-            return Response(
-                await _read_result_bytes(runtime, task_id),
-                media_type=RESULT_MEDIA_TYPE,
-            )
-        opened = await asyncio.to_thread(open_below, base_dir, sanitized)
-        if opened is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="artifact not found"
-            )
-    return _file_response(opened, sanitized.name)
-
-
-@router.get(
-    "/{task_id}/bundle",
-    summary="Download a full result bundle",
-    description="Download a tar archive containing the full task result directory.",
-    response_description="Result bundle archive",
-    response_class=FileResponse,
-)
-async def download_result_bundle(
-    task_id: str,
-    background_tasks: BackgroundTasks,
-    include: list[str] = Query(default_factory=list),
-    principal: PrincipalContext = Depends(authenticate_connection),
-    runtime: TaskRuntime = Depends(get_runtime),
-    results_dir: Path = Depends(get_results_dir),
-    logger: logging.Logger = Depends(get_logger),
-) -> FileResponse:
-    await require_permission(
-        principal, ResourceKind.RESULT, task_id, ResourceAction.READ, logger
-    )
     sections = _resolve_bundle_sections(include)
+    _check_revision(revision)
 
     record = runtime.get_record(task_id)
     if record is not None and record.status not in TERMINAL_TASK_STATUSES:
@@ -231,39 +296,74 @@ async def download_result_bundle(
         )
 
     base_dir = result_file_path(results_dir, task_id).parent
-    has_dir = await asyncio.to_thread(_has_dir, base_dir)
     try:
         result = (
             await asyncio.to_thread(runtime.read_result_bytes, task_id)
             if "results" in sections
             else None
         )
-    except (ResultUnreadable, ResultUnavailable) as exc:
+    except ResultUnavailable as exc:
+        raise _store_unavailable(exc) from exc
+    except ResultUnreadable as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to prepare result bundle: {exc}",
         ) from exc
-    if result is None and not has_dir:
+    bindings = (
+        await asyncio.to_thread(runtime.artifact_bindings, task_id) or {}
+        if "artifacts" in sections
+        else {}
+    )
+    has_logs = "logs" in sections and await asyncio.to_thread(
+        _has_dir, base_dir / LOGS_DIR
+    )
+    if result is None and not bindings and not has_logs:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="result bundle not found"
         )
+    reader = runtime.result_reader
 
+    def files() -> Iterator[BundleFile]:
+        for section in sections:
+            if section == "results" and result is not None:
+                yield BundleFile(
+                    f"{task_id}/{RESULTS_NAME}", len(result), partial(iter, (result,))
+                )
+            elif section == "artifacts":
+                yield from artifact_bundle_files(
+                    reader, bindings, revision, f"{task_id}/{ARTIFACTS_DIR}"
+                )
+            elif section == "logs":
+                yield from _disk_files(base_dir, LOGS_DIR, f"{task_id}/{LOGS_DIR}")
+
+    release = _STREAMS.take()
+    chunks = BundleStream(files, task_id)
     try:
-        bundle_path = await asyncio.to_thread(
-            _create_result_bundle_archive, task_id, base_dir, result, sections
-        )
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to prepare result bundle: {exc}",
-        ) from exc
+        first = await asyncio.to_thread(next, chunks, b"")
+    except BaseException as exc:
+        chunks.close()
+        release()
+        if isinstance(exc, ResultUnavailable):
+            raise _store_unavailable(exc) from exc
+        if isinstance(exc, ResultUnreadable):
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to prepare result bundle: {exc}",
+            ) from exc
+        raise
 
-    background_tasks.add_task(_cleanup_bundle_file, bundle_path)
-    return FileResponse(
-        bundle_path,
+    def finish() -> None:
+        chunks.close()
+        release()
+
+    return _ReleasingStream(
+        itertools.chain((first,), chunks),
+        finish,
         media_type="application/x-tar",
-        filename=f"{task_id}.tar.gz",
-        headers={"Content-Encoding": "gzip"},
+        headers={
+            "Content-Encoding": "gzip",
+            "Content-Disposition": f'attachment; filename="{task_id}.tar.gz"',
+        },
     )
 
 
@@ -371,112 +471,6 @@ def _resolve_bundle_sections(include: list[str]) -> tuple[str, ...]:
     return ordered or _BUNDLE_SECTIONS_DEFAULT
 
 
-def _create_result_bundle_archive(
-    task_id: str,
-    base_dir: Path,
-    result: bytes | None,
-    sections: tuple[str, ...] = _BUNDLE_SECTIONS_DEFAULT,
-) -> Path:
-    with tempfile.NamedTemporaryFile(
-        prefix=f"flowmesh-result-{task_id}-",
-        suffix=".tar.gz",
-        delete=False,
-    ) as tmp:
-        bundle_path = Path(tmp.name)
-
-    try:
-        with (
-            gzip.open(bundle_path, mode="wb") as fileobj,
-            tarfile.open(fileobj=fileobj, mode="w") as archive,
-        ):
-            for section in sections:
-                if section == "results":
-                    if result is not None:
-                        info = tarfile.TarInfo(f"{task_id}/{RESULTS_NAME}")
-                        info.size = len(result)
-                        info.mode = 0o644
-                        info.mtime = int(time.time())
-                        archive.addfile(info, io.BytesIO(result))
-                    continue
-                name = _bundle_section_name(section)
-                if name is not None:
-                    _add_section(archive, base_dir, name, f"{task_id}/{name}")
-    except Exception:
-        bundle_path.unlink(missing_ok=True)
-        raise
-
-    return bundle_path
-
-
-def _add_section(
-    archive: tarfile.TarFile, base_dir: Path, name: str, arcname: str
-) -> None:
-    """Add the section ``name`` of a task's results and everything under it without
-    following a link.
-
-    The walk holds each directory open and reads every name relative to it, so a
-    link, or a directory swapped for one, is archived as the link. A task directory
-    that is a link has no sections. In-flight atomic writes and names removed or
-    replaced during the walk are left out.
-    """
-    try:
-        with open_dir(base_dir) as base_fd:
-            if not _add_entry(archive, base_fd, name, arcname):
-                return
-            with open_dir_at(base_fd, name) as top_fd:
-                for rel_dir, dirs, others, dirfd in walk(top_fd):
-                    dirs[:] = [entry for entry in dirs if not is_atomic_temp(entry)]
-                    for entry in sorted([*dirs, *others]):
-                        if not is_atomic_temp(entry):
-                            _add_entry(
-                                archive,
-                                dirfd,
-                                entry,
-                                f"{arcname}/{join_relative(rel_dir, entry)}",
-                            )
-    except (FileNotFoundError, PathRefused):
-        return
-
-
-def _add_entry(archive: tarfile.TarFile, dirfd: int, name: str, arcname: str) -> bool:
-    """Archive ``name`` in ``dirfd`` without following it; return whether it is a
-    directory to walk. A special file, and a name removed or replaced while it is
-    read, is left out."""
-    try:
-        st = os.stat(name, dir_fd=dirfd, follow_symlinks=False)
-        if stat.S_ISREG(st.st_mode):
-            if (opened := open_regular(dirfd, name)) is not None:
-                with opened as fh:
-                    info = archive.gettarinfo(arcname=arcname, fileobj=fh)
-                    if info is not None and info.isreg():
-                        archive.addfile(info, fh)
-                    elif info is not None and info.islnk():
-                        archive.addfile(info)
-            return False
-        info = tarfile.TarInfo(arcname)
-        if stat.S_ISDIR(st.st_mode):
-            info.type = tarfile.DIRTYPE
-        elif stat.S_ISLNK(st.st_mode):
-            info.type = tarfile.SYMTYPE
-            info.linkname = os.readlink(name, dir_fd=dirfd)
-        else:
-            return False
-    except FileNotFoundError:
-        return False
-    info.mode = stat.S_IMODE(st.st_mode)
-    info.uid, info.gid, info.mtime = st.st_uid, st.st_gid, int(st.st_mtime)
-    archive.addfile(info)
-    return info.isdir()
-
-
-def _bundle_section_name(section: str) -> str | None:
-    if section == "artifacts":
-        return ARTIFACTS_DIR
-    if section == "logs":
-        return LOGS_DIR
-    return None
-
-
 async def _read_result_bytes(runtime: TaskRuntime, task_id: str) -> bytes:
     try:
         result = await asyncio.to_thread(runtime.read_result_bytes, task_id)
@@ -492,5 +486,305 @@ async def _read_result_bytes(runtime: TaskRuntime, task_id: str) -> bytes:
     return result
 
 
-def _cleanup_bundle_file(path: Path) -> None:
-    path.unlink(missing_ok=True)
+def _check_artifact_path(filename: str) -> None:
+    if not all(
+        is_plain_segment(part) and not is_atomic_temp(part)
+        for part in filename.split("/")
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="invalid filename"
+        )
+
+
+def _check_revision(revision: str) -> None:
+    if not is_revision(revision):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"invalid revision {revision!r}: expected final or step-<n>",
+        )
+
+
+async def _artifact_bindings(runtime: TaskRuntime, task_id: str) -> ArtifactBindings:
+    bindings = await asyncio.to_thread(runtime.artifact_bindings, task_id)
+    if bindings is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="result not found"
+        )
+    return bindings
+
+
+def _listing_order(item: tuple[tuple[str, str], ArtifactBinding]) -> tuple[Any, ...]:
+    (revision, name), _ = item
+    step = None if revision == FINAL_REVISION else int(revision.removeprefix("step-"))
+    return (step is None, step or 0, name)
+
+
+def _published(binding: ArtifactBinding) -> PublishedArtifact:
+    sha256 = None
+    if binding.kind is ArtifactKind.FILE:
+        sha256 = binding.reference.content_digest
+    elif binding.archive is not None:
+        sha256 = binding.archive.sha256
+    return PublishedArtifact(
+        name=binding.name,
+        revision=binding.revision,
+        kind=binding.kind.value,
+        size_bytes=binding.size_bytes,
+        files=binding.files,
+        sha256=sha256,
+        archive_of=binding.of,
+        published_at=binding.published_at,
+    )
+
+
+def _store_unavailable(exc: Exception) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail=f"the content store is unreachable: {exc}",
+        headers={"Retry-After": str(_RETRY_AFTER_SEC)},
+    )
+
+
+class _StreamSlots:
+    """A fixed number of archive views and bundles the root streams at once.
+
+    Each holds a thread and, for a bundle, a compressor, so a request past the cap
+    is refused with ``503`` and a ``Retry-After`` rather than queued behind them.
+    """
+
+    def __init__(self, capacity: int) -> None:
+        self._capacity = capacity
+        self._held = 0
+        self._lock = threading.Lock()
+
+    def take(self) -> Callable[[], None]:
+        """A slot's release, or a ``503`` when every slot is held."""
+        with self._lock:
+            if self._held >= self._capacity:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="too many archive and bundle downloads in flight",
+                    headers={"Retry-After": str(_RETRY_AFTER_SEC)},
+                )
+            self._held += 1
+        released = threading.Event()
+
+        def release() -> None:
+            if not released.is_set():
+                released.set()
+                with self._lock:
+                    self._held -= 1
+
+        return release
+
+
+_STREAMS = _StreamSlots(_STREAM_SLOTS)
+
+
+class _ReleasingStream(StreamingResponse):
+    """A streamed response that gives back its stream slot however it ends."""
+
+    def __init__(
+        self,
+        content: Iterator[bytes],
+        release: Callable[[], Any],
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(content, **kwargs)
+        self._release = release
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self._release()
+
+
+class ArtifactResponse(Response):
+    """A published object streamed from the store, whole or as one range.
+
+    It carries the object's ``ETag``, its whole bytes' ``Repr-Digest`` and its
+    publication time as ``Last-Modified``. A request naming one range, unconditioned
+    or whose ``If-Range`` still matches, is answered ``206`` with that slice; several
+    ranges are answered whole. A failure before the first byte answers ``503`` while
+    the store is unreachable and ``500`` for a missing or corrupt object; a failure
+    after it ends the response short.
+    """
+
+    def __init__(
+        self, download: ArtifactDownload, release: Callable[[], None] | None = None
+    ) -> None:
+        super().__init__()
+        self._download = download
+        self._release = release
+        headers = {
+            "etag": download.etag,
+            "repr-digest": download.repr_digest,
+            "accept-ranges": "bytes",
+            "content-type": download.media_type
+            or mimetypes.guess_type(download.name)[0]
+            or "application/octet-stream",
+        }
+        if (modified := download.last_modified) is not None:
+            headers["last-modified"] = modified
+        self.init_headers(headers)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await self._respond(scope, receive, send)
+        finally:
+            if self._release is not None:
+                self._release()
+
+    async def _respond(self, scope: Scope, receive: Receive, send: Send) -> None:
+        download = self._download
+        size = download.size_bytes
+        requested = Headers(scope=scope)
+        headers = MutableHeaders(raw=list(self.raw_headers))
+        span = None
+        if (header := requested.get("range")) is not None and self._range_applies(
+            requested.get("if-range")
+        ):
+            try:
+                span = _single_range(header, size)
+            except _MalformedRange as exc:
+                await PlainTextResponse(str(exc), status_code=400)(scope, receive, send)
+                return
+            except _UnsatisfiableRange:
+                await PlainTextResponse(
+                    "", status_code=416, headers={"content-range": f"bytes */{size}"}
+                )(scope, receive, send)
+                return
+        if span is None:
+            status_code, chunks = 200, download.whole()
+            headers["content-length"] = str(size)
+        else:
+            start, end = span
+            status_code, chunks = 206, download.part(start, end - start)
+            headers["content-range"] = f"bytes {start}-{end - 1}/{size}"
+            headers["content-length"] = str(end - start)
+        try:
+            await self._send(scope, send, status_code, headers, chunks)
+        finally:
+            close = getattr(chunks, "close", None)
+            if close is not None:
+                await to_thread.run_sync(close)
+
+    def _range_applies(self, if_range: str | None) -> bool:
+        return if_range is None or if_range in (
+            self._download.etag,
+            self._download.last_modified,
+        )
+
+    async def _send(
+        self,
+        scope: Scope,
+        send: Send,
+        status_code: int,
+        headers: MutableHeaders,
+        chunks: Iterator[bytes],
+    ) -> None:
+        end = object()
+        try:
+            chunk = await to_thread.run_sync(next, chunks, end)
+        except ResultUnavailable as exc:
+            await PlainTextResponse(
+                f"the content store is unreachable: {exc}",
+                status_code=503,
+                headers={"retry-after": str(_RETRY_AFTER_SEC)},
+            )(scope, _no_receive, send)
+            return
+        except ResultUnreadable as exc:
+            await PlainTextResponse(f"Failed to read artifact: {exc}", status_code=500)(
+                scope, _no_receive, send
+            )
+            return
+        await send(
+            {
+                "type": "http.response.start",
+                "status": status_code,
+                "headers": headers.raw,
+            }
+        )
+        if scope.get("method", "GET").upper() == "HEAD":
+            await send({"type": "http.response.body", "body": b"", "more_body": False})
+            return
+        while chunk is not end:
+            assert isinstance(chunk, bytes)
+            await send({"type": "http.response.body", "body": chunk, "more_body": True})
+            chunk = await to_thread.run_sync(next, chunks, end)
+        await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+
+async def _no_receive() -> Message:
+    return {"type": "http.disconnect"}
+
+
+class _MalformedRange(ValueError):
+    pass
+
+
+class _UnsatisfiableRange(ValueError):
+    pass
+
+
+def _single_range(header: str, size: int) -> tuple[int, int] | None:
+    """The one byte range ``[start, end)`` a ``Range`` header names, or None when it
+    names several, which is answered whole."""
+    units, sep, ranges = header.partition("=")
+    if units.strip().lower() != "bytes" or not sep:
+        raise _MalformedRange("Only support bytes range")
+    parts = [part.strip() for part in ranges.split(",")]
+    parts = [part for part in parts if part not in {"", "-"}]
+    if len(parts) > 1:
+        return None
+    if not parts or "-" not in parts[0]:
+        raise _MalformedRange("Range header: range must be requested")
+    first, _, last = (piece.strip() for piece in parts[0].partition("-"))
+    try:
+        if first:
+            start = int(first)
+            end = min(int(last) + 1, size) if last else size
+        else:
+            start, end = max(size - int(last), 0), size
+    except ValueError as exc:
+        raise _MalformedRange("Range header: range must be requested") from exc
+    if not 0 <= start < size:
+        raise _UnsatisfiableRange()
+    if start >= end:
+        raise _MalformedRange("Range header: start must be less than end")
+    return start, end
+
+
+def _disk_files(base_dir: Path, section: str, top: str) -> Iterator[BundleFile]:
+    """The regular files under a section of a task's results directory, read without
+    following a link; a link, an in-flight write and a special file are left out."""
+    try:
+        with open_dir(base_dir, section) as top_fd:
+            for rel_dir, dirs, others, dirfd in walk(top_fd):
+                dirs[:] = [entry for entry in dirs if not is_atomic_temp(entry)]
+                for entry in sorted(others):
+                    if is_atomic_temp(entry):
+                        continue
+                    opened = open_regular(dirfd, entry)
+                    if opened is None:
+                        continue
+                    with opened as fh:
+                        st = os.fstat(fh.fileno())
+                        yield BundleFile(
+                            f"{top}/{join_relative(rel_dir, entry)}",
+                            st.st_size,
+                            partial(_read_exactly, fh, st.st_size),
+                            int(st.st_mtime),
+                        )
+    except (FileNotFoundError, PathRefused):
+        return
+
+
+def _read_exactly(fh: BinaryIO, size: int) -> Iterator[bytes]:
+    while size > 0:
+        chunk = fh.read(min(size, 1 << 20))
+        if not chunk:
+            raise OSError("a log file shrank while it was bundled")
+        size -= len(chunk)
+        yield chunk

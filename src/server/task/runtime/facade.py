@@ -3818,6 +3818,11 @@ class TaskRuntime:
         binding = self.result_binding(task_id)
         return self._results.read_bytes(binding) if binding is not None else None
 
+    @property
+    def result_reader(self) -> ResultReader:
+        """The reader results and published artifacts stream from the store through."""
+        return self._results
+
     def recovery_disposition(
         self, workflow_id: str, task_id: str
     ) -> RecoveryDisposition | None:

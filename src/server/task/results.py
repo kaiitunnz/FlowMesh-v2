@@ -11,6 +11,8 @@ immutable reference makes safe to reuse.
 
 import threading
 from collections import OrderedDict
+from collections.abc import Callable, Iterator
+from functools import partial
 
 from shared.content import (
     ContentReference,
@@ -90,6 +92,18 @@ class ResultReader:
                 f"the stored tree {reference.content_digest} is not a manifest: {exc}"
             ) from exc
 
+    def open(self, reference: ContentReference) -> Iterator[bytes]:
+        """An object's bytes in chunks, raising before the last one unless they
+        verify. Raises ``ResultUnavailable`` while the store cannot be reached and
+        ``ResultUnreadable`` for an object that is missing or corrupt."""
+        return _classified(partial(self._store.open, reference))
+
+    def open_range(
+        self, reference: ContentReference, start: int, length: int
+    ) -> Iterator[bytes]:
+        """``length`` unverified bytes of an object from ``start``, in chunks."""
+        return _classified(partial(self._store.open_range, reference, start, length))
+
     def verify(self, reference: ContentReference) -> None:
         """Read one object from the store itself, bypassing the cache, and verify it.
 
@@ -131,6 +145,15 @@ class ResultReader:
             while self._cached_bytes > self._cache_max_bytes:
                 _, evicted = self._cache.popitem(last=False)
                 self._cached_bytes -= _charge(evicted)
+
+
+def _classified(open_chunks: Callable[[], Iterator[bytes]]) -> Iterator[bytes]:
+    try:
+        yield from open_chunks()
+    except ContentUnavailable as exc:
+        raise ResultUnavailable(str(exc)) from exc
+    except ContentStoreError as exc:
+        raise ResultUnreadable(str(exc)) from exc
 
 
 def _charge(data: bytes) -> int:

@@ -1,16 +1,22 @@
 """A freed workflow's tasks and outputs read as they did while it was resident."""
 
+import asyncio
+import logging
 from collections.abc import Callable
-from typing import Any
+from pathlib import Path
+from typing import Any, cast
 from urllib.parse import urlencode
 
 import pytest
 from starlette.datastructures import QueryParams
 
+from server.routers.v1 import results as results_router
 from server.task.models import TaskOrder, TaskStatus, task_order
 from server.task.runtime import TaskRuntime
 from server.utils.query import QueryFilter
+from tests.server.asgi_responses import serve
 from tests.server.dispatch_helpers import record_dispatch
+from tests.server.result_store import result_payload
 from tests.server.task.test_region_outputs import (
     _CONCAT,
     _FAN_OVER_CHILD,
@@ -31,6 +37,7 @@ from tests.server.task.test_settled_history import (
 )
 from tests.server.task.test_v2_orchestration import LINEAR
 from tests.support.waiting import pop_ready
+from worker.content.artifacts import ArtifactPublisher
 
 _FIELDS = frozenset({"workflow_id", "status", "task_type", "completed", "depends_on"})
 
@@ -309,3 +316,70 @@ def test_a_store_outage_fails_a_freed_task_read() -> None:
     setattr(registry, "load_history", down)
     with pytest.raises(ConnectionError):
         runtime.describe_task(task_id)
+
+
+def _publish_and_succeed(runtime: TaskRuntime, out: Path) -> str:
+    """Succeed the ready task with a published tree and file, returning its id."""
+    task_id = pop_ready(runtime)
+    assert task_id is not None
+    artifacts = out / task_id / "artifacts"
+    (artifacts / "final_model").mkdir(parents=True)
+    (artifacts / "final_model" / "weights.bin").write_bytes(b"w" * 4096)
+    (artifacts / "notes.txt").write_bytes(b"notes")
+    record = runtime.get_record(task_id)
+    assert record is not None
+    published = ArtifactPublisher(
+        cast(Any, runtime._results).store, record.org_id
+    ).publish_final(artifacts, {"final_model.tar.gz": "final_model"})
+    record_dispatch(runtime, task_id, "wkr-1", f"dsp-{task_id}")
+    runtime.mark_started(task_id, "wkr-1", {}, _TS)
+    payload = result_payload(runtime._results, task_id, {"ok": True}, record.org_id)
+    payload["artifacts"] = [binding.model_dump(mode="json") for binding in published]
+    runtime.mark_succeeded(task_id, "wkr-1", payload, _TS, f"dsp-{task_id}")
+    return task_id
+
+
+async def _served(runtime: TaskRuntime, task_id: str) -> dict[str, Any]:
+    logger = logging.getLogger("test.settled_history_reads")
+    listing = await results_router.list_result_artifacts(
+        task_id=task_id,
+        revision=None,
+        principal=cast(Any, None),
+        runtime=runtime,
+        logger=logger,
+    )
+    served: dict[str, Any] = {"listing": listing.model_dump(mode="json")}
+    for name in ("notes.txt", "final_model/weights.bin", "final_model.tar.gz"):
+        response = await results_router.download_result_file(
+            task_id=task_id,
+            filename=name,
+            revision="final",
+            principal=cast(Any, None),
+            runtime=runtime,
+            logger=logger,
+        )
+        reply = await serve(response)
+        served[name] = (reply.status, reply.headers["etag"], reply.body)
+    return served
+
+
+def test_a_freed_task_lists_and_serves_its_artifacts_as_it_did(
+    tmp_path: Path,
+) -> None:
+    registry = _registry()
+    runtime = _runtime(registry)
+    workflow_id = _register(runtime, CHAIN)
+    producer = _publish_and_succeed(runtime, tmp_path)
+    _succeed_ready(runtime)
+    bindings = runtime.artifact_bindings(producer)
+    served = asyncio.run(_served(runtime, producer))
+
+    runtime.settled_history.drain()
+    restarted = _runtime(registry)
+
+    assert not _resident(runtime, workflow_id)
+    assert bindings and len(bindings) == 3
+    assert runtime.artifact_bindings(producer) == bindings
+    assert asyncio.run(_served(runtime, producer)) == served
+    assert restarted.artifact_bindings(producer) == bindings
+    assert served["notes.txt"][2] == b"notes"

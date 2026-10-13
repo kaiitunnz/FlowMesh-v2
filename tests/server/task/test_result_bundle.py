@@ -1,86 +1,83 @@
-"""Result bundle helper tests."""
+"""Result bundle sections."""
 
+import gzip
+import io
+import logging
 import tarfile
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 from fastapi import HTTPException
 
 from server.routers.v1.results import (
     _BUNDLE_SECTIONS_DEFAULT,
-    _create_result_bundle_archive,
     _resolve_bundle_sections,
+    download_result_bundle,
 )
+from tests.server.asgi_responses import serve
+from tests.server.test_artifact_downloads import _publish, _Runtime
+
+_RESULT = b'{"task_id": "tsk-1", "result": {}}'
 
 
-def _populate_task_dir(task_dir: Path) -> None:
-    (task_dir / "artifacts" / "images").mkdir(parents=True)
-    (task_dir / "logs").mkdir(parents=True)
-    (task_dir / "manifest.json").write_text('{"ok": true}', encoding="utf-8")
-    (task_dir / "artifacts" / "images" / "a.png").write_bytes(b"aaa")
-    (task_dir / "logs" / "logs.jsonl").write_text("line\n", encoding="utf-8")
-
-
-_RESULT = b'{"task_id": "task-1", "result": {}}'
-
-
-def _members(bundle_path: Path) -> set[str]:
-    # tarfile with mode="r:*" transparently handles the gzip-wrapped tar.
-    with tarfile.open(bundle_path, mode="r:*") as archive:
+async def _names(tmp_path: Path, include: list[str], result: bytes | None) -> set[str]:
+    runtime = _Runtime(tmp_path)
+    _publish(tmp_path, runtime)
+    if result is None:
+        runtime.results.clear()
+    else:
+        runtime.results["tsk-1"] = result
+    logs = tmp_path / "results" / "tsk-1" / "logs"
+    logs.mkdir(parents=True)
+    (logs / "logs.jsonl").write_text("line\n", encoding="utf-8")
+    response = await download_result_bundle(
+        task_id="tsk-1",
+        include=include,
+        revision="final",
+        principal=cast(Any, None),
+        runtime=cast(Any, runtime),
+        results_dir=tmp_path / "results",
+        logger=logging.getLogger("test.result_bundle"),
+    )
+    body = (await serve(response)).body
+    with tarfile.open(fileobj=io.BytesIO(gzip.decompress(body))) as archive:
         return set(archive.getnames())
 
 
-def test_default_bundle_contains_result_and_artifacts_not_logs(
+@pytest.mark.anyio
+async def test_default_bundle_contains_result_and_artifacts_not_logs(
     tmp_path: Path,
 ) -> None:
-    task_dir = tmp_path / "task-1"
-    _populate_task_dir(task_dir)
+    names = await _names(tmp_path, [], _RESULT)
 
-    bundle_path = _create_result_bundle_archive(
-        "task-1", task_dir, _RESULT, sections=_BUNDLE_SECTIONS_DEFAULT
-    )
-    try:
-        names = _members(bundle_path)
-    finally:
-        bundle_path.unlink(missing_ok=True)
-
-    assert "task-1/results.json" in names
-    assert "task-1/artifacts/images/a.png" in names
-    assert "task-1/logs/logs.jsonl" not in names
-    # manifest.json is never shipped.
-    assert not any("manifest.json" in n for n in names)
+    assert "tsk-1/results.json" in names
+    assert "tsk-1/artifacts/notes.txt" in names
+    assert "tsk-1/artifacts/final_model/config.json" in names
+    assert not any(name.endswith(".tar.gz") for name in names)
+    assert "tsk-1/logs/logs.jsonl" not in names
 
 
-def test_result_only_bundle_has_single_file(tmp_path: Path) -> None:
-    task_dir = tmp_path / "task-1"
-    _populate_task_dir(task_dir)
-
-    bundle_path = _create_result_bundle_archive(
-        "task-1", task_dir, _RESULT, sections=("results",)
-    )
-    try:
-        names = _members(bundle_path)
-    finally:
-        bundle_path.unlink(missing_ok=True)
-
-    assert names == {"task-1/results.json"}
+@pytest.mark.anyio
+async def test_result_only_bundle_has_single_file(tmp_path: Path) -> None:
+    assert await _names(tmp_path, ["results"], _RESULT) == {"tsk-1/results.json"}
 
 
-def test_all_bundle_includes_every_concrete_section(tmp_path: Path) -> None:
-    task_dir = tmp_path / "task-1"
-    _populate_task_dir(task_dir)
+@pytest.mark.anyio
+async def test_all_bundle_includes_every_concrete_section(tmp_path: Path) -> None:
+    names = await _names(tmp_path, ["all"], _RESULT)
 
-    bundle_path = _create_result_bundle_archive(
-        "task-1", task_dir, _RESULT, sections=("results", "artifacts", "logs")
-    )
-    try:
-        names = _members(bundle_path)
-    finally:
-        bundle_path.unlink(missing_ok=True)
+    assert "tsk-1/results.json" in names
+    assert "tsk-1/artifacts/notes.txt" in names
+    assert "tsk-1/logs/logs.jsonl" in names
 
-    assert "task-1/results.json" in names
-    assert "task-1/artifacts/images/a.png" in names
-    assert "task-1/logs/logs.jsonl" in names
+
+@pytest.mark.anyio
+async def test_bundle_without_a_result_omits_the_results_entry(tmp_path: Path) -> None:
+    names = await _names(tmp_path, ["results", "artifacts"], None)
+
+    assert "tsk-1/results.json" not in names
+    assert "tsk-1/artifacts/notes.txt" in names
 
 
 def test_resolve_bundle_sections_empty_uses_default() -> None:
@@ -103,35 +100,3 @@ def test_resolve_bundle_sections_rejects_unknown() -> None:
     with pytest.raises(HTTPException) as exc_info:
         _resolve_bundle_sections(["artifacts", "bogus"])
     assert exc_info.value.status_code == 400
-
-
-def test_bundle_results_entry_is_the_stored_envelope(tmp_path: Path) -> None:
-    task_dir = tmp_path / "task-1"
-    _populate_task_dir(task_dir)
-
-    bundle_path = _create_result_bundle_archive(
-        "task-1", task_dir, _RESULT, sections=("results",)
-    )
-    try:
-        with tarfile.open(bundle_path, mode="r:*") as archive:
-            member = archive.extractfile("task-1/results.json")
-            assert member is not None
-            assert member.read() == _RESULT
-    finally:
-        bundle_path.unlink(missing_ok=True)
-
-
-def test_bundle_without_a_result_omits_the_results_entry(tmp_path: Path) -> None:
-    task_dir = tmp_path / "task-1"
-    _populate_task_dir(task_dir)
-
-    bundle_path = _create_result_bundle_archive(
-        "task-1", task_dir, None, sections=("results", "artifacts")
-    )
-    try:
-        names = _members(bundle_path)
-    finally:
-        bundle_path.unlink(missing_ok=True)
-
-    assert "task-1/results.json" not in names
-    assert "task-1/artifacts/images/a.png" in names

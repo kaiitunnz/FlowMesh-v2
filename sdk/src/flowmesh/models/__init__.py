@@ -1,6 +1,11 @@
 """FlowMesh SDK data models."""
 
-from .artifacts import ArtifactContext, ArtifactRef
+from .artifacts import (
+    ArtifactContext,
+    ArtifactRef,
+    PublishedArtifact,
+    PublishedArtifactList,
+)
 from .common import (
     CursorPage,
     LogEntry,
@@ -138,6 +143,8 @@ __all__ = [
     "AnyExecutorResult",
     "ArtifactContext",
     "ArtifactRef",
+    "PublishedArtifact",
+    "PublishedArtifactList",
     "AssetSummary",
     "BaseExecutorResult",
     "CPUInfo",

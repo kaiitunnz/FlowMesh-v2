@@ -31,6 +31,8 @@ from flowmesh.models import (
     NodeWorkerInfo,
     OkResponse,
     OutputOutcome,
+    PublishedArtifact,
+    PublishedArtifactList,
     ResultEnvelope,
     SourceLocation,
     SSHLimits,
@@ -77,6 +79,8 @@ from server.registries.worker import Worker as SrvWorker
 from server.registries.worker import WorkerInfo as SrvWorkerInfo
 from server.registries.workflow import Workflow as SrvWorkflow
 from server.registries.workflow import WorkflowStatus as SrvWorkflowStatus
+from server.schemas.artifacts import PublishedArtifact as SrvPublishedArtifact
+from server.schemas.artifacts import PublishedArtifactList as SrvPublishedArtifactList
 from server.schemas.common import OkResponse as SrvOkResponse
 from server.schemas.common import VersionResponse as SrvVersionResponse
 from server.schemas.logs import LogEntry as SrvLogEntry
@@ -257,6 +261,8 @@ MODEL_PAIRS = [
     # Artifacts
     (SrvArtifactContext, ArtifactContext),
     (SrvArtifactRef, ArtifactRef),
+    (SrvPublishedArtifact, PublishedArtifact),
+    (SrvPublishedArtifactList, PublishedArtifactList),
     # Telemetry queries
     (SrvTraceSpanNode, TraceSpanNode),
     (SrvTraceTree, TraceTree),

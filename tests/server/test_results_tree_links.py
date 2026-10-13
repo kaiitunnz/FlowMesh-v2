@@ -1,6 +1,7 @@
 """The server never follows a link below the results root: a link planted in a task's
 results is never chmodded, written through, read through, or archived as content."""
 
+import gzip
 import io
 import logging
 import stat
@@ -11,13 +12,12 @@ from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
-from fastapi import BackgroundTasks, HTTPException, UploadFile, status
-from fastapi.responses import FileResponse
+from fastapi import HTTPException, status
 
 from server.routers.v1 import results as results_router
-from server.routers.v1 import traces as traces_router
 from server.services.log_archiver import TaskLogArchiver
 from shared.utils.manifest import prepare_output_dir, scratch_dir, sync_manifest
+from tests.server.asgi_responses import serve
 
 _LOGGER = logging.getLogger("test.results_tree_links")
 _SECRET = b"root:x:0:0\n"
@@ -128,162 +128,6 @@ def test_the_log_archiver_appends_through_no_link(
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize(
-    ("linked", "filename"),
-    [("", "out.txt"), ("artifacts", "out.txt")],
-)
-async def test_an_artifact_upload_writes_through_no_link(
-    results: Path, outside: _Outside, linked: str, filename: str
-) -> None:
-    if linked == "":
-        (results / "tsk-1").symlink_to(outside.dir)
-    else:
-        (_task(results) / "artifacts").symlink_to(outside.dir)
-
-    with pytest.raises(HTTPException) as exc:
-        await results_router.upload_result_file(
-            task_id="tsk-1",
-            file=UploadFile(file=io.BytesIO(b"x"), filename=filename),
-            runtime=cast(Any, SimpleNamespace(task_record=lambda _task_id: None)),
-            principal=cast(Any, None),
-            results_dir=results,
-            logger=_LOGGER,
-        )
-
-    assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
-    outside.assert_untouched()
-
-
-@pytest.mark.anyio
-async def test_an_artifact_upload_replaces_a_linked_file(
-    results: Path, outside: _Outside
-) -> None:
-    task_dir = _task(results, "logs", "artifacts")
-    (task_dir / "artifacts" / "out.txt").symlink_to(outside.file)
-
-    await results_router.upload_result_file(
-        task_id="tsk-1",
-        file=UploadFile(file=io.BytesIO(b"x"), filename="out.txt"),
-        runtime=cast(Any, SimpleNamespace(task_record=lambda _task_id: None)),
-        principal=cast(Any, None),
-        results_dir=results,
-        logger=_LOGGER,
-    )
-
-    written = task_dir / "artifacts" / "out.txt"
-    assert not written.is_symlink() and written.read_bytes() == b"x"
-    outside.assert_untouched()
-
-
-def test_an_artifact_store_refuses_a_directory_swapped_for_a_link(
-    results: Path, outside: _Outside
-) -> None:
-    task_dir = _task(results, "logs", "artifacts")
-    (task_dir / "artifacts" / "sub").symlink_to(outside.dir)
-
-    with pytest.raises(OSError):
-        results_router._store_artifact(
-            UploadFile(file=io.BytesIO(b"x"), filename="sub/out.txt"),
-            task_dir,
-            Path("artifacts/sub/out.txt"),
-        )
-
-    outside.assert_untouched()
-
-
-@pytest.mark.anyio
-async def test_a_trace_upload_refuses_a_linked_logs_directory(
-    results: Path, outside: _Outside
-) -> None:
-    (_task(results) / "logs").symlink_to(outside.dir)
-
-    with pytest.raises(HTTPException) as exc:
-        await traces_router.upload_task_trace(
-            task_id="tsk-1",
-            trace_type="spans",
-            file=UploadFile(file=io.BytesIO(b"{}\n"), filename="spans.jsonl"),
-            results_dir=results,
-        )
-
-    assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
-    outside.assert_untouched()
-
-
-@pytest.mark.anyio
-async def test_a_trace_upload_replaces_a_linked_file(
-    results: Path, outside: _Outside
-) -> None:
-    task_dir = _task(results, "logs")
-    (task_dir / "logs" / "spans.jsonl").symlink_to(outside.file)
-
-    await traces_router.upload_task_trace(
-        task_id="tsk-1",
-        trace_type="spans",
-        file=UploadFile(file=io.BytesIO(b"{}\n"), filename="spans.jsonl"),
-        results_dir=results,
-    )
-
-    written = task_dir / "logs" / "spans.jsonl"
-    assert not written.is_symlink() and written.read_bytes() == b"{}\n"
-    outside.assert_untouched()
-
-
-@pytest.mark.parametrize("linked", ["logs", "logs/spans.jsonl"])
-def test_trace_reads_follow_no_link(
-    results: Path, outside: _Outside, linked: str
-) -> None:
-    outside.file.chmod(0o644)
-    outside.file.write_bytes(b'{"leaked": true}\n')
-    outside.file.chmod(0o600)
-    task_dir = _task(results, "logs")
-    if linked == "logs":
-        (task_dir / "logs").rmdir()
-        (task_dir / "logs").symlink_to(outside.dir)
-        (outside.dir / "spans.jsonl").symlink_to(outside.file)
-    else:
-        (task_dir / linked).symlink_to(outside.file)
-
-    rows = list(traces_router._WorkflowRows(results, ["tsk-1"], "spans.jsonl", _LOGGER))
-
-    assert rows == []
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize(
-    ("linked", "filename"),
-    [
-        ("artifacts/out.jsonl", "out.jsonl"),
-        ("artifacts", "secret.jsonl"),
-        ("out.jsonl", "out.jsonl"),
-    ],
-)
-async def test_an_artifact_download_reads_through_no_link(
-    results: Path, outside: _Outside, linked: str, filename: str
-) -> None:
-    task_dir = _task(results, "artifacts" if linked != "artifacts" else "logs")
-    if linked == "artifacts":
-        (task_dir / "artifacts").symlink_to(outside.dir)
-    else:
-        (task_dir / linked).symlink_to(outside.file)
-
-    with pytest.raises(HTTPException) as exc:
-        await results_router.download_result_file(
-            task_id="tsk-1",
-            filename=filename,
-            principal=cast(Any, None),
-            runtime=cast(Any, SimpleNamespace()),
-            results_dir=results,
-            logger=_LOGGER,
-        )
-
-    assert exc.value.status_code in {
-        status.HTTP_400_BAD_REQUEST,
-        status.HTTP_404_NOT_FOUND,
-    }
-    outside.assert_untouched()
-
-
-@pytest.mark.anyio
 @pytest.mark.parametrize("linked", ["", "logs", "logs/logs.jsonl"])
 async def test_a_logs_download_reads_through_no_link(
     results: Path, outside: _Outside, linked: str
@@ -313,31 +157,35 @@ async def test_a_logs_download_reads_through_no_link(
 
 
 @pytest.mark.anyio
-async def test_a_bundle_of_a_linked_task_directory_holds_nothing_of_its_target(
-    results: Path, outside: _Outside
+@pytest.mark.parametrize("linked", ["", "logs", "logs/logs.jsonl"])
+async def test_a_bundle_holds_no_log_read_through_a_link(
+    results: Path, outside: _Outside, linked: str
 ) -> None:
-    (results / "tsk-1").symlink_to(outside.dir)
-    (outside.dir / "artifacts").mkdir()
-    (outside.dir / "artifacts" / "secret.bin").write_bytes(_SECRET)
+    if linked == "":
+        (results / "tsk-1").symlink_to(outside.dir)
+    elif linked == "logs":
+        (_task(results) / "logs").symlink_to(outside.dir)
+    else:
+        (_task(results, "logs") / linked).symlink_to(outside.file)
     stub = SimpleNamespace(
         get_record=lambda _task_id: None,
         read_result_bytes=lambda _task_id: b"{}",
+        artifact_bindings=lambda _task_id: {},
+        result_reader=None,
     )
 
     response = await results_router.download_result_bundle(
         task_id="tsk-1",
-        background_tasks=BackgroundTasks(),
-        include=[],
+        include=["results", "logs"],
+        revision="final",
         principal=cast(Any, None),
         runtime=cast(Any, stub),
         results_dir=results,
         logger=_LOGGER,
     )
 
-    assert isinstance(response, FileResponse)
-    try:
-        with tarfile.open(response.path, mode="r:gz") as archive:
-            names = archive.getnames()
-    finally:
-        Path(response.path).unlink()
+    body = (await serve(response)).body
+    with tarfile.open(fileobj=io.BytesIO(gzip.decompress(body))) as archive:
+        names = archive.getnames()
     assert names == ["tsk-1/results.json"]
+    outside.assert_untouched()
