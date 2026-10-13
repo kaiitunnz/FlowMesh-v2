@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from shared.content import ContentReference
 from shared.tasks.artifact_binding import ArtifactBinding
+from shared.tasks.components.exports import EXPORT_UNSAFE, ExportFailure
 
 from ..models import (
     SETTLING_TASK_STATUSES,
@@ -40,6 +41,17 @@ def reported_artifacts(raw: Any) -> list[ArtifactBinding] | None:
         return [ArtifactBinding.model_validate(item) for item in raw]
     except ValidationError:
         return None
+
+
+def export_failure(payload: dict[str, Any]) -> ExportFailure | None:
+    """Why a completing agent could not copy out the exports it declared, if it
+    could not; a report that does not parse reads as a refusal."""
+    if (raw := payload.get("agent_export_failure")) is None:
+        return None
+    try:
+        return ExportFailure.model_validate(raw)
+    except ValidationError:
+        return ExportFailure(kind=EXPORT_UNSAFE, message="an unreadable export report")
 
 
 def reported_child_artifacts(

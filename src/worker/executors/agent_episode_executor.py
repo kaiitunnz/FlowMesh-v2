@@ -9,7 +9,7 @@ the server routes any boundary and re-dispatches with the next capsule and outco
 
 import logging
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, ClassVar
@@ -32,6 +32,12 @@ from shared.private_state import (
     PrivateStateUnavailable,
     PrivateStateUnavailableReason,
 )
+from shared.tasks.components.exports import (
+    EXPORT_MISSING,
+    EXPORT_UNSAFE,
+    AgentExport,
+    ExportFailure,
+)
 from shared.tasks.specs.misc import ModelBindingMode
 from shared.tasks.task_type import TaskType
 from shared.tools.model.schema import (
@@ -44,7 +50,9 @@ from shared.tools.search.schema import (
     parse_search_request,
     tool_request_digest,
 )
+from shared.utils.manifest import ARTIFACTS_DIR
 
+from ..content.exports import ExportFailed, spool_exports
 from ..egress import CapturedRequest, PendingEgressRequestStore
 from ..model_turn import ResponsesFacade
 from ..private_state import MaterializedState, PrivateStateHolder, QuiescenceFence
@@ -94,7 +102,7 @@ class AgentEpisodeExecutor(Executor):
     def run(self, task: ExecutorTask, out_dir: Path) -> EpisodeStepResult:
         with self._signals.running(task.task_id):
             try:
-                return self._step(task)
+                return self._step(task, out_dir)
             except BaseException:
                 # The step has given up its turn and ended its harness. A cancelled
                 # step's give-up releases the episode's waiting turns; any other raised
@@ -106,7 +114,7 @@ class AgentEpisodeExecutor(Executor):
                     facade.unregister_episode(task.task_id)
                 raise
 
-    def _step(self, task: ExecutorTask) -> EpisodeStepResult:
+    def _step(self, task: ExecutorTask, out_dir: Path) -> EpisodeStepResult:
         dispatch = task.agent_episode
         if dispatch is None:
             raise ExecutionError(
@@ -163,10 +171,22 @@ class AgentEpisodeExecutor(Executor):
                 "boundary but is not durable_pre_egress_yield"
             )
         value = result.value if result.kind is HarnessResultKind.COMPLETION else None
+        exporting = (
+            bool(dispatch.exports)
+            and result.kind is HarnessResultKind.COMPLETION
+            and not (facade is not None and facade.has_captured_group(task.task_id))
+        )
+        export_failure = None
+        if exporting and (state is None or holder is None):
+            export_failure = ExportFailure(
+                kind=EXPORT_MISSING, message="the agent holds no workspace to export"
+            )
         sealed = None
         if state is not None and holder is not None:
             if fence is None:
                 raise self._unproved(state)
+            if exporting:
+                export_failure = _export(dispatch.exports, state, out_dir)
             try:
                 sealed = holder.seal(state, _attachment(dispatch), fence)
             except PrivateStateUnavailable as exc:
@@ -197,6 +217,7 @@ class AgentEpisodeExecutor(Executor):
             value=value,
             facade_group=group,
             private_state=sealed,
+            export_failure=export_failure,
         )
 
     def _run_adapter(
@@ -506,3 +527,19 @@ def _attachment(dispatch: AgentEpisodeDispatch) -> PrivateStateAttachment:
     if dispatch.private_state_attachment is None:
         raise ExecutionError("an agent private-state binding ships with its attachment")
     return dispatch.private_state_attachment
+
+
+def _export(
+    exports: Sequence[AgentExport], state: MaterializedState, out_dir: Path
+) -> ExportFailure | None:
+    """Copy the exports out of the quiesced workspace into the task's artifacts; the
+    failure, if they cannot be."""
+    try:
+        spool_exports(state.workspace, exports, out_dir / ARTIFACTS_DIR)
+    except ExportFailed as exc:
+        _LOG.warning("Exports of the completing agent refused: %s", exc)
+        return exc.failure
+    except OSError as exc:
+        _LOG.warning("Exports of the completing agent failed: %s", exc)
+        return ExportFailure(kind=EXPORT_UNSAFE, message=str(exc))
+    return None

@@ -477,6 +477,9 @@ def _agent_operator(
     )
     if sandbox is not None and sandbox.network_egress is not None:
         egress_requests[task.task_id] = sandbox.network_egress
+    exports = (
+        spec.exports if isinstance(spec, (AgentSpecStrict, AgentSpecTemplate)) else None
+    )
     return AgentOperator(
         operator_id=task.task_id,
         source_ref=task.task_id,
@@ -489,6 +492,7 @@ def _agent_operator(
         authority=default_agent_authority(),
         boundary=default_agent_boundary(),
         guard=_condition_guard(task, name_to_op, operator_ids),
+        exports=tuple(exports or ()),
     )
 
 

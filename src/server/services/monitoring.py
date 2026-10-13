@@ -71,6 +71,7 @@ from ..task.models import (
     serve_engine_reported,
 )
 from ..task.runtime import TaskRuntime, TransitionNotDurable
+from ..task.runtime.reports import export_failure
 from ..utils.logging import log_node_event, log_worker_event
 from ..utils.time import now_iso
 from .metrics import MetricsRecorder
@@ -565,6 +566,22 @@ class EventMonitor:
                 # Count only a settling success; one that yields the lane back would
                 # tally several times for one task.
                 settles = self._runtime.success_settles_task(event.task_id, payload)
+                if settles and (failure := export_failure(payload)) is not None:
+                    # The completion ends the agent, so the exports it declared are
+                    # its output; one it could not copy out fails it. Re-running the
+                    # agent's commands to reproduce them is not authorized.
+                    self._handle_task_failed(
+                        event.model_copy(
+                            update={
+                                "type": "TASK_FAILED",
+                                "error": f"{failure.kind}: {failure.message}",
+                                "retryable": False,
+                            }
+                        ),
+                        worker_id,
+                        payload,
+                    )
+                    return
                 success = self._runtime.mark_succeeded(
                     event.task_id, worker_id, payload, event.ts, event.dispatch_id
                 )

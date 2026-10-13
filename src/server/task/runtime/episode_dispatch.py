@@ -261,6 +261,7 @@ class EpisodeDispatch:
             private_state=granted[0] if granted else None,
             private_state_attachment=granted[1] if granted else None,
             sandbox=sandbox,
+            exports=op.exports if op is not None else (),
         )
 
     def service_episode_dispatch(

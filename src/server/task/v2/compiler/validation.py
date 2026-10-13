@@ -1,6 +1,7 @@
 from collections import defaultdict
 
 from shared.sandbox import SANDBOX_EGRESS_INTERFACE, SANDBOX_EXECUTE_INTERFACE
+from shared.tasks.components.exports import excluded_export_path
 from shared.tasks.specs import ModelBindingMode
 
 from ..representations.operators import (
@@ -884,6 +885,51 @@ def _check_agent_binding(
     return diags
 
 
+def _check_agent_exports(
+    op: AgentOperator, loc: dict[str, SourceLocation]
+) -> list[Diagnostic]:
+    """Diagnose exports that publish credential material, or whose names collide or
+    nest, which would leave a download ambiguous."""
+    diags: list[Diagnostic] = []
+    location = loc.get(op.operator_id)
+    names: list[str] = []
+    for export in op.exports:
+        if (excluded := excluded_export_path(export.path)) is not None:
+            diags.append(
+                Diagnostic(
+                    code="agent.exports.excluded",
+                    message=(
+                        f"export {export.path!r} lies under {excluded!r}, which an "
+                        "agent never exports"
+                    ),
+                    location=location,
+                )
+            )
+        name = export.published_name
+        if clash := next(
+            (
+                other
+                for other in names
+                if other == name
+                or other.startswith(f"{name}/")
+                or name.startswith(f"{other}/")
+            ),
+            None,
+        ):
+            diags.append(
+                Diagnostic(
+                    code="agent.exports.name_conflict",
+                    message=(
+                        f"export name {name!r} collides with {clash!r}: names must be "
+                        "unique and none may lie under another"
+                    ),
+                    location=location,
+                )
+            )
+        names.append(name)
+    return diags
+
+
 def validate_compilation(
     template: LogicalWorkflowTemplate,
     plan: PhysicalExecutionPlan,
@@ -926,6 +972,7 @@ def validate_compilation(
         elif isinstance(op, AgentOperator):
             diags.extend(_check_authority(op, op.authority, declared_tools, loc))
             diags.extend(_check_agent_binding(op, loc, sandbox_egress_enabled))
+            diags.extend(_check_agent_exports(op, loc))
         elif isinstance(op, SpawnRegion):
             diags.extend(_check_authority(op, op.authority, declared_tools, loc))
 

@@ -1489,6 +1489,10 @@ class Runner:
                             metadata["agent_episode_private_state"] = (
                                 out.private_state.model_dump(mode="json")
                             )
+                        if out.export_failure is not None:
+                            metadata["agent_export_failure"] = (
+                                out.export_failure.model_dump(mode="json")
+                            )
                     self.lifecycle.set_succeeded(task_id, metadata=metadata)
                     unreported_step = None
                     self.logger.info("Task %s completed successfully", task_id)

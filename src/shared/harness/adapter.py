@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict
 from ..outcome import OutcomeManifest
 from ..private_state import PrivateStateAttachment, PrivateStateBinding
 from ..sandbox import LocalSandboxCapability
+from ..tasks.components.exports import AgentExport
 from ..tasks.result_binding import ResultBinding
 from ..tasks.specs.misc import ModelBindingMode
 from ..tools.facade import FacadeDescriptor
@@ -207,7 +208,8 @@ class AgentEpisodeDispatch(BaseModel):
     materialize and write it. ``sandbox`` is the local execution authority for an agent
     that declares ``sandbox.execute``: it is scoped to this dispatch and fenced to the
     same holder and write epoch, so the runtime validates every command against it
-    without a per-command control-plane round trip.
+    without a per-command control-plane round trip. ``exports`` are the workspace paths
+    the agent publishes when it completes.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -221,6 +223,7 @@ class AgentEpisodeDispatch(BaseModel):
     private_state: PrivateStateBinding | None = None
     private_state_attachment: PrivateStateAttachment | None = None
     sandbox: LocalSandboxCapability | None = None
+    exports: tuple[AgentExport, ...] = ()
 
 
 class ServiceLeafEpisodeDispatch(BaseModel):
