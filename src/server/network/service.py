@@ -171,13 +171,13 @@ class NetworkPlane:
             return ""
         return split_host_port(endpoint.url)[0]
 
-    @staticmethod
+    @classmethod
     def listener_address(
-        endpoint: NetworkEndpointAdvertisement | None, port: int
+        cls, endpoint: NetworkEndpointAdvertisement | None, port: int
     ) -> str:
         """Return the ``host:port`` a listener a worker bound on ``port`` is dialed at,
         on its node's host; empty when it binds none or the node advertises no host."""
-        host = NetworkPlane.node_host(endpoint)
+        host = cls.node_host(endpoint)
         return f"{host}:{port}" if host and port > 0 else ""
 
     async def _endpoint(
