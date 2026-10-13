@@ -17,7 +17,7 @@ from shared.network.relay_frame import RelayDirection, RelayFrame, RelayFrameKin
 class _Idle:
     """A handler that never closes the connection on its own."""
 
-    def __init__(self, sink) -> None:
+    def __init__(self, sink, context) -> None:
         self.sink = sink
 
     async def on_frame(self, frame: RelayFrame) -> None:

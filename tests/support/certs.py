@@ -64,6 +64,15 @@ class TestCa:
             ca_b64=self.ca_b64, cert_b64=issued.cert_b64, key_b64=issued.key_b64
         )
 
+    def named_material(self, common_name: str, *sans: str) -> MutualTlsMaterial:
+        """Issue a leaf whose common name is not among its subject alternative names."""
+        issued = self._leaf(
+            x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)]), sans
+        )
+        return MutualTlsMaterial.from_b64(
+            ca_b64=self.ca_b64, cert_b64=issued.cert_b64, key_b64=issued.key_b64
+        )
+
     def anonymous_material(self) -> MutualTlsMaterial:
         """Issue a leaf this CA signed that names no identity at all."""
         issued = self._leaf(x509.Name([]), ())

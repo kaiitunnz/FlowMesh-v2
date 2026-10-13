@@ -59,7 +59,7 @@ class NodePeerListener:
         self._endpoint = endpoint
         self._listener = MutualTlsFrameListener(
             material=material,
-            handler=lambda sink: _UplinkConnection(bridge, sink),
+            handler=lambda sink, _: _UplinkConnection(bridge, sink),
             admits=_is_registered_origin,
             logger=logger or logging.getLogger("node-peer-listener"),
         )

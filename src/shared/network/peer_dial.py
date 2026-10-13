@@ -18,6 +18,7 @@ from .frame_stream import (
     AcceptFrame,
     AcceptStatus,
     FrameStreamError,
+    PeerPurpose,
     read_stream_frame,
     split_host_port,
     write_accept,
@@ -56,7 +57,10 @@ async def open_peer_connection(
 
 
 async def open_accepted_connection(
-    endpoint: str, ssl_context: ssl.SSLContext | None, timeout: float
+    endpoint: str,
+    ssl_context: ssl.SSLContext | None,
+    timeout: float,
+    purpose: PeerPurpose = PeerPurpose.RESIDENT,
 ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
     """Open a stream to the peer listener at ``endpoint`` once the target accepts it.
 
@@ -64,12 +68,21 @@ async def open_accepted_connection(
     ``PeerAcceptError``. Under mutual TLS, a target that closes without answering has
     rejected the dialer's certificate after the dialer's side of the handshake
     completed, so that close records as a TLS failure.
+
+    A resident request names no purpose, as every listener reads it. Any other purpose
+    is accepted only with its echo: a listener that answers without one predates
+    purposes and would carry the session as a resident one, so the connection is
+    dropped as unserved rather than used.
     """
     writer: asyncio.StreamWriter | None = None
     try:
         async with asyncio.timeout(timeout):
             reader, writer = await open_peer_connection(endpoint, ssl_context)
-            await write_accept(writer, AcceptStatus.REQUEST)
+            await write_accept(
+                writer,
+                AcceptStatus.REQUEST,
+                None if purpose is PeerPurpose.RESIDENT else purpose,
+            )
             try:
                 answer = await read_stream_frame(reader)
             except asyncio.IncompleteReadError as exc:
@@ -91,11 +104,16 @@ async def open_accepted_connection(
             writer.transport.abort()
         raise
     status = answer.status if isinstance(answer, AcceptFrame) else None
-    if status is AcceptStatus.ACCEPTED:
+    if status is AcceptStatus.ACCEPTED and (
+        purpose is PeerPurpose.RESIDENT
+        or (isinstance(answer, AcceptFrame) and answer.purpose == purpose)
+    ):
         return reader, writer
     writer.transport.abort()
     if status is AcceptStatus.BUSY:
         raise PeerAcceptError(None, "the target is at its connection cap")
+    if status in (AcceptStatus.ACCEPTED, AcceptStatus.UNSERVED):
+        raise PeerAcceptError(None, f"the target does not serve {purpose} sessions")
     if status is AcceptStatus.REFUSED:
         raise PeerAcceptError(
             RouteObservationOutcome.TLS_FAILURE, "the target refused this origin"

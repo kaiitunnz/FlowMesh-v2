@@ -64,7 +64,7 @@ class ResidentPeerListener:
         self._sock = sock
         self._listener = MutualTlsFrameListener(
             material=material,
-            handler=lambda sink: _SidecarConnection(deliver, sink),
+            handler=lambda sink, _: _SidecarConnection(deliver, sink),
             admits=_is_registered_origin,
             max_connections=max_connections,
             logger=logger or logging.getLogger("resident-direct-listener"),

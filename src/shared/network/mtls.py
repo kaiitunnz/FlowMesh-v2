@@ -4,7 +4,9 @@ Both ends of a dialed peer session authenticate each other against the deploymen
 configured CA. The two ends check different things with that proof: an origin requires
 the certificate to cover the endpoint host it dialed, so the peer is the target its
 route selected, while a target admits any peer the CA vouched for and leaves the
-question of which invocation may be carried to the replica's claim gate.
+question of which invocation may be carried to the replica's claim gate. A target that
+must know which node dialed it checks that the peer's certificate covers that node's
+advertised host, by the same subject-alternative-name rule an origin applies.
 
 Material is configured as operator files and is base64-encoded only when it is loaded
 into a transient worker attachment.
@@ -12,6 +14,7 @@ into a transient worker attachment.
 
 import base64
 import binascii
+import ipaddress
 import ssl
 import tempfile
 from collections.abc import Iterator
@@ -115,6 +118,48 @@ def server_context(material: MutualTlsMaterial) -> ssl.SSLContext:
     return context
 
 
+@dataclass(frozen=True)
+class PeerNames:
+    """The hosts a verified peer certificate's subject alternative names cover.
+
+    Only DNS and IP-address names count; a subject common name never names a host here.
+    """
+
+    dns: frozenset[str] = frozenset()
+    ips: frozenset[str] = frozenset()
+
+    @classmethod
+    def of(cls, peer_cert: dict[str, Any] | None) -> Self:
+        dns: set[str] = set()
+        ips: set[str] = set()
+        for kind, value in (peer_cert or {}).get("subjectAltName", ()):
+            if kind == "DNS":
+                dns.add(str(value).lower())
+            elif kind == "IP Address":
+                ips.add(_ip_text(str(value)))
+        return cls(frozenset(dns), frozenset(ips))
+
+    def covers(self, host: str) -> bool:
+        """Whether the names cover ``host``, as TLS hostname verification decides it.
+
+        An IP literal matches only an IP-address name. A hostname matches a DNS name
+        exactly or by a wildcard standing for its whole leftmost label.
+        """
+        try:
+            return _ip_text(host) in self.ips
+        except ValueError:
+            pass
+        host = host.lower().rstrip(".")
+        if host in self.dns:
+            return True
+        label, _, rest = host.partition(".")
+        return bool(label and rest) and f"*.{rest}" in self.dns
+
+
+def _ip_text(value: str) -> str:
+    return ipaddress.ip_address(value.strip()).compressed
+
+
 def peer_identities(peer_cert: dict[str, Any] | None) -> frozenset[str]:
     """The subject common names and subject-alternative names a peer presented."""
     if not peer_cert:
@@ -133,6 +178,7 @@ def peer_identities(peer_cert: dict[str, Any] | None) -> frozenset[str]:
 __all__ = [
     "MutualTlsMaterial",
     "MutualTlsMaterialError",
+    "PeerNames",
     "client_context",
     "peer_identities",
     "server_context",

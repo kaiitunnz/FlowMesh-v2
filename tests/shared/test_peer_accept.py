@@ -73,7 +73,7 @@ async def _listener(
 ) -> AsyncIterator[str]:
     listener = MutualTlsFrameListener(
         material=material,
-        handler=lambda sink: _Recording(received),
+        handler=lambda sink, _: _Recording(received),
         admits=admits,
         max_connections=max_connections,
     )
