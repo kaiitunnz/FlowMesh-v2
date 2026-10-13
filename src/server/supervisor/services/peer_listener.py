@@ -14,13 +14,20 @@ worker's claim gate is the only authority over what reaches an engine. A content
 is handed on only when control routed it to this node, and, under mutual TLS, only for
 a dialer whose certificate covers the host control named for the transfer's requester:
 the holder's reply goes back over this connection, so it must be the requester's.
+
+A content connection ends when the holder worker it carries a session to ends on this
+node, so its requester learns at once that the transfer is lost and reads elsewhere,
+rather than waiting out its stall deadline for frames a gone worker will never send.
 """
 
+import asyncio
 import logging
+from collections.abc import Callable
 
 from shared.network.frame_stream import FrameSink, FrameStreamError, PeerPurpose
 from shared.network.mtls import MutualTlsMaterial
 from shared.network.mtls_listener import (
+    ConnectionFrameSink,
     ConnectionHandler,
     MutualTlsFrameListener,
     PeerContext,
@@ -34,12 +41,19 @@ class _UplinkConnection(ConnectionHandler):
     """Binds each session this connection carries to the node's local uplink."""
 
     def __init__(
-        self, bridge: RelayWorkerBridge, sink: FrameSink, peer: PeerContext
+        self,
+        bridge: RelayWorkerBridge,
+        sink: FrameSink,
+        peer: PeerContext,
+        on_close: Callable[["_UplinkConnection"], None],
     ) -> None:
         self._bridge = bridge
         self._sink = sink
         self._peer = peer
+        self._on_close = on_close
         self._sessions: set[str] = set()
+        # The workers this connection's content sessions are served by.
+        self.targets: set[str] = set()
 
     async def on_frame(self, frame: RelayFrame) -> None:
         if frame.session_id not in self._sessions:
@@ -58,10 +72,18 @@ class _UplinkConnection(ConnectionHandler):
             record.get("origin_host") or ""
         ):
             raise FrameStreamError("a content session from a dialer not its requester")
+        if target := record.get("target_worker"):
+            self.targets.add(target)
+
+    def end(self) -> None:
+        """Drop the connection, ending every session it carries."""
+        if isinstance(self._sink, ConnectionFrameSink):
+            self._sink.abort()
 
     def close(self) -> None:
         for session_id in self._sessions:
             self._bridge.release_peer(session_id, self._sink)
+        self._on_close(self)
 
 
 def _is_registered_origin(identities: frozenset[str]) -> bool:
@@ -81,11 +103,11 @@ class NodePeerListener:
         logger: logging.Logger | None = None,
     ) -> None:
         self._endpoint = endpoint
+        self._connections: set[_UplinkConnection] = set()
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._listener = MutualTlsFrameListener(
             material=material,
-            handler=lambda sink, peer: _UplinkConnection(
-                bridges[peer.purpose], sink, peer
-            ),
+            handler=lambda sink, peer: self._open(bridges[peer.purpose], sink, peer),
             admits=_is_registered_origin,
             purposes=frozenset(bridges),
             logger=logger or logging.getLogger("node-peer-listener"),
@@ -95,7 +117,31 @@ class NodePeerListener:
     def port(self) -> int:
         return self._listener.port
 
+    def _open(
+        self, bridge: RelayWorkerBridge, sink: FrameSink, peer: PeerContext
+    ) -> _UplinkConnection:
+        connection = _UplinkConnection(
+            bridge, sink, peer, on_close=self._connections.discard
+        )
+        if peer.purpose is PeerPurpose.CONTENT:
+            self._connections.add(connection)
+        return connection
+
+    def release_worker(self, worker_id: str) -> None:
+        """End every content connection carrying a session to a worker that ended.
+
+        Safe from any thread; the connections end on the listener's own loop.
+        """
+        if (loop := self._loop) is not None:
+            loop.call_soon_threadsafe(self._release, worker_id)
+
+    def _release(self, worker_id: str) -> None:
+        for connection in list(self._connections):
+            if worker_id in connection.targets:
+                connection.end()
+
     async def start(self) -> None:
+        self._loop = asyncio.get_running_loop()
         await self._listener.start_on_endpoint(self._endpoint)
 
     async def stop(self) -> None:

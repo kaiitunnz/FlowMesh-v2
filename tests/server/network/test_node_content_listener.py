@@ -158,3 +158,69 @@ def test_a_node_without_a_content_uplink_refuses_a_content_dialer(
             assert refused.value.outcome is None
 
     asyncio.run(run())
+
+
+def test_a_holder_that_ends_ends_the_content_connections_to_it_at_once(
+    ca: _TestCa,
+) -> None:
+    records = {
+        "rly-to-h": {
+            "target_node": "nde-b",
+            "target_worker": "wkr-h",
+            "origin_host": _REQUESTER_HOST,
+        },
+        "rly-to-g": {
+            "target_node": "nde-b",
+            "target_worker": "wkr-g",
+            "origin_host": _REQUESTER_HOST,
+        },
+    }
+    content = _Uplink("nde-b", records)
+    resident = _Uplink("nde-b", {})
+
+    async def run() -> tuple[bytes, bool, bool]:
+        listener = NodePeerListener(
+            endpoint="127.0.0.1:0",
+            material=ca.material("node-b", "127.0.0.1"),
+            bridges=cast(
+                Any, {PeerPurpose.CONTENT: content, PeerPurpose.RESIDENT: resident}
+            ),
+        )
+        await listener.start()
+        endpoint = f"127.0.0.1:{listener.port}"
+        requester = client_context(ca.material("node-a", _REQUESTER_HOST))
+        try:
+            lost_reader, lost = await open_accepted_connection(
+                endpoint, requester, 5.0, PeerPurpose.CONTENT
+            )
+            kept_reader, kept = await open_accepted_connection(
+                endpoint, requester, 5.0, PeerPurpose.CONTENT
+            )
+            res_reader, res = await open_accepted_connection(endpoint, requester, 5.0)
+            await write_relay_frame(lost, _frame("rly-to-h"))
+            await write_relay_frame(kept, _frame("rly-to-g"))
+            await write_relay_frame(res, _frame("rly-to-h"))
+            while len(content.frames) < 2 or not resident.frames:
+                await asyncio.sleep(0.01)
+
+            await asyncio.to_thread(listener.release_worker, "wkr-h")
+
+            ended = await asyncio.wait_for(lost_reader.read(), 2.0)
+            kept_open = not await _closes(kept_reader)
+            resident_open = not await _closes(res_reader)
+            for writer in (lost, kept, res):
+                writer.close()
+            return ended, kept_open, resident_open
+        finally:
+            await listener.stop()
+
+    ended, kept_open, resident_open = asyncio.run(run())
+    assert ended == b""
+    assert kept_open and resident_open
+
+
+async def _closes(reader: asyncio.StreamReader) -> bool:
+    try:
+        return await asyncio.wait_for(reader.read(), 0.3) == b""
+    except TimeoutError:
+        return False

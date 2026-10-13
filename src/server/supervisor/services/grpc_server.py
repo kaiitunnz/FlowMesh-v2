@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from threading import Lock
 
@@ -156,6 +156,21 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         # Set once this supervisor starts stopping: a worker it admitted then would be
         # admitted again by the next supervisor, leaving a ghost id behind.
         self._stopping = False
+        self._worker_ended: Callable[[str], None] | None = None
+
+    def on_worker_ended(self, listener: Callable[[str], None]) -> None:
+        """Call ``listener`` with each worker id that ends here, from any thread."""
+        self._worker_ended = listener
+
+    def _ended(self, worker_id: str) -> None:
+        if (listener := self._worker_ended) is None:
+            return
+        try:
+            listener(worker_id)
+        except Exception:
+            self._logger.warning(
+                "worker-ended listener failed for %s", worker_id, exc_info=True
+            )
 
     def begin_shutdown(self) -> None:
         """Refuse registrations, so a worker registers with the next supervisor."""
@@ -227,6 +242,7 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
 
     def worker_id_released(self, worker_id: str) -> None:
         """Tell the root a worker id ended, unless its own unregister already did."""
+        self._ended(worker_id)
         with self._ids_lock:
             self._released.add(worker_id)
             if worker_id in self._unregistered:
@@ -483,6 +499,7 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
                     self._registered.add(worker_id)
                 case "UNREGISTER":
                     unregistered = True
+                    self._ended(worker_id)
                     if not self._note_unregistered(worker_id):
                         continue
                     payload.setdefault("payload", {})["node_alias"] = self._node_alias
@@ -506,6 +523,7 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
             return
         if self._registry.get_worker_id(worker.token) != worker_id:
             return
+        self._ended(worker_id)
         if self._note_unregistered(worker_id):
             self._relay_service.add_unregister(worker_id, self._node_alias)
 
@@ -583,6 +601,10 @@ class GrpcServer:
             relay_bridges=relay_bridges,
         )
         self._listen_addr = f"{host}:{port}"
+
+    def on_worker_ended(self, listener: Callable[[str], None]) -> None:
+        """Call ``listener`` with each worker id that ends on this node."""
+        self._servicer.on_worker_ended(listener)
 
     async def start(self) -> None:
         if self._server is not None:

@@ -103,6 +103,10 @@ class ConnectionFrameSink(FrameSink):
         async with self._lock:
             await write_relay_frame(self._writer, frame)
 
+    def abort(self) -> None:
+        """Drop the connection at once, so its dialer sees it end."""
+        self._writer.transport.abort()
+
 
 async def close_writer(writer: asyncio.StreamWriter) -> None:
     try:
