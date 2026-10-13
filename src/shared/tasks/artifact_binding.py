@@ -149,7 +149,7 @@ def resolve_artifact_input(
     return binding, inner
 
 
-ARTIFACT_TOKEN = "flowmesh-artifact:"
+ARTIFACT_REF_SCHEME = "flowmesh-artifact:"
 _TOKEN = re.compile(r"flowmesh-artifact:([0-9]+)")
 
 
@@ -167,7 +167,11 @@ class ArtifactInputs:
         if (key := self._keys.get(identity)) is None:
             key = self._keys[identity] = str(len(self._keys))
             self.bindings[key] = binding
-        return f"{ARTIFACT_TOKEN}{key}/{inner}" if inner else f"{ARTIFACT_TOKEN}{key}"
+        return (
+            f"{ARTIFACT_REF_SCHEME}{key}/{inner}"
+            if inner
+            else f"{ARTIFACT_REF_SCHEME}{key}"
+        )
 
 
 def substitute_artifact_tokens(value: str, paths: dict[str, str]) -> str:
@@ -176,11 +180,11 @@ def substitute_artifact_tokens(value: str, paths: dict[str, str]) -> str:
 
 
 def names_artifact_token(value: str) -> bool:
-    return ARTIFACT_TOKEN in value
+    return ARTIFACT_REF_SCHEME in value
 
 
 __all__ = [
-    "ARTIFACT_TOKEN",
+    "ARTIFACT_REF_SCHEME",
     "ArtifactInputs",
     "names_artifact_token",
     "substitute_artifact_tokens",
