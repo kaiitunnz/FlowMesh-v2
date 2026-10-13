@@ -20,11 +20,11 @@ from dataclasses import dataclass
 
 from ..clients.redis import RedisClient, content_holders_key
 
-# Deletes a holder's field only while it still records the given incarnation.
 # Objects per pipelined round trip of a holding report: the loop serving every content
 # request runs other work between chunks, so a large cache never holds it for long.
 _RECORD_CHUNK = 256
 
+# Deletes a holder's field only while it still records the given incarnation.
 _FORGET_GENERATION = """
 local value = redis.call('HGET', KEYS[1], ARGV[1])
 if not value then
