@@ -61,10 +61,12 @@ class _SyncResultClient:
         self.payload = payload or {}
         self.bundle = bundle
         self.download_paths: list[str] = []
+        self.requests: list[tuple[str, dict | None]] = []
 
-    def _request(self, method: str, path: str):
+    def _request(self, method: str, path: str, params: dict | None = None):
         assert method == "GET"
         assert path.startswith("/results/")
+        self.requests.append((path, params))
         return self.payload
 
     def _download(self, path: str, output_path: Path) -> None:
@@ -85,10 +87,12 @@ class _AsyncResultClient:
         self.payload = payload or {}
         self.bundle = bundle
         self.download_paths: list[str] = []
+        self.requests: list[tuple[str, dict | None]] = []
 
-    async def _request(self, method: str, path: str):
+    async def _request(self, method: str, path: str, params: dict | None = None):
         assert method == "GET"
         assert path.startswith("/results/")
+        self.requests.append((path, params))
         return self.payload
 
     async def _download(self, path: str, output_path: Path) -> None:
@@ -384,3 +388,71 @@ class TestSSHHelpers:
                 interval=0.0,
                 sleep=lambda interval: asyncio.sleep(0),
             )
+
+
+_LISTING = {
+    "task_id": "task-1",
+    "artifacts": [
+        {
+            "name": "checkpoints",
+            "revision": "step-2",
+            "kind": "tree",
+            "size_bytes": 10,
+            "files": 2,
+        },
+        {
+            "name": "final_model.tar.gz",
+            "revision": "final",
+            "kind": "archive",
+            "size_bytes": 30,
+            "files": 2,
+            "sha256": "ab" * 32,
+            "archive_of": "final_model",
+        },
+    ],
+}
+
+
+class TestArtifactRevisions:
+    def test_sync_lists_artifacts_and_reads_a_revision(self, tmp_path: Path) -> None:
+        client = _SyncResultClient(payload=_LISTING)
+        results = Results(cast(Any, client))
+
+        listing = results.list_artifacts("task-1", revision="step-2")
+        results.list_artifacts("task-1")
+        results.download_file("task-1", "a/b.bin", tmp_path / "b.bin", "step-2")
+        results.get_bundle("task-1", tmp_path / "x.tar", revision="step-2")
+
+        assert [a.name for a in listing.artifacts] == [
+            "checkpoints",
+            "final_model.tar.gz",
+        ]
+        assert listing.artifacts[1].archive_of == "final_model"
+        assert client.requests == [
+            ("/results/task-1/artifacts", {"revision": "step-2"}),
+            ("/results/task-1/artifacts", None),
+        ]
+        assert client.download_paths == [
+            "/results/task-1/files/a/b.bin?revision=step-2",
+            "/results/task-1/bundle?include=results&include=artifacts&revision=step-2",
+        ]
+
+    @pytest.mark.anyio
+    async def test_async_lists_artifacts_and_reads_a_revision(
+        self, tmp_path: Path
+    ) -> None:
+        client = _AsyncResultClient(payload=_LISTING)
+        results = AsyncResults(cast(Any, client))
+
+        listing = await results.list_artifacts("task-1", revision="step-2")
+        await results.download_file("task-1", "a/b.bin", tmp_path / "b.bin", "step-2")
+        await results.get_bundle("task-1", tmp_path / "x.tar", revision="step-2")
+
+        assert len(listing.artifacts) == 2
+        assert client.requests == [
+            ("/results/task-1/artifacts", {"revision": "step-2"})
+        ]
+        assert client.download_paths == [
+            "/results/task-1/files/a/b.bin?revision=step-2",
+            "/results/task-1/bundle?include=results&include=artifacts&revision=step-2",
+        ]

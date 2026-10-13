@@ -6,6 +6,8 @@ from unittest.mock import MagicMock, patch
 import typer
 from flowmesh.exceptions import FlowMeshError
 from flowmesh.models import (
+    PublishedArtifact,
+    PublishedArtifactList,
     WorkflowSubmitResponse,
 )
 from flowmesh_cli.cli import build_cli_app
@@ -200,3 +202,62 @@ class TestConfig:
         )
         assert result.exit_code != 0
         assert "Invalid type" in result.stderr
+
+
+# ------------------------------------------------------------------ #
+# Result commands
+# ------------------------------------------------------------------ #
+
+
+class TestResultArtifacts:
+    @patch("flowmesh_cli.commands.result.FlowMesh")
+    def test_lists_a_tasks_artifacts_at_a_revision(self, mock_hc: MagicMock) -> None:
+        client = _mock_client()
+        client.results.list_artifacts.return_value = PublishedArtifactList(
+            task_id="t-1",
+            artifacts=[
+                PublishedArtifact(
+                    name="checkpoints",
+                    revision="step-2",
+                    kind="tree",
+                    size_bytes=10,
+                    files=2,
+                )
+            ],
+        )
+        mock_hc.return_value = client
+
+        result = runner.invoke(
+            _app(), ["result", "artifacts", "t-1", "--revision", "step-2"]
+        )
+
+        assert result.exit_code == 0
+        client.results.list_artifacts.assert_called_once_with("t-1", revision="step-2")
+        assert '"revision": "step-2"' in result.stdout
+
+    @patch("flowmesh_cli.commands.result.FlowMesh")
+    def test_downloads_files_at_a_revision(
+        self, mock_hc: MagicMock, tmp_path: Path
+    ) -> None:
+        client = _mock_client()
+        client.results.download_files.return_value = iter([tmp_path / "a.bin"])
+        mock_hc.return_value = client
+
+        result = runner.invoke(
+            _app(),
+            [
+                "result",
+                "download",
+                "t-1",
+                "checkpoints/a.bin",
+                "-o",
+                str(tmp_path),
+                "--revision",
+                "step-2",
+            ],
+        )
+
+        assert result.exit_code == 0
+        client.results.download_files.assert_called_once_with(
+            "t-1", ["checkpoints/a.bin"], tmp_path, "step-2"
+        )
