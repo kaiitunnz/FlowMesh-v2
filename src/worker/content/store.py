@@ -15,6 +15,7 @@ found not to be the object it is named for is dropped, since the store still has
 object.
 """
 
+import os
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -115,6 +116,17 @@ class WorkerContentCache(FabricObjectStore):
         )
         self._objects.touch(reference.authorization_scope, reference.content_digest)
         return fh
+
+    def link_to(self, reference: ContentReference, dest: Path) -> None:
+        """Link this worker's copy at ``dest`` once it verifies as the reference's
+        bytes, so a reader gets the copy without a second one on disk."""
+        for _ in self.open(reference):
+            pass
+        source = self._objects.object_path(
+            reference.authorization_scope, reference.content_digest
+        )
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        os.link(source, dest)
 
     def drop(self, reference: ContentReference) -> None:
         """Remove a copy."""

@@ -14,12 +14,20 @@ from server.orchestration.state import (
     ValueRef,
 )
 from server.task.models import TaskStatus
+from server.task.results import ResultUnavailable
 from server.task.runtime import TaskRuntime
 from server.task.runtime.content_bindings import ContentBindings
 from server.task.runtime.dispatch_fence import DispatchFence
-from shared.content import ContentReference, reference_for
+from shared.content import (
+    TREE_MEDIA_TYPE,
+    ContentReference,
+    TreeManifest,
+    TreeMember,
+    reference_for,
+)
 from shared.harness.adapter import DeliveredOutcome
 from shared.outcome import OutcomeManifest
+from shared.tasks.artifact_binding import ArtifactBinding, ArtifactKind
 
 _PREPARED = reference_for("local", b"prepared", media_type="application/json")
 _DELIVERED = reference_for("local", b"delivered", media_type="application/json")
@@ -66,6 +74,18 @@ class _Engine:
         return None
 
 
+class _Manifests:
+    def __init__(self, manifests: dict[str, TreeManifest]) -> None:
+        self._manifests = manifests
+        self.reads = 0
+
+    def read_manifest(self, reference: ContentReference) -> TreeManifest:
+        self.reads += 1
+        if (manifest := self._manifests.get(reference.content_digest)) is None:
+            raise ResultUnavailable("gone")
+        return manifest
+
+
 def _record(task_id: str, status: str, **fields: Any) -> Any:
     return SimpleNamespace(
         task_id=task_id,
@@ -76,6 +96,7 @@ def _record(task_id: str, status: str, **fields: Any) -> Any:
         org_id="local",
         merged_children=fields.pop("merged_children", None),
         result_skip=None,
+        dispatched_artifacts=fields.pop("artifacts", ()),
         **fields,
     )
 
@@ -91,6 +112,8 @@ def _runtime(
     child_input: ValueRef | None = None,
     accepted: tuple[AcceptedInput, ...] = (),
     merged_children: list[str] | None = None,
+    artifacts: tuple[ArtifactBinding, ...] = (),
+    manifests: dict[str, TreeManifest] | None = None,
 ) -> TaskRuntime:
     """A runtime with only what the binding check reads.
 
@@ -100,7 +123,11 @@ def _runtime(
     runtime._lock = threading.RLock()
     tasks: dict[str, Any] = {
         "tsk-1": _record(
-            "tsk-1", status, assigned=assigned, merged_children=merged_children
+            "tsk-1",
+            status,
+            assigned=assigned,
+            merged_children=merged_children,
+            artifacts=artifacts,
         )
     }
     settled: dict[str, ContentReference] = {}
@@ -128,6 +155,7 @@ def _runtime(
         logging.getLogger("test.content_binding_check"),
     )
     unused = cast(Any, None)
+    runtime._results = cast(Any, _Manifests(manifests or {}))
     runtime._fence = DispatchFence(
         unused, unused, unused, unused, unused, runtime._tasks, runtime._engines
     )
@@ -326,3 +354,50 @@ def test_a_merged_child_from_another_workflow_reads_its_own_upstream() -> None:
     runtime._original_deps["tsk-child"] = {"tsk-dep"}
 
     assert runtime.content_binding_authorizes("tsk-1", "wkr-2", _UPSTREAM)
+
+
+_MEMBER = reference_for("local", b"weights")
+_MANIFEST = TreeManifest.of(
+    [TreeMember("model.safetensors", _MEMBER.content_digest, _MEMBER.size_bytes)]
+)
+_TREE = ArtifactBinding(
+    name="final_model",
+    kind=ArtifactKind.TREE,
+    reference=reference_for("local", _MANIFEST.encode(), media_type=TREE_MEDIA_TYPE),
+    size_bytes=_MEMBER.size_bytes,
+)
+_FILE = ArtifactBinding(
+    name="notes.txt",
+    kind=ArtifactKind.FILE,
+    reference=reference_for("local", b"notes"),
+    size_bytes=5,
+)
+
+
+def test_an_artifact_its_dispatch_names_and_its_trees_members_may_be_read() -> None:
+    runtime = _runtime(
+        assigned="wkr-2",
+        artifacts=(_TREE, _FILE),
+        manifests={_TREE.reference.content_digest: _MANIFEST},
+    )
+    assert runtime.content_binding_authorizes("tsk-1", "wkr-2", _TREE.reference)
+    assert runtime.content_binding_authorizes("tsk-1", "wkr-2", _FILE.reference)
+    assert runtime.content_binding_authorizes("tsk-1", "wkr-2", _MEMBER)
+    assert not runtime.content_binding_authorizes("tsk-1", "wkr-2", _UNRELATED)
+    assert not runtime.content_binding_authorizes("tsk-1", "wkr-9", _MEMBER)
+
+
+def test_a_member_of_a_tree_whose_manifest_cannot_be_read_is_refused() -> None:
+    runtime = _runtime(assigned="wkr-2", artifacts=(_TREE,))
+    assert runtime.content_binding_authorizes("tsk-1", "wkr-2", _TREE.reference)
+    assert not runtime.content_binding_authorizes("tsk-1", "wkr-2", _MEMBER)
+
+
+def test_a_settled_task_reads_none_of_its_artifact_inputs() -> None:
+    runtime = _runtime(
+        assigned="wkr-2",
+        artifacts=(_TREE,),
+        manifests={_TREE.reference.content_digest: _MANIFEST},
+        status=TaskStatus.DONE,
+    )
+    assert not runtime.content_binding_authorizes("tsk-1", "wkr-2", _MEMBER)

@@ -11,7 +11,7 @@ from server.task.models import TaskStatus
 from server.task.v2.representations.operators import BranchRegion
 from server.task.v2.representations.template import TemplateEdge
 from tests.server.dispatch_helpers import record_dispatch
-from tests.server.task.test_file_inputs import _file, _trained
+from tests.server.task.test_file_inputs import _reads_tree_of, _train
 from tests.server.task.test_runtime_control_flow import _Run, _workflow
 from tests.server.task.test_runtime_control_flow_faults import _succeed
 from tests.server.task.test_scoped_inputs import _dispatch
@@ -71,16 +71,16 @@ _TUNE = f"""
 @pytest.mark.anyio
 async def test_a_loop_carries_the_trained_adapter_while_a_judge_decides() -> None:
     run = await _Run().start(_workflow(_TUNE, _TUNE_BODY))
-    run.run("seed", _trained("tsk-seed"))
-    assert _dispatch(run, "train")[0]["data"]["items"] == [_file("tsk-seed")]
-    run.run("train", _trained("tsk-t0"))
+    seed = _train(run, "seed")
+    assert _reads_tree_of(run, "train", seed)
+    t0 = _train(run, "train")
     run.run("evaluate", {"verdict": "again"})
 
-    assert _dispatch(run, "train")[0]["data"]["items"] == [_file("tsk-t0")]
-    run.run("train", _trained("tsk-t1"))
+    assert _reads_tree_of(run, "train", t0)
+    t1 = _train(run, "train")
     run.run("evaluate", {"verdict": "done"})
 
-    assert _dispatch(run, "serve")[0]["data"]["items"] == [_file("tsk-t1")]
+    assert _reads_tree_of(run, "serve", t1)
 
 
 _DIAMOND = f"""
@@ -350,14 +350,14 @@ async def test_a_restart_keeps_the_exact_forwarded_binding(
 
 
 @pytest.mark.anyio
-async def test_a_forwarded_file_reads_as_its_producers_url() -> None:
+async def test_a_forwarded_file_names_its_producers_tree() -> None:
     run = await _Run().start(
         _workflow(_DIAMOND.replace(_items("got.v"), _items("got.final_lora_archive")))
     )
-    run.run("payload", _trained("tsk-payload"))
+    payload = _train(run, "payload")
     run.run("judge_src", {"route": "left"})
 
-    assert _dispatch(run, "after")[0]["data"]["items"] == [_file("tsk-payload")]
+    assert _reads_tree_of(run, "after", payload)
 
 
 @pytest.mark.anyio

@@ -13,6 +13,7 @@ or not a result envelope fails the task.
 """
 
 import time
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
@@ -30,6 +31,10 @@ from shared.schemas.result.binding import (
     upstream_value,
 )
 from shared.tasks import MergedChildTaskStrict, TaskEnvelopeStrict
+from shared.tasks.artifact_binding import (
+    names_artifact_token,
+    substitute_artifact_tokens,
+)
 from shared.tasks.result_binding import BindingKind, ResultBinding
 from shared.tasks.specs import TaskSpecStrictBase
 from shared.tasks.worker_message import WorkerTaskMessage
@@ -37,6 +42,7 @@ from shared.utils.json import normalize_numbers
 
 from ..executors.base_executor import ExecutionError
 from .access import ContentAccessDenied, ContentBackendUnsupported
+from .artifact_inputs import ArtifactInputUnreadable, ArtifactMaterializer
 from .plane import WorkerContentPlane
 
 # A read that cannot reach the store retries briefly before the task reports it.
@@ -150,6 +156,43 @@ class TaskInputHydrator:
         if agent is not None and _sourced_members(agent):
             msg.agent_episode = _with_member_values(agent, reader)
         msg.record_hydration(envelopes, element)
+
+    def install_artifacts(self, msg: WorkerTaskMessage, root: Path) -> None:
+        """Put each published artifact the spec names under ``root`` and its path in
+        the spec, in place."""
+        if not msg.artifact_inputs:
+            return
+        task_id = msg.task_id
+        if self._plane is None:
+            raise ExecutionError(
+                f"task {task_id} loads published artifacts and this worker reaches "
+                "no fabric content store",
+                retryable=True,
+            )
+        inputs = msg.artifact_inputs or {}
+        for binding in inputs.values():
+            if binding.reference.authorization_scope != msg.content_scope:
+                raise input_unreadable(
+                    f"task {task_id} runs in scope {msg.content_scope} and an "
+                    f"artifact it loads is in {binding.reference.authorization_scope}"
+                )
+        materializer = ArtifactMaterializer(self._plane, task_id, root)
+        try:
+            paths = materializer.materialize_all(inputs)
+        except (ContentUnavailable, ContentAccessDenied) as exc:
+            raise ExecutionError(
+                f"task {task_id} cannot reach an artifact it loads: {exc}",
+                retryable=True,
+            ) from exc
+        except (ContentStoreError, ArtifactInputUnreadable) as exc:
+            raise input_unreadable(
+                f"task {task_id} artifact input unreadable: {exc}"
+            ) from exc
+        msg.task = _as_dispatched(msg.task, paths)
+        if msg.merged_children:
+            msg.merged_children = [
+                _as_dispatched(child, paths) for child in msg.merged_children
+            ]
 
     def _hydrate_child(
         self, reader: "_TaskReader", child: MergedChildTaskStrict
@@ -288,10 +331,29 @@ def _with_upstream_spec[S: TaskSpecStrictBase](
     return spec.model_copy(update={"upstreamResults": merged})
 
 
-def _as_dispatched[M: BaseModel](model: M) -> M:
-    """The model as an inline dispatch delivers it to this worker."""
+def _as_dispatched[M: BaseModel](
+    model: M, artifact_paths: dict[str, str] | None = None
+) -> M:
+    """The model as an inline dispatch delivers it to this worker, each artifact
+    token in it replaced by the artifact's local path."""
     wire = model.model_dump(mode="json", exclude_none=True, by_alias=True)
+    if artifact_paths:
+        wire = _with_artifact_paths(wire, artifact_paths)
     return type(model).model_validate(normalize_numbers(wire))
+
+
+def _with_artifact_paths(value: Any, paths: dict[str, str]) -> Any:
+    if isinstance(value, str):
+        return (
+            substitute_artifact_tokens(value, paths)
+            if names_artifact_token(value)
+            else value
+        )
+    if isinstance(value, dict):
+        return {key: _with_artifact_paths(item, paths) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_with_artifact_paths(item, paths) for item in value]
+    return value
 
 
 __all__ = ["TaskInputHydrator", "input_unavailable", "input_unreadable", "read_input"]

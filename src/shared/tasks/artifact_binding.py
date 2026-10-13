@@ -135,7 +135,41 @@ def resolve_artifact_path(
     return None
 
 
+ARTIFACT_TOKEN = "flowmesh-artifact:"
+_TOKEN = re.compile(r"flowmesh-artifact:([0-9]+)")
+
+
+class ArtifactInputs:
+    """The published artifacts one dispatch's rendered spec names, each by a token
+    its worker replaces with the local path it hydrates the artifact to."""
+
+    def __init__(self) -> None:
+        self.bindings: dict[str, ArtifactBinding] = {}
+        self._keys: dict[tuple[str, str, str, ArtifactKind], str] = {}
+
+    def token(self, binding: ArtifactBinding, inner: str = "") -> str:
+        """The token naming ``binding``, and ``inner`` inside it when a tree."""
+        identity = (*binding.reference.identity, binding.kind)
+        if (key := self._keys.get(identity)) is None:
+            key = self._keys[identity] = str(len(self._keys))
+            self.bindings[key] = binding
+        return f"{ARTIFACT_TOKEN}{key}/{inner}" if inner else f"{ARTIFACT_TOKEN}{key}"
+
+
+def substitute_artifact_tokens(value: str, paths: dict[str, str]) -> str:
+    """``value`` with each artifact token replaced by the path ``paths`` gives it."""
+    return _TOKEN.sub(lambda match: paths[match.group(1)], value)
+
+
+def names_artifact_token(value: str) -> bool:
+    return ARTIFACT_TOKEN in value
+
+
 __all__ = [
+    "ARTIFACT_TOKEN",
+    "ArtifactInputs",
+    "names_artifact_token",
+    "substitute_artifact_tokens",
     "FINAL_REVISION",
     "ArchiveFacts",
     "ArtifactBinding",

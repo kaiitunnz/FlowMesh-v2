@@ -49,7 +49,7 @@ from shared.schemas.event import TaskEvent, TaskFailureKind
 from shared.schemas.result import BaseExecutorResult, ResultEnvelope
 from shared.schemas.result.binding import upstream_value
 from shared.tasks import TaskEnvelopeTemplate
-from shared.tasks.artifact_binding import ArtifactBinding
+from shared.tasks.artifact_binding import ArtifactBinding, ArtifactKind
 from shared.tasks.credentials import set_spec_values
 from shared.tasks.result_binding import ResultBinding, ResultElementRef
 from shared.tasks.specs import ModelBindingMode, TaskSpecBase
@@ -87,6 +87,7 @@ from ...orchestration.tool_dispatch import (
     ToolOutcome,
     ToolOutcomeStatus,
 )
+from ...registries.artifacts import ArtifactBindings
 from ...registries.history import HistoryPublication, StoredTask
 from ...registries.worker import Worker, WorkerRegistry
 from ...registries.workflow import (
@@ -155,7 +156,7 @@ from ..outputs import (
 )
 from ..parser import ParsedWorkflow, parse_workflow
 from ..redrive import StoreRedriveScheduler, manual_redrive
-from ..results import ResultReader, ResultUnreadable
+from ..results import ResultReader, ResultUnavailable, ResultUnreadable
 from ..v2 import (
     ExecutionMode,
     FrontendWorkflowSource,
@@ -3482,6 +3483,18 @@ class TaskRuntime:
                 self._committer.close_locked(record.workflow_id)
             return bool(accepted)
 
+    def artifact_bindings(self, task_id: str) -> ArtifactBindings | None:
+        """A task's published artifacts by revision and name, or None for a task this
+        runtime neither holds nor has stored."""
+        with self._lock:
+            if (record := self._tasks.get(task_id)) is not None:
+                return dict(record.artifacts)
+        if (stored := self._stored_task(task_id)) is None:
+            return None
+        if not stored.persisted.record.has_artifacts:
+            return {}
+        return self._workflow_registry.artifact_bindings(task_id)
+
     def input_resolution_binding(self, task_id: str) -> InputResolutionBinding | None:
         """The binding a task's recorded resolution carries, if one was recorded."""
         with self._lock:
@@ -3531,12 +3544,49 @@ class TaskRuntime:
         """
         with self._lock:
             record = self._tasks.get(task_id)
-            return (
-                record is not None
-                and record.status not in TERMINAL_TASK_STATUSES
-                and self._fence.holds_dispatch_locked(record, worker_id, None)
-                and self._content_bindings.consumes_locked(record, reference)
-            )
+            if (
+                record is None
+                or record.status in TERMINAL_TASK_STATUSES
+                or not self._fence.holds_dispatch_locked(record, worker_id, None)
+            ):
+                return False
+            if self._content_bindings.consumes_locked(record, reference):
+                return True
+            artifacts = record.dispatched_artifacts
+        return self._artifact_input_holds(artifacts, reference)
+
+    def _artifact_input_holds(
+        self, artifacts: Sequence[ArtifactBinding], reference: ContentReference
+    ) -> bool:
+        """Whether one of a dispatch's artifact inputs is, or holds as a member, this
+        object; a tree's members are read from its stored manifest."""
+        identity = reference.identity
+        trees: list[ContentReference] = []
+        for binding in artifacts:
+            if binding.reference.identity == identity:
+                return True
+            if binding.kind is ArtifactKind.TREE:
+                trees.append(binding.reference)
+        for tree in trees:
+            try:
+                manifest = self._results.read_manifest(tree)
+            except (ResultUnavailable, ResultUnreadable):
+                continue
+            if any(
+                member.reference(tree.authorization_scope).identity == identity
+                for member in manifest.members
+            ):
+                return True
+        return False
+
+    def note_artifact_inputs(
+        self, task_id: str, artifacts: Sequence[ArtifactBinding]
+    ) -> None:
+        """Record the published artifacts the dispatch being published names, which
+        its worker may then read from a peer."""
+        with self._lock:
+            if (record := self._tasks.get(task_id)) is not None:
+                record.dispatched_artifacts = tuple(artifacts)
 
     def upstream_task_ids(self, task_id: str) -> set[str]:
         """Every task of its workflow a task depends on, directly or transitively."""

@@ -64,6 +64,7 @@ from shared.utils.recent import RecentSet
 from shared.utils.redact import credential_scrubber
 from shared.utils.time import now_iso
 
+from .content.artifact_inputs import artifact_inputs_dir
 from .content.artifacts import (
     ArtifactChanged,
     ArtifactPublisher,
@@ -1325,6 +1326,9 @@ class Runner:
                     self._current_task_id = task_id
                     self._refuse_if_gpu_is_held(msg)
                     self._input_hydrator.hydrate(msg)
+                    self._input_hydrator.install_artifacts(
+                        msg, artifact_inputs_dir(out_dir)
+                    )
                     if msg.input_preparation:
                         self._raise_if_cancel_pending(task_id)
                         self.lifecycle.notify_task_started(
@@ -1562,6 +1566,7 @@ class Runner:
                             self._stopped_dispatches.discard(dispatch_id)
                     with self._active_executor_lock:
                         self._active_executor_last_used_at = time.time()
+                    shutil.rmtree(artifact_inputs_dir(out_dir), ignore_errors=True)
                     self.lifecycle.set_idle(task_id)
                     if task_log_emitter is not None:
                         if log_handler_attached:

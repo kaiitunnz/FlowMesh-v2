@@ -7,6 +7,7 @@ from urllib.parse import ParseResult, urlparse
 
 import requests
 
+from shared.schemas.artifact import artifact_download_path
 from shared.schemas.result import BaseExecutorResult
 from shared.schemas.result.binding import artifact_context
 from shared.utils.http import auth_headers
@@ -21,46 +22,31 @@ def artifact_to_source(
     node: str | None,
     path: Sequence[str | int] = (),
 ) -> str:
-    """Translate a `{path: ...}` artifact ref into a URL or local path, against the
-    producer of the value at ``path`` inside upstream ``node``."""
+    """Translate a `{path: ...}` artifact ref into the server URL its producer's
+    published artifact downloads from, for the value at ``path`` inside upstream
+    ``node``."""
     rel_path = ref.get("path")
     if not isinstance(rel_path, str) or not rel_path:
         raise ExecutionError("Artifact ref must include a non-empty 'path' field")
 
-    if (
-        context
+    task_id = (
+        ctx.task_id
+        if context
         and node
         and (node_result := context.get(node))
         and (ctx := artifact_context(node_result, path))
-    ):
-        base_url = ctx.base_url
-        base_dir = ctx.base_dir
-    else:
-        base_url = base_dir = None
-
-    # Check local filesystem first
-    base_dir_path = Path(base_dir) if base_dir else None
-    local_path = base_dir_path / "artifacts" / rel_path if base_dir_path else None
-    if local_path is not None and local_path.is_file():
-        return local_path.as_posix()
-
-    # Fallback to a URL if base_url is provided
-    if base_url:
-        if not base_dir_path:
-            raise ExecutionError(
-                "Artifact ref with base_url requires upstream base_dir to "
-                "derive task_id"
-            )
-        task_id = base_dir_path.name
-        return f"{base_url.rstrip('/')}/api/v1/results/{task_id}/files/{rel_path}"
-
-    # Return the local path anyway
-    if local_path is not None:
-        return local_path.as_posix()
-
-    raise ExecutionError(
-        "Cannot resolve artifact ref: upstream _artifacts context is missing"
+        else None
     )
+    if task_id is None:
+        raise ExecutionError(
+            "Cannot resolve artifact ref: upstream _artifacts context is missing"
+        )
+    base_url = os.getenv("FLOWMESH_BASE_URL", "").rstrip("/")
+    if not base_url:
+        raise ExecutionError(
+            "Cannot resolve artifact ref: FLOWMESH_BASE_URL is not set"
+        )
+    return base_url + artifact_download_path(task_id, rel_path)
 
 
 _DEFAULT_PORT_BY_SCHEME = {"http": 80, "https": 443}

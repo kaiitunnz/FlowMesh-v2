@@ -138,15 +138,14 @@ def test_dump_to_governance_with_merged_children(tmp_path: Path) -> None:
         ]
 
 
-def test_extract_source_data_ids_from_upstream_artifacts(tmp_path: Path) -> None:
-    """Upstream task IDs are recovered from each result's _artifacts.base_dir
-    (the producer's output dir), since the payload carries no ID itself."""
+def test_extract_source_data_ids_from_upstream_artifacts() -> None:
+    """Upstream task IDs are the producers each result's _artifacts names."""
     mixin = _Mixin()
     upstream_a = BaseExecutorResult.model_validate(
-        {"_artifacts": {"base_dir": (tmp_path / "results" / "tsk-up-a").as_posix()}}
+        {"_artifacts": {"task_id": "tsk-up-a"}}
     )
     upstream_b = BaseExecutorResult.model_validate(
-        {"_artifacts": {"base_dir": (tmp_path / "results" / "tsk-up-b").as_posix()}}
+        {"_artifacts": {"task_id": "tsk-up-b"}}
     )
     no_ctx = BaseExecutorResult()
     spec = cast(
@@ -162,22 +161,44 @@ def test_extract_source_data_ids_from_upstream_artifacts(tmp_path: Path) -> None
 
 
 def test_collect_prompts_resolves_grouped_image_artifact_refs_after_flatten(
-    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    mixin = _Mixin()
-    upstream_dir = tmp_path / "upstream-task"
-    artifacts_dir = upstream_dir / "artifacts" / "images"
-    artifacts_dir.mkdir(parents=True)
-    for name, color in (("a.png", "red"), ("b.png", "green"), ("c.png", "blue")):
-        Image.new("RGB", (2, 2), color=color).save(artifacts_dir / name)
+    monkeypatch.setenv("FLOWMESH_BASE_URL", "https://root.internal")
+    served = {
+        f"https://root.internal/api/v1/results/tsk-up/files/images/{name}": color
+        for name, color in (("a.png", "red"), ("b.png", "green"), ("c.png", "blue"))
+    }
+    fetched: list[str] = []
 
+    class _Response:
+        def __init__(self, body: bytes) -> None:
+            self._body = body
+
+        def __enter__(self) -> "_Response":
+            return self
+
+        def __exit__(self, *exc_info: object) -> None:
+            return None
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def iter_content(self, chunk_size: int = 8192) -> Iterator[bytes]:
+            yield self._body
+
+    def _get(url: str, **_: Any) -> _Response:
+        fetched.append(url)
+        return _Response(_png_bytes(served[url]))
+
+    monkeypatch.setattr(artifacts.requests, "get", _get)
+    mixin = _Mixin()
     result = BaseExecutorResult.model_validate(
         {
             "images": [
                 [{"path": "images/a.png"}, {"path": "images/b.png"}],
                 [{"path": "images/c.png"}],
             ],
-            "_artifacts": {"base_dir": upstream_dir.as_posix()},
+            "_artifacts": {"task_id": "tsk-up"},
         }
     )
     spec = cast(
@@ -199,6 +220,7 @@ def test_collect_prompts_resolves_grouped_image_artifact_refs_after_flatten(
         (2, 2),
         (2, 2),
     ]
+    assert fetched == list(served)
 
 
 def _png_bytes(color: str) -> bytes:

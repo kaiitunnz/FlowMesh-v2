@@ -233,12 +233,7 @@ class GovernanceMixin:
             if isinstance(upstream, RoutedValue):
                 contexts.extend(upstream.member_artifacts_.values())
             for context in contexts:
-                # The result payload carries no ID; the producing task ID is the
-                # final segment of its ``_artifacts.base_dir`` (the producer's dir).
-                if context is None or not context.base_dir:
-                    continue
-                sid = Path(context.base_dir).name
-                if not sid or sid in seen:
+                if context is None or not (sid := context.task_id) or sid in seen:
                     continue
                 seen.add(sid)
                 ids.append(sid)

@@ -205,6 +205,13 @@ class ContentLaneHost:
             "content %s read from the local cache", reference.content_digest
         )
 
+    def link_local(self, reference: ContentReference, dest: Path) -> None:
+        """Link this worker's own verified copy of an object at ``dest``."""
+        self._store.link_to(reference, dest)
+        self._logger.info(
+            "content %s read from the local cache", reference.content_digest
+        )
+
     def read_peer(
         self, reference: ContentReference, task_id: str, peer_only: bool = False
     ) -> bytes:

@@ -329,6 +329,11 @@ class TaskRecord(BaseModel):
         "catalog holds them.",
         exclude=True,
     )
+    dispatched_artifacts: tuple[ArtifactBinding, ...] = Field(
+        default=(),
+        description="Published artifacts the task's current dispatch names as inputs.",
+        exclude=True,
+    )
     unwritten_artifacts: list[ArtifactBinding] = Field(
         default_factory=list,
         description="Accepted artifacts the task's next record write adds to its "

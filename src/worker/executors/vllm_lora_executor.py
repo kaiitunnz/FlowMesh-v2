@@ -27,6 +27,7 @@ from .base_executor import ExecutionError
 from .utils.checkpoints import (
     detect_archive_format,
     download_and_unpack,
+    hydrated_path,
     select_extracted_subdir,
 )
 from .vllm_executor import VLLMExecutor
@@ -220,6 +221,9 @@ class VLLMLoRAExecutor(VLLMExecutor):
                     return self._ensure_or_extract(
                         candidate, out_dir, name, archive_format
                     )
+
+        if url_value and (hydrated := hydrated_path(url_value)) is not None:
+            return self._ensure_or_extract(hydrated, out_dir, name, archive_format)
 
         if not url_value:
             raise ExecutionError(

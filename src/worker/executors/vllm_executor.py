@@ -84,7 +84,7 @@ from shared.tasks.task_type import TaskType
 from .base_executor import ExecutionError, Executor, ExecutorTask
 from .mixins.data import InferenceEntry
 from .mixins.inference import InferenceMixin, PreparedInferenceEntry, produced_items
-from .utils.checkpoints import resolve_checkpoint_load
+from .utils.checkpoints import hydrated_path, resolve_checkpoint_load
 from .utils.collective import loopback_collective_env
 
 logger = logging.getLogger(__name__)
@@ -372,6 +372,7 @@ Summary:"""
                 load_cfg_local.get("path")
                 or load_cfg_local.get("taskId")
                 or load_cfg_local.get("task_id")
+                or hydrated_path(str(load_cfg_local.get("url") or ""))
             ):
                 local_checkpoint_dir = None
             else:

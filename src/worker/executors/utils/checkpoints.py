@@ -57,6 +57,15 @@ def determine_resume_path(
     return None
 
 
+def hydrated_path(value: str) -> Path | None:
+    """The local path a reference to a published artifact rendered as, once the
+    worker hydrated it; None for a URL."""
+    if not value:
+        return None
+    path = Path(value)
+    return path if path.is_absolute() and path.exists() else None
+
+
 def resolve_checkpoint_load(
     load_cfg: dict[str, Any], out_dir: Path, logger: logging.Logger | None = None
 ) -> Path:
@@ -114,6 +123,11 @@ def resolve_checkpoint_load(
 
     if source_type == "http":
         url = load_cfg.get("url")
+        if url and (local := hydrated_path(str(url))) is not None:
+            log = logger or load_cfg.get("_logger")
+            if log:
+                log.info("Using hydrated checkpoint: %s", local)
+            return local
         if not url:
             task_id = load_cfg.get("task_id")
             filename = load_cfg.get("filename")
@@ -335,25 +349,12 @@ def is_cleanup_enabled() -> bool:
     return normalized not in {"0", "false", "no", "off"}
 
 
-def build_artifact_context(spec: TaskSpecStrictBase, out_dir: Path) -> ArtifactContext:
-    """Top-level ``_artifacts`` context. ``base_url`` is the destination
-    origin (scheme://host[:port]) for HTTP, else ``None``."""
-    base_dir = Path(out_dir).resolve().as_posix()
-    base_url: str | None = None
-    destination = get_http_destination(spec)
-    if destination is not None:
-        parsed = urlparse(destination.url)
-        if parsed.scheme and parsed.netloc:
-            base_url = f"{parsed.scheme}://{parsed.netloc.rpartition('@')[2]}"
-    return ArtifactContext(base_dir=base_dir, base_url=base_url)
-
-
 def write_executor_result(
     path: Path, task_id: str, spec: TaskSpecStrictBase, result: BaseExecutorResult
 ) -> str:
     """Stamp ``_artifacts`` onto ``result``, persist the envelope, and return it."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    result.artifacts_ = build_artifact_context(spec, path.parent)
+    result.artifacts_ = ArtifactContext(task_id=task_id)
     # A model identifier may be a URL whose credential the dispatch restored.
     if isinstance(model := getattr(result, "model", None), str):
         setattr(result, "model", redact_url(model))

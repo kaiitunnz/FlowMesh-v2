@@ -38,7 +38,7 @@ def test_subclass_round_trip_through_base_preserves_extra_fields() -> None:
         ok=True,
         items=[{"output": "hello"}],
         usage={"latency_sec": 0.5},
-        _artifacts=ArtifactContext(base_dir="/tmp/t", base_url="http://h"),
+        _artifacts=ArtifactContext(task_id="tsk-1"),
     )
     payload = original.model_dump_json()
 
@@ -47,7 +47,18 @@ def test_subclass_round_trip_through_base_preserves_extra_fields() -> None:
 
     assert redumped["items"] == [{"output": "hello"}]
     assert redumped["usage"] == {"latency_sec": 0.5}
-    assert redumped["_artifacts"] == {"base_dir": "/tmp/t", "base_url": "http://h"}
+    assert redumped["_artifacts"] == {"task_id": "tsk-1"}
+
+
+def test_a_pre_upgrade_artifact_context_reads_back_naming_no_producer() -> None:
+    stored = BaseExecutorResult.model_validate(
+        {
+            "ok": True,
+            "_artifacts": {"base_dir": "/results/tsk-1", "base_url": "http://h"},
+        }
+    )
+
+    assert stored.artifacts_ == ArtifactContext()
 
 
 def test_recursive_children_round_trip() -> None:

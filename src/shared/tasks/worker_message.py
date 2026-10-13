@@ -22,6 +22,7 @@ from shared.tasks import (
     TaskEnvelopeStrict,
     TaskSpecStrict,
 )
+from shared.tasks.artifact_binding import ArtifactBinding
 from shared.tasks.components import TaskMetadata
 from shared.tasks.merged import MergedChildTaskStrict
 from shared.tasks.result_binding import ResultBinding, ResultElementRef
@@ -59,6 +60,10 @@ class WorkerTaskMessage(BaseModel):
     upstream_task_ids: dict[str, str] | None = Field(
         default=None,
         description="Upstream task IDs by stage name.",
+    )
+    artifact_inputs: dict[str, ArtifactBinding] | None = Field(
+        default=None,
+        description="Published artifacts the task's spec names by token, by token key.",
     )
     upstream_results: dict[str, ResultBinding] | None = Field(
         default=None,

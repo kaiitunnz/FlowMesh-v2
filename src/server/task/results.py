@@ -17,6 +17,8 @@ from shared.content import (
     ContentStoreError,
     ContentUnavailable,
     FabricObjectStore,
+    TreeManifest,
+    TreeManifestError,
 )
 from shared.schemas.result import ResultEnvelope
 from shared.schemas.result.binding import (
@@ -78,6 +80,15 @@ class ResultReader:
         return _envelope(
             self._hydrate(reference), f"the stored result {reference.content_digest}"
         )
+
+    def read_manifest(self, reference: ContentReference) -> TreeManifest:
+        """The tree manifest a stored object reads as."""
+        try:
+            return TreeManifest.decode(self._hydrate(reference))
+        except TreeManifestError as exc:
+            raise ResultUnreadable(
+                f"the stored tree {reference.content_digest} is not a manifest: {exc}"
+            ) from exc
 
     def verify(self, reference: ContentReference) -> None:
         """Read one object from the store itself, bypassing the cache, and verify it.

@@ -133,10 +133,7 @@ class TestResultHelpers:
         result_payload = {
             "task_id": "task-1",
             "result": {
-                "_artifacts": {
-                    "base_dir": "/worker/results/task-1",
-                    "base_url": "http://host:8010",
-                },
+                "_artifacts": {"task_id": "task-1"},
                 "images": [
                     {"path": "images/a.png"},
                     {"path": "images/b.png"},
@@ -168,10 +165,11 @@ class TestResultHelpers:
             "a.png",
             "b.png",
         }
-        # Full envelope returned; base_dir rewritten, base_url dropped.
+        # Full envelope returned; base_dir names the local extraction.
         assert materialized["task_id"] == "task-1"
         assert materialized["result"]["_artifacts"] == {
-            "base_dir": task_root.resolve().as_posix()
+            "task_id": "task-1",
+            "base_dir": task_root.resolve().as_posix(),
         }
         assert materialized["result"]["images"] == [
             {"path": "images/a.png"},
@@ -186,10 +184,7 @@ class TestResultHelpers:
         result_payload = {
             "task_id": "task-1",
             "result": {
-                "_artifacts": {
-                    "base_dir": "/worker/results/task-1",
-                    "base_url": "http://host:8010",
-                },
+                "_artifacts": {"task_id": "task-1"},
                 "ok": True,
             },
         }
@@ -204,10 +199,7 @@ class TestResultHelpers:
         assert client.download_paths == ["/results/task-1/bundle?include=results"]
         assert json_path.is_file()
         assert {p.name for p in extracted} == {"results.json"}
-        assert materialized["result"]["_artifacts"] == {
-            "base_dir": "/worker/results/task-1",
-            "base_url": "http://host:8010",
-        }
+        assert materialized["result"]["_artifacts"] == {"task_id": "task-1"}
 
     def test_sync_download_files_uses_basename_only(self, tmp_path: Path) -> None:
         results = Results(cast(Any, _SyncResultClient()))
@@ -223,10 +215,7 @@ class TestResultHelpers:
         result_payload = {
             "task_id": "task-1",
             "result": {
-                "_artifacts": {
-                    "base_dir": "/worker/results/task-1",
-                    "base_url": "http://host:8010",
-                },
+                "_artifacts": {"task_id": "task-1"},
                 "images": [{"path": "images/a.png"}],
             },
         }
@@ -249,7 +238,8 @@ class TestResultHelpers:
         assert json_path == task_root / "results.json"
         assert {p.name for p in extracted} == {"results.json", "a.png"}
         assert materialized["result"]["_artifacts"] == {
-            "base_dir": task_root.resolve().as_posix()
+            "task_id": "task-1",
+            "base_dir": task_root.resolve().as_posix(),
         }
         assert [path.name for path in output_paths] == ["a.txt"]
 

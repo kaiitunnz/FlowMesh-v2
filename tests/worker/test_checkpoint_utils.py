@@ -7,7 +7,6 @@ from typing import Any, cast
 
 import pytest
 
-from shared.schemas.artifact import ArtifactContext
 from worker.executors.base_executor import ExecutionError, TaskReference
 from worker.executors.utils import checkpoints
 
@@ -29,24 +28,6 @@ def _task(
         destination = None
     spec = SimpleNamespace(output=SimpleNamespace(destination=destination))
     return cast(TaskReference, SimpleNamespace(task_id="task-1", spec=spec))
-
-
-class TestBuildArtifactContext:
-    def test_http_destination_strips_api_suffix(self, tmp_path: Path) -> None:
-        out_dir = tmp_path / "task-1"
-        out_dir.mkdir()
-        ctx = checkpoints.build_artifact_context(_task().spec, out_dir)
-        assert ctx == ArtifactContext(
-            base_dir=out_dir.resolve().as_posix(), base_url="http://host:8010"
-        )
-
-    def test_local_destination_leaves_base_url_none(self, tmp_path: Path) -> None:
-        out_dir = tmp_path / "task-1"
-        out_dir.mkdir()
-        ctx = checkpoints.build_artifact_context(_task("local").spec, out_dir)
-        assert ctx == ArtifactContext(
-            base_dir=out_dir.resolve().as_posix(), base_url=None
-        )
 
 
 class TestMaybeUploadArtifacts:

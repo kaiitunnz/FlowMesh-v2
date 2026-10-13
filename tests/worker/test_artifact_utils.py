@@ -22,40 +22,27 @@ from worker.executors.utils.artifacts import (
 
 
 class TestArtifactToSource:
-    def test_url_resolution(self, tmp_path: Path) -> None:
-        upstream = BaseExecutorResult(
-            _artifacts=ArtifactContext(
-                base_dir=(tmp_path / "producer-tid").as_posix(),
-                base_url="http://host:8010",
-            ),
-        )
+    def test_url_resolution(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("FLOWMESH_BASE_URL", "http://host:8010/")
+        upstream = BaseExecutorResult(_artifacts=ArtifactContext(task_id="tsk-prod"))
         url = artifact_to_source({"path": "a.png"}, {"producer": upstream}, "producer")
-        assert url == "http://host:8010/api/v1/results/producer-tid/files/a.png"
+        assert url == "http://host:8010/api/v1/results/tsk-prod/files/a.png"
 
-    def test_local_file_takes_fast_path(self, tmp_path: Path) -> None:
-        task_root = tmp_path / "producer-tid"
-        (task_root / "artifacts").mkdir(parents=True)
-        (task_root / "artifacts" / "a.png").write_bytes(b"\x89PNG")
-        upstream = BaseExecutorResult(
-            _artifacts=ArtifactContext(
-                base_dir=task_root.as_posix(),
-                base_url="http://host:8010",
-            )
-        )
-        resolved = artifact_to_source(
-            {"path": "a.png"}, {"producer": upstream}, "producer"
-        )
-        assert resolved == (task_root / "artifacts" / "a.png").as_posix()
+    def test_no_server_url_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("FLOWMESH_BASE_URL", raising=False)
+        upstream = BaseExecutorResult(_artifacts=ArtifactContext(task_id="tsk-prod"))
+        with pytest.raises(ExecutionError, match="FLOWMESH_BASE_URL"):
+            artifact_to_source({"path": "a.png"}, {"producer": upstream}, "producer")
 
-    def test_local_only_upstream_returns_local_path(self, tmp_path: Path) -> None:
-        task_root = tmp_path / "producer-tid"
-        upstream = BaseExecutorResult(
-            _artifacts=ArtifactContext(base_dir=task_root.as_posix())
+    def test_a_pre_upgrade_context_names_no_producer(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("FLOWMESH_BASE_URL", "http://host:8010")
+        upstream = BaseExecutorResult.model_validate(
+            {"_artifacts": {"base_dir": "/results/tsk-old", "base_url": "http://x"}}
         )
-        resolved = artifact_to_source(
-            {"path": "a.png"}, {"producer": upstream}, "producer"
-        )
-        assert resolved == (task_root / "artifacts" / "a.png").as_posix()
+        with pytest.raises(ExecutionError, match="_artifacts context is missing"):
+            artifact_to_source({"path": "a.png"}, {"producer": upstream}, "producer")
 
     def test_missing_context_raises(self) -> None:
         with pytest.raises(ExecutionError, match="_artifacts context is missing"):
@@ -78,17 +65,13 @@ class TestMaybeResolveArtifactRef:
         value = {"url": "http://x"}
         assert maybe_resolve_artifact_ref(value, None, None) is value
 
-    def test_resolves_path_dict(self, tmp_path: Path) -> None:
-        upstream = BaseExecutorResult(
-            _artifacts=ArtifactContext(
-                base_url="http://host:8010",
-                base_dir=(tmp_path / "producer-tid").as_posix(),
-            )
-        )
+    def test_resolves_path_dict(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("FLOWMESH_BASE_URL", "http://host:8010")
+        upstream = BaseExecutorResult(_artifacts=ArtifactContext(task_id="tsk-prod"))
         out = maybe_resolve_artifact_ref(
             {"path": "a.png"}, {"producer": upstream}, "producer"
         )
-        assert out == "http://host:8010/api/v1/results/producer-tid/files/a.png"
+        assert out == "http://host:8010/api/v1/results/tsk-prod/files/a.png"
 
 
 class TestResolveArtifact:

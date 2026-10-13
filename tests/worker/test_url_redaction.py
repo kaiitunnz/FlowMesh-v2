@@ -74,15 +74,6 @@ def test_a_forbidden_image_fetch_quotes_no_token():
     assert _TOKEN not in str(raised.value)
 
 
-def test_an_upload_destination_is_recorded_without_its_userinfo(tmp_path: Path):
-    spec = mock.MagicMock()
-    spec.output.destination = mock.MagicMock(
-        type="http", url=f"https://u:{_TOKEN}@sink.example/results"
-    )
-    context = checkpoints.build_artifact_context(spec, tmp_path)
-    assert context.base_url == "https://sink.example"
-
-
 _QDRANT = f"https://reader:{_TOKEN}@qdrant.example:6333"
 
 

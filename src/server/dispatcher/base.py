@@ -28,6 +28,12 @@ from shared.tasks import (
     TaskEnvelopeTemplate,
     TaskSpecStrict,
 )
+from shared.tasks.artifact_binding import (
+    FINAL_REVISION,
+    ArtifactInputs,
+    ArtifactKind,
+    resolve_artifact_path,
+)
 from shared.tasks.placeholders import PLACEHOLDER_PATTERN
 from shared.tasks.result_binding import ResultBinding
 from shared.tasks.specs import (
@@ -720,12 +726,13 @@ class Dispatcher:
         task, scrub = credentialed
         context: dict[str, TaskRecord] = {}
         scoped: dict[str, ScopedInput] | None = None
+        artifact_inputs = ArtifactInputs()
         try:
             scoped = self._runtime.scoped_inputs(task_id)
             if scoped is None:
                 context = self._build_stage_context(record)
             rendered_task, upstream_results = self._resolve_stage_references(
-                task_id, task, context, scoped
+                task_id, task, context, scoped, artifact_inputs
             )
         except StageReferenceNotReady as exc:
             self._logger.debug(
@@ -795,7 +802,7 @@ class Dispatcher:
             return True
 
         rendered_children = self._render_merged_children(
-            task_id, record, rendered_task.spec
+            task_id, record, rendered_task.spec, artifact_inputs
         )
 
         # 7. Build WorkerTaskMessage
@@ -818,6 +825,7 @@ class Dispatcher:
             shard_total=record.shard_total,
             merged_children=rendered_children,
             upstream_results=upstream_results,
+            artifact_inputs=artifact_inputs.bindings or None,
             input_element=self._runtime.input_element(task_id),
             credential_pointers=self._runtime.credential_pointers(
                 [task_id, *(child.task_id for child in rendered_children or ())]
@@ -835,6 +843,9 @@ class Dispatcher:
         )
 
         # 8. Give the task what it reads and writes its content under, then publish it
+        self._runtime.note_artifact_inputs(
+            task_id, list(artifact_inputs.bindings.values())
+        )
         match self._runtime.begin_publish(
             task_id, worker, dispatch_id, input_preparation=preparing
         ):
@@ -992,7 +1003,11 @@ class Dispatcher:
             )
 
     def _render_merged_children(
-        self, task_id: str, record: TaskRecord, parent_spec: TaskSpecStrict
+        self,
+        task_id: str,
+        record: TaskRecord,
+        parent_spec: TaskSpecStrict,
+        artifact_inputs: ArtifactInputs,
     ) -> list[MergedChildTaskStrict] | None:
         """Render the children merged into a dispatch.
 
@@ -1020,7 +1035,11 @@ class Dispatcher:
             child_task, scrub = credentialed
             try:
                 resolved, child_upstream = self._resolve_stage_references(
-                    child_id, child_task, self._build_stage_context(child_record)
+                    child_id,
+                    child_task,
+                    self._build_stage_context(child_record),
+                    None,
+                    artifact_inputs,
                 )
                 resolved.spec.validate_dispatchable()
                 if (condition := resolved.spec.condition) is not None and str(
@@ -1336,7 +1355,8 @@ class Dispatcher:
         task_id: str,
         task: TaskEnvelopeTemplate,
         context: dict[str, TaskRecord],
-        scoped: dict[str, ScopedInput] | None = None,
+        scoped: dict[str, ScopedInput] | None,
+        artifact_inputs: ArtifactInputs,
     ) -> tuple[TaskEnvelopeStrict, dict[str, ResultBinding] | None]:
         """Render a task's placeholders and name each upstream value it receives.
 
@@ -1351,13 +1371,18 @@ class Dispatcher:
                 values: dict[str, BaseExecutorResult] = {}
                 resolved_task = self._resolve_placeholders(
                     task,
-                    lambda expr: self._resolve_scoped_reference(expr, scoped, values),
+                    lambda expr: self._resolve_scoped_reference(
+                        expr, scoped, values, artifact_inputs
+                    ),
                 )
             upstream = {name: entry.binding for name, entry in scoped.items()}
         else:
             if context and task.has_placeholder():
                 resolved_task = self._resolve_placeholders(
-                    task, lambda expr: self._resolve_reference(expr, context)
+                    task,
+                    lambda expr: self._resolve_reference(
+                        expr, context, artifact_inputs
+                    ),
                 )
             upstream = self._upstream_bindings(context, task_id) if context else {}
         return TaskEnvelopeStrict.model_validate(resolved_task), upstream or None
@@ -1388,6 +1413,7 @@ class Dispatcher:
         expr: str,
         scoped: dict[str, ScopedInput],
         values: dict[str, BaseExecutorResult],
+        artifact_inputs: ArtifactInputs,
     ) -> Any:
         """The value a placeholder reads from a scoped input: ``${name}`` the value
         whole, ``${name.path}`` a part of it, and ``${name.task_id}`` the identity of
@@ -1407,7 +1433,7 @@ class Dispatcher:
         if steps and (value := self._dig_result_path(value, steps)) is None:
             raise ValueError(f"Missing value for reference '{expr.strip()}'")
         if rendered := self._render_artifact_ref(
-            value, artifact_context(upstream, steps)
+            value, artifact_context(upstream, steps), artifact_inputs
         ):
             return rendered
         return value.model_dump(mode="json") if isinstance(value, BaseModel) else value
@@ -1455,7 +1481,12 @@ class Dispatcher:
             keys.append(record.graph_node_name)
         return tuple(keys)
 
-    def _resolve_reference(self, expr: str, context: dict[str, TaskRecord]) -> Any:
+    def _resolve_reference(
+        self,
+        expr: str,
+        context: dict[str, TaskRecord],
+        artifact_inputs: ArtifactInputs,
+    ) -> Any:
         expr = expr.strip()
         if not expr:
             raise ValueError("Empty stage reference")
@@ -1476,23 +1507,39 @@ class Dispatcher:
         value = self._dig_result_path(envelope.result, path.split("."))
         if value is None:
             raise ValueError(f"Missing value for reference '{expr}'")
-        # If the referenced value is an artifact ref (an ``ArtifactRef`` or a
-        # legacy ``{path: ...}`` dict), render it as a full URL (when base_url
-        # is set) or an absolute filesystem path using the producing stage's
-        # top-level _artifacts context.
-        if rendered := self._render_artifact_ref(value, envelope.result.artifacts_):
+        if rendered := self._render_artifact_ref(
+            value, envelope.result.artifacts_, artifact_inputs
+        ):
             return rendered
         return value
 
-    @staticmethod
-    def _render_artifact_ref(value: Any, context: ArtifactContext | None) -> str | None:
+    def _render_artifact_ref(
+        self,
+        value: Any,
+        context: ArtifactContext | None,
+        artifact_inputs: ArtifactInputs,
+    ) -> str | None:
+        """The token an artifact ref renders as: the producer's published artifact,
+        which the task's worker hydrates and names by its local path.
+
+        A model archive renders as the tree it archives, which every loader takes as
+        a directory.
+        """
         if (
             context is None
-            or not context.base_dir
+            or context.task_id is None
             or (path := artifact_ref_path(value)) is None
         ):
             return None
-        return context.url_for(path)
+        bindings = self._runtime.artifact_bindings(context.task_id) or {}
+        if (found := resolve_artifact_path(bindings, FINAL_REVISION, path)) is None:
+            raise ValueError(
+                f"task {context.task_id} published no artifact named {path!r}"
+            )
+        binding, inner = found
+        if binding.kind is ArtifactKind.ARCHIVE and binding.of is not None:
+            binding = bindings[(binding.revision, binding.of)]
+        return artifact_inputs.token(binding, inner)
 
     def _upstream_bindings(
         self, context: dict[str, TaskRecord], current_task_id: str

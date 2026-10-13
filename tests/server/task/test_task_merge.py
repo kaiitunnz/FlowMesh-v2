@@ -16,6 +16,7 @@ from server.services.monitoring import EventMonitor
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime, TransitionNotDurable
 from shared.schemas.event import TaskEvent, WorkerEvent
+from shared.tasks.artifact_binding import ArtifactInputs
 from shared.tasks.specs.common import ConditionSpec
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
@@ -197,7 +198,7 @@ def _render(
         SimpleNamespace(
             _runtime=runtime,
             _logger=logging.getLogger("task-merge"),
-            _resolve_stage_references=lambda *args: (resolve(*args), None),
+            _resolve_stage_references=lambda *args: (resolve(*args[:3]), None),
             _build_stage_context=lambda record: record,
             _condition_actual=condition_actual,
         ),
@@ -205,7 +206,7 @@ def _render(
     record = runtime._tasks[parent]
     parent_spec = resolve(parent, record.task, record).spec
     rendered = Dispatcher._render_merged_children(
-        dispatcher, parent, record, parent_spec
+        dispatcher, parent, record, parent_spec, ArtifactInputs()
     )
     return [child.task_id for child in rendered or []]
 
