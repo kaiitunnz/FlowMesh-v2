@@ -43,8 +43,10 @@ from .store import (
     FabricObjectStore,
     WriteCancelled,
     check_existing_size,
+    check_range,
     new_hasher,
     reference_for,
+    short_range,
     verified_chunks,
 )
 
@@ -403,10 +405,43 @@ class S3ObjectStore(FabricObjectStore):
 
         return verified_chunks(reference, chunks())
 
-    def _get(self, reference: ContentReference) -> Any:
+    def open_range(
+        self,
+        reference: ContentReference,
+        start: int,
+        length: int,
+        *,
+        chunk_bytes: int = STREAM_CHUNK_BYTES,
+    ) -> Iterator[bytes]:
+        check_range(reference, start, length)
+        body = self._get(reference, byte_range=f"bytes={start}-{start + length - 1}")
+
+        def chunks() -> Iterator[bytes]:
+            got = 0
+            try:
+                for chunk in body.iter_chunks(chunk_bytes):
+                    got += len(chunk)
+                    if got > length:
+                        raise ContentUnavailable(
+                            f"a ranged read of {reference.content_digest} overran "
+                            f"its {length} bytes"
+                        )
+                    yield chunk
+            except ContentUnavailable:
+                raise
+            except Exception as exc:
+                raise self._read_error(reference, exc) from exc
+            finally:
+                body.close()
+            short_range(reference, got, length)
+
+        return chunks()
+
+    def _get(self, reference: ContentReference, byte_range: str | None = None) -> Any:
+        extra = {"Range": byte_range} if byte_range is not None else {}
         try:
             response: dict[str, Any] = self._client.get_object(
-                Bucket=self._bucket, Key=self._key(reference)
+                Bucket=self._bucket, Key=self._key(reference), **extra
             )
         except Exception as exc:
             raise self._read_error(reference, exc) from exc

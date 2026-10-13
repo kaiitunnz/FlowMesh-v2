@@ -131,6 +131,24 @@ def check_existing_size(reference: ContentReference, size: int) -> None:
         )
 
 
+def check_range(reference: ContentReference, start: int, length: int) -> None:
+    """Raise unless ``[start, start + length)`` is a non-empty slice of the object."""
+    if start < 0 or length <= 0 or start + length > reference.size_bytes:
+        raise ValueError(
+            f"bytes {start}+{length} are outside the {reference.size_bytes} bytes "
+            f"{reference.content_digest} names"
+        )
+
+
+def short_range(reference: ContentReference, got: int, length: int) -> None:
+    """Raise a transient read failure when a ranged read returned fewer bytes."""
+    if got != length:
+        raise ContentUnavailable(
+            f"a ranged read of {reference.content_digest} returned {got} of "
+            f"{length} bytes"
+        )
+
+
 def verify_content(reference: ContentReference, data: bytes) -> bytes:
     """Return the bytes once they are the ones the reference names, else raise."""
     verifier = ContentVerifier(reference)
@@ -244,3 +262,29 @@ class FabricObjectStore(ABC):
     def hydrate_to(self, reference: ContentReference, dest: Path) -> None:
         """Write a reference's verified bytes to ``dest``, replacing it whole."""
         write_verified(self.open(reference), dest)
+
+    def open_range(
+        self,
+        reference: ContentReference,
+        start: int,
+        length: int,
+        *,
+        chunk_bytes: int = STREAM_CHUNK_BYTES,
+    ) -> Iterator[bytes]:
+        """``length`` bytes of a reference's object from ``start``, in chunks.
+
+        A slice cannot be checked against the digest naming the whole object, so these
+        bytes are unverified: a reader that needs verified bytes reads them all.
+        """
+        check_range(reference, start, length)
+        skip, remaining = start, length
+        for chunk in self.open(reference, chunk_bytes=chunk_bytes):
+            if skip >= len(chunk):
+                skip -= len(chunk)
+                continue
+            piece = chunk[skip : skip + remaining]
+            skip = 0
+            remaining -= len(piece)
+            yield piece
+            if not remaining:
+                return

@@ -379,3 +379,37 @@ def test_a_store_without_conditional_writes_is_named_as_such(
 
     with pytest.raises(ContentStoreError, match="conditional writes"):
         S3ObjectStore(client, "bucket").write("org", b"payload")
+
+
+@pytest.mark.parametrize(
+    ("start", "length"), [(0, 1), (0, 3 * _PART + 7), (_PART - 3, 10), (3 * _PART, 7)]
+)
+def test_a_range_reads_exactly_its_slice(
+    store: FabricObjectStore, tmp_path: Path, start: int, length: int
+) -> None:
+    data = os.urandom(3 * _PART + 7)
+    reference = store.write_file("org", _write_file(tmp_path, data))
+
+    got = b"".join(store.open_range(reference, start, length, chunk_bytes=4096))
+
+    assert got == data[start : start + length]
+
+
+@pytest.mark.parametrize(("start", "length"), [(-1, 1), (0, 0), (5, 6)])
+def test_a_range_outside_the_object_is_refused(
+    store: FabricObjectStore, start: int, length: int
+) -> None:
+    reference = store.write("org", b"0123456789")
+
+    with pytest.raises(ValueError):
+        list(store.open_range(reference, start, length))
+
+
+def test_a_short_ranged_read_is_transient() -> None:
+    client = FakeS3()
+    store = S3ObjectStore(client, "bucket", part_bytes=_PART)
+    reference = store.write("org", b"0123456789")
+    client.objects[next(iter(client.objects))] = b"01234"
+
+    with pytest.raises(ContentUnavailable):
+        list(store.open_range(reference, 2, 6))

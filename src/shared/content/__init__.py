@@ -32,12 +32,20 @@ from .store import (
     FabricObjectStore,
     ScopedObjectStore,
     WriteCancelled,
+    check_range,
     content_digest,
     new_hasher,
     reference_for,
     verified_chunks,
     verify_content,
     write_verified,
+)
+from .tree import (
+    TREE_MEDIA_TYPE,
+    TreeManifest,
+    TreeManifestError,
+    TreeMember,
+    is_member_path,
 )
 
 __all__ = [
@@ -71,6 +79,12 @@ __all__ = [
     "GrantRejection",
     "HolderGrantGate",
     "WriteCancelled",
+    "TREE_MEDIA_TYPE",
+    "TreeManifest",
+    "TreeManifestError",
+    "TreeMember",
+    "check_range",
+    "is_member_path",
     "content_digest",
     "new_hasher",
     "reference_for",
