@@ -394,3 +394,13 @@ def test_the_root_serve_ingress_and_the_nodes_workers_keep_separate_evidence(
     }
     assert states[(demoted.value, "worker_direct")] == "demoted"
     assert states[(untouched.value, "worker_direct")] != "demoted"
+
+
+def test_a_departure_reported_after_the_loop_closed_is_dropped() -> None:
+    registry = _FakeNodeRegistry()
+    plane = _plane(registry)
+    loop = asyncio.new_event_loop()
+    plane.bind_loop(loop)
+    loop.close()
+
+    plane.forget_node("nde-2")

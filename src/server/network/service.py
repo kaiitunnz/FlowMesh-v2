@@ -7,6 +7,7 @@ reachability for diagnostics.
 """
 
 import asyncio
+import contextlib
 import logging
 import time
 from collections.abc import Iterable, Mapping
@@ -355,7 +356,9 @@ class NetworkPlane:
         if loop is None or _running_loop() is loop:
             self._forget_node(node_id)
         else:
-            loop.call_soon_threadsafe(self._forget_node, node_id)
+            # A departure reported once the server's loop has closed has no view left.
+            with contextlib.suppress(RuntimeError):
+                loop.call_soon_threadsafe(self._forget_node, node_id)
 
     def _forget_node(self, node_id: str) -> None:
         self._reachability.invalidate_node(node_id)
