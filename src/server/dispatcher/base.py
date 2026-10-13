@@ -7,6 +7,7 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 
 from server.telemetry.tracing import NULL_CONTROL_TRACER, ControlPlaneTracer
+from shared.content import ContentReference
 from shared.private_state import OwnerFence, PrivateStateUnavailableReason
 from shared.schemas.artifact import ArtifactContext
 from shared.schemas.event import TaskEvent
@@ -23,7 +24,6 @@ from shared.schemas.result.binding import (
 from shared.schemas.result.routed import routed_root
 from shared.tasks import (
     MergedChildTaskStrict,
-    TaskEnvelope,
     TaskEnvelopeStrict,
     TaskEnvelopeTemplate,
     TaskSpecStrict,
@@ -41,12 +41,13 @@ from shared.tasks.specs import (
     SSHSpecStrict,
     SSHSpecTemplate,
 )
-from shared.tasks.worker_message import WorkerStatus, WorkerTaskMessage
+from shared.tasks.worker_message import WorkerTaskMessage
 from shared.telemetry.semconv import ControlPlaneStage, ControlPlaneWindow
 from shared.utils.ids import new_dispatch_id
 
 from ..clients.redis import REDIS_CONN_ERRORS
 from ..content import ContentAccessBroker
+from ..content.directory import ContentHolderDirectory
 from ..registries.worker import Worker, WorkerRegistry
 from ..services.metrics import MetricsRecorder
 from ..task.credentials import credential_merge_key
@@ -103,7 +104,7 @@ class Dispatcher:
         reuse_cache_ttl_sec: int = 3600,
         lambda_config: dict[str, float] | None = None,
         selection_jitter_epsilon: float = 1e-3,
-        enable_stage_weight_stickiness: bool = False,
+        enable_stage_weight_stickiness: bool = True,
         no_worker_grace_sec: int = 60,
         metrics_recorder: MetricsRecorder | None = None,
         resident_capacity_enabled: bool = False,
@@ -111,8 +112,10 @@ class Dispatcher:
         embodiment_selector: EmbodimentSelector | None = None,
         content_access: ContentAccessBroker | None = None,
         control: ControlPlaneTracer | None = None,
+        content_holders: ContentHolderDirectory | None = None,
     ) -> None:
         self._runtime = runtime
+        self._content_holders = content_holders
         self._worker_registry = worker_registry
         self._content_access = content_access
         self._logger = logger
@@ -136,16 +139,6 @@ class Dispatcher:
         self._owner_wait_since: dict[str, float] = {}
         self._yield_requested_at: dict[str, float] = {}
         self._owner_wait_logged: set[str] = set()
-        self._weight_reference_hints: tuple[str, ...] = (
-            "checkpoint",
-            "weight",
-            "weights",
-            "model",
-            "adapter",
-            "lora",
-            "load",
-            "artifact",
-        )
 
     def _wait_for_owner(self, task_id: str, owner: OwnerFence) -> None:
         """Account an owner-affine episode's wait on its busy holder.
@@ -614,45 +607,20 @@ class Dispatcher:
         selection_info: dict[str, Any] = {}
         worker: Worker | None = None
 
-        sticky_worker_id: str | None = None
-        if (not record.selected_worker) and self._stage_weight_stickiness_enabled:
-            sticky_worker_id = self._preferred_stage_worker(record, task)
+        if (
+            not record.selected_worker
+            and self._stage_weight_stickiness_enabled
+            and (holder := self._preferred_holder(task_id, pool)) is not None
+        ):
+            worker = holder
             selection_info = {
-                "strategy": "stage_weight_affinity",
-                "sticky_worker": sticky_worker_id,
+                "strategy": "artifact_holder",
                 "candidate_pool": len(pool),
                 "chosen_metrics": {"score": 1.0},
             }
-
-        if sticky_worker_id:
-            sticky_candidate = next(
-                (item for item in pool if item.id == sticky_worker_id), None
+            self._logger.debug(
+                "Preferring artifact holder %s for %s", holder.id, task_id
             )
-            if sticky_candidate:
-                worker = sticky_candidate
-                self._logger.debug(
-                    "Using sticky worker %s for %s",
-                    sticky_worker_id,
-                    task_id,
-                )
-            else:
-                if self._should_wait_for_sticky_worker(record, sticky_worker_id):
-                    self._logger.debug(
-                        "Preferred worker %s busy for %s; waiting for availability",
-                        sticky_worker_id,
-                        task_id,
-                    )
-                    self.requeue_task(
-                        task_id, reason="sticky_worker_busy", count_retry=False
-                    )
-                    return False
-                else:
-                    self._logger.debug(
-                        "Preferred worker %s unavailable for %s; falling "
-                        "back to normal selection",
-                        sticky_worker_id,
-                        task_id,
-                    )
 
         preferred_pool: list[Worker] = []
         if worker is None and self._context_reuse_enabled:
@@ -1259,96 +1227,52 @@ class Dispatcher:
         max_score = max(score for _, score in scored)
         return [worker for worker, score in scored if score == max_score]
 
-    def _preferred_stage_worker(
-        self, record: TaskRecord, task: TaskEnvelope
-    ) -> str | None:
-        if not record or not record.graph_node_name:
+    def _preferred_holder(self, task_id: str, pool: list[Worker]) -> Worker | None:
+        """An idle worker in ``pool`` that holds a copy of what the task's upstream
+        tasks published, largest first; None when none does.
+
+        A holder is preferred only over the idle pool, never waited for: a busy or
+        departed holder leaves the task to normal selection.
+        """
+        if self._content_holders is None or not pool:
             return None
-        task_type = (record.task_type or "").strip().lower()
-        if task_type.startswith("lora"):
-            return None
-        try:
-            info = self._runtime.describe_task(record.task_id)
-            depends_on = info.depends_on if info else None
-        except Exception:
-            depends_on = None
-        if not depends_on:
-            return None
-        for dep_id in depends_on:
-            dep_record = self._runtime.get_record(dep_id)
-            if not dep_record or not dep_record.assigned_worker:
-                continue
-            stage_refs = [dep_record.graph_node_name, dep_id]
-            for ref in stage_refs:
-                if not ref:
-                    continue
-                if self._spec_has_weight_reference(task, ref):
-                    return dep_record.assigned_worker
+        by_id = {worker.id: worker for worker in pool}
+        for reference in self._upstream_artifact_objects(task_id):
+            try:
+                holders = self._content_holders.holders(
+                    reference.authorization_scope, reference.content_digest
+                )
+            except Exception:
+                self._logger.debug(
+                    "Holders of %s unreadable", reference.content_digest, exc_info=True
+                )
+                return None
+            for record in holders:
+                worker = by_id.get(record.worker_id)
+                if worker is not None and worker.incarnation == record.generation:
+                    return worker
         return None
 
-    def _spec_has_weight_reference(
-        self, task: TaskEnvelope, stage_identifier: str
-    ) -> bool:
-        token = f"${{{stage_identifier}.result"
-        return self._search_weight_reference(task, token, tuple())
-
-    def _search_weight_reference(
-        self, value: Any, token: str, path: tuple[str, ...]
-    ) -> bool:
-        if isinstance(value, BaseModel):
-            for key, sub in value:
-                next_path = path + (str(key).lower(),)
-                if self._search_weight_reference(sub, token, next_path):
-                    return True
-        elif isinstance(value, dict):
-            for key, sub in value.items():
-                next_path = path + (str(key).lower(),)
-                if self._search_weight_reference(sub, token, next_path):
-                    return True
-        elif isinstance(value, list):
-            for item in value:
-                if self._search_weight_reference(item, token, path):
-                    return True
-        elif isinstance(value, str):
-            if token in value:
-                lowered = value.lower()
-                if any(hint in path for hint in self._weight_reference_hints) or any(
-                    hint in lowered for hint in self._weight_reference_hints
-                ):
-                    return True
-        return False
-
-    def _should_wait_for_sticky_worker(self, record, worker_id: str) -> bool:
-        if not record or not worker_id:
-            return False
-        task_type = (record.task_type or "").strip().lower()
-        if not task_type:
-            return False
-        if task_type.startswith("lora"):
-            return False
-        category = (record.category or "").strip().lower()
-        if category != "training":
-            return False
-        try:
-            worker = self._worker_registry.get_worker(worker_id)
-        except Exception:
-            worker = None
-        if not worker:
-            return False
-        try:
-            if self._worker_registry.is_worker_stale(worker_id):
-                return False
-            if self._worker_registry.is_cordoned(worker):
-                return False
-        except Exception:
-            return False
-        if worker.status is WorkerStatus.IDLE:
-            return False
-        return True
-
-    # ------------------------------------------------------------------ #
-    # Stage reference handling
-    # ------------------------------------------------------------------ #
+    def _upstream_artifact_objects(self, task_id: str) -> list[ContentReference]:
+        """The largest object of each final artifact the task's direct upstream tasks
+        published, largest first."""
+        scoped = self._runtime.scoped_inputs(task_id)
+        if scoped is not None:
+            producers = {
+                producer
+                for entry in scoped.values()
+                if (producer := entry.task_id or entry.binding.task_id)
+            }
+        else:
+            info = self._runtime.describe_task(task_id)
+            producers = set(info.depends_on) if info is not None else set()
+        objects: dict[tuple[str, str, str], ContentReference] = {}
+        for producer in producers:
+            for binding in (self._runtime.artifact_bindings(producer) or {}).values():
+                if binding.revision != FINAL_REVISION or binding.largest is None:
+                    continue
+                objects.setdefault(binding.largest.identity, binding.largest)
+        return sorted(objects.values(), key=lambda ref: ref.size_bytes, reverse=True)
 
     def _resolve_stage_references(
         self,

@@ -3,7 +3,7 @@ import logging
 from server.telemetry.tracing import ControlPlaneTracer
 
 from ..config import DispatchConfig
-from ..content import ContentAccessBroker
+from ..content import ContentAccessBroker, ContentHolderDirectory
 from ..dispatcher import Dispatcher
 from ..registries.worker import WorkerRegistry
 from ..services.metrics import MetricsRecorder
@@ -26,6 +26,7 @@ def create_dispatcher(
     resident_admission_slots: int = 0,
     content_access: ContentAccessBroker | None = None,
     control: ControlPlaneTracer | None = None,
+    content_holders: ContentHolderDirectory | None = None,
 ) -> Dispatcher:
     """
     Instantiate a dispatcher according to the selected mode.
@@ -67,4 +68,5 @@ def create_dispatcher(
         resident_admission_slots=resident_admission_slots,
         content_access=content_access,
         control=control,
+        content_holders=content_holders,
     )

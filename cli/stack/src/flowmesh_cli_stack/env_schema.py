@@ -1345,7 +1345,7 @@ STACK_ENV_SCHEMA = EnvSchema(
                 ),
                 EnvVar(
                     "ENABLE_STAGE_WEIGHT_STICKINESS",
-                    "false",
+                    "true",
                     var_type=EnvVarType.BOOL,
                 ),
                 EnvVar(

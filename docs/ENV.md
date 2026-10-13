@@ -35,7 +35,7 @@ directory `flowmesh stack` runs in.
 | `TASK_MERGE_MAX_BATCH_SIZE` | `4` | Max merged tasks per dispatch |
 | `ENABLE_CONTEXT_REUSE` | `true` | Bias toward workers with cached models |
 | `WORKER_CACHE_TTL_SEC` | `3600` | Cache metadata TTL |
-| `ENABLE_STAGE_WEIGHT_STICKINESS` | `false` | Pin stages to checkpoint-producing workers |
+| `ENABLE_STAGE_WEIGHT_STICKINESS` | `true` | Prefer an idle worker holding a copy of what a task's upstream tasks published |
 | `TASK_NO_WORKER_GRACE_SEC` | `60` | Grace before failing a task no worker can satisfy |
 | `ORCHESTRATOR_MAX_SCOPE_DEPTH` | `64` | Max nested call/spawn/recursion depth for v2 dynamic regions |
 | `ORCHESTRATOR_MAX_LOOP_ITERATIONS` | `1000` | Max iterations one v2 loop instance may run |
