@@ -46,6 +46,8 @@ DEFAULT_WORKER_CONFIG: Final[WorkerConfig] = WorkerConfig(
     content_holder_ttl_sec=300.0,
     object_store=ObjectStoreConfig.from_env(Path("/tmp/test-results")),
     content_transfer_timeout_sec=60.0,
+    content_transfer_window_bytes=1 << 20,
+    content_peer_transfer_max_bytes=64 << 20,
     server_base_url=None,
     supervisor_grpc_target="localhost:50051",
     supervisor_grpc_tls_ca_b64=None,
@@ -191,7 +193,7 @@ class FakeContentPlane:
         self.reads: list[ContentReference] = []
         self.on_read: Callable[[], None] | None = None
 
-    def for_task(self, task_id: str) -> FabricObjectStore:
+    def for_task(self, task_id: str, scope: str) -> FabricObjectStore:
         return self.store
 
     def hydrate(self, task_id: str, reference: ContentReference) -> bytes:

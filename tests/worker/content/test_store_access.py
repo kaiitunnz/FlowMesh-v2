@@ -31,7 +31,13 @@ _OPS = (ContentOperationKind.READ, ContentOperationKind.WRITE)
 class _RefusingLane:
     """A cache lane that cannot represent the object at all."""
 
-    def hydrate(self, reference: Any, task_id: str) -> bytes:
+    def read_local(self, reference: Any) -> bytes:
+        raise ContentStoreError("this cache cannot hold that scope")
+
+    def read_peer(self, reference: Any, task_id: str) -> bytes:
+        raise ContentStoreError("this cache cannot hold that scope")
+
+    def keep(self, scope: str, data: bytes, *, media_type: str = "") -> Any:
         raise ContentStoreError("this cache cannot hold that scope")
 
 
@@ -194,7 +200,13 @@ def test_a_cache_that_cannot_serve_still_reads_the_object_from_the_store(
 class _BrokenLane:
     """A cache whose backing directory has gone unreadable under it."""
 
-    def hydrate(self, reference: Any, task_id: str) -> bytes:
+    def read_local(self, reference: Any) -> bytes:
+        raise OSError("input/output error")
+
+    def read_peer(self, reference: Any, task_id: str) -> bytes:
+        raise OSError("input/output error")
+
+    def keep(self, scope: str, data: bytes, *, media_type: str = "") -> Any:
         raise OSError("input/output error")
 
 
@@ -223,7 +235,7 @@ class _RecordingLane:
         self.store.write(scope, data, media_type=media_type)
         return reference_for(scope, data, media_type=media_type)
 
-    def hydrate(self, reference: Any, task_id: str) -> bytes:
+    def read_local(self, reference: Any) -> bytes:
         raise ContentStoreError("nothing cached here")
 
 

@@ -50,6 +50,7 @@ def discard_step_captures(
 def hydrate_delivered_outcomes(
     lifecycle: "Lifecycle | None",
     task_id: str,
+    content_scope: str,
     outcomes: tuple[DeliveredOutcome, ...],
 ) -> tuple[DeliveredOutcome, ...]:
     """Resolve any reference-backed outcome into its injected value.
@@ -64,7 +65,7 @@ def hydrate_delivered_outcomes(
     plane = lifecycle.content_plane if lifecycle is not None else None
     if plane is None:
         raise ExecutionError("cannot hydrate a reference-backed outcome: no store")
-    store = plane.for_task(task_id)
+    store = plane.for_task(task_id, content_scope)
     return tuple(_hydrate(o, store) for o in outcomes)
 
 

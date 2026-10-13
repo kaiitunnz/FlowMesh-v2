@@ -14,9 +14,9 @@ grant it came with does.
 
 The grant covers a scope rather than a reference, so one issuance serves everything a
 task reads and writes, and the scope is therefore the widest the store itself will let
-that task reach. It carries no list, delete, or binding operation. Which references a
-task may actually use is still decided above, by the consumer bindings control checks
-before it hands one over.
+that task reach. It may abort its own scope's multipart uploads and carries no list,
+delete, or binding operation. Which references a task may actually use is still decided
+above, by the consumer bindings control checks before it hands one over.
 """
 
 import time
@@ -25,6 +25,19 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict, Field
 
 ACCESS_GRANT_VERSION = 1
+
+# The longest a worker asks ahead of an access's end for access to follow it.
+RENEWAL_LEAD_SEC = 120.0
+
+
+def renewal_lead_sec(lifetime_sec: float) -> float:
+    """How long before its end an access of this lifetime is renewed.
+
+    Never more than half the lifetime, so an access is never born already due for
+    renewal. A minter that reuses a session only while more than this remains of it
+    answers every renewal with a later expiry.
+    """
+    return min(RENEWAL_LEAD_SEC, max(0.0, lifetime_sec) / 2)
 
 
 class ContentOperationKind(StrEnum):
@@ -91,5 +104,7 @@ __all__ = [
     "ContentOperationKind",
     "ContentStoreAccess",
     "ContentStoreAccessGrant",
+    "RENEWAL_LEAD_SEC",
     "ScopedContentCredential",
+    "renewal_lead_sec",
 ]

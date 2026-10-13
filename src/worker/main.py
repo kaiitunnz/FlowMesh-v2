@@ -340,6 +340,7 @@ def _build_content_plane(
             worker_id=client.worker_id,
             generation=client.incarnation,
             transfer_timeout_sec=cfg.content_transfer_timeout_sec,
+            window_bytes=cfg.content_transfer_window_bytes,
             announce=client.push_content_holding,
             holder_report_ttl_sec=cfg.content_holder_ttl_sec,
             logger=logger,
@@ -353,6 +354,7 @@ def _build_content_plane(
             if cfg.server_base_url
             else None
         ),
+        peer_max_bytes=cfg.content_peer_transfer_max_bytes,
         logger=logger,
     )
 

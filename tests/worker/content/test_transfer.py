@@ -1,9 +1,13 @@
 """One content transfer end to end between a requesting worker and its holder."""
 
 import asyncio
+import os
 import threading
 import time
+import tracemalloc
 from collections.abc import Awaitable, Callable
+from pathlib import Path
+from typing import BinaryIO
 
 import pytest
 
@@ -28,9 +32,11 @@ class _ToPeer:
     def __init__(self) -> None:
         self.peer: Callable[[RelayFrame], Awaitable[None]] | None = None
         self.frames: list[RelayFrame] = []
+        self.record = True
 
     async def send(self, frame: RelayFrame) -> None:
-        self.frames.append(frame)
+        if self.record:
+            self.frames.append(frame)
         if self.peer is not None:
             await self.peer(frame)
 
@@ -47,6 +53,21 @@ def _grant(reference: ContentReference, **overrides) -> ContentHydrationGrant:
         "expires_at_epoch": time.time() + 30,
     }
     return ContentHydrationGrant(**{**fields, **overrides})
+
+
+async def _read(
+    client: ContentHydrationClient,
+    reference: ContentReference,
+    task_id: str,
+    tmp_path: Path,
+) -> bytes:
+    staging = tmp_path / "staging"
+    staging.mkdir(exist_ok=True)
+    path = await client.hydrate_to_file(reference, task_id, staging)
+    try:
+        return path.read_bytes()
+    finally:
+        path.unlink()
 
 
 class _Pair:
@@ -81,7 +102,7 @@ async def test_a_granted_transfer_delivers_the_verified_object(tmp_path) -> None
     grant = _grant(reference)
     pair.holder.accept_grant(grant)
 
-    hydration = asyncio.ensure_future(pair.client.hydrate(reference, "tsk-1"))
+    hydration = asyncio.ensure_future(_read(pair.client, reference, "tsk-1", tmp_path))
     await asyncio.sleep(0)
     pair.client.deliver_grant(grant)
 
@@ -96,7 +117,7 @@ async def test_a_transfer_carries_no_object_identity_in_its_frames(tmp_path) -> 
     grant = _grant(reference)
     pair.holder.accept_grant(grant)
 
-    hydration = asyncio.ensure_future(pair.client.hydrate(reference, "tsk-1"))
+    hydration = asyncio.ensure_future(_read(pair.client, reference, "tsk-1", tmp_path))
     await asyncio.sleep(0)
     pair.client.deliver_grant(grant)
     await hydration
@@ -119,7 +140,7 @@ async def test_a_fetch_waits_for_a_grant_still_in_flight(tmp_path) -> None:
     reference = pair.store.write("local", _BODY, media_type="application/json")
     grant = _grant(reference)
 
-    hydration = asyncio.ensure_future(pair.client.hydrate(reference, "tsk-1"))
+    hydration = asyncio.ensure_future(_read(pair.client, reference, "tsk-1", tmp_path))
     await asyncio.sleep(0)
     pair.client.deliver_grant(grant)
     await asyncio.sleep(0)
@@ -134,7 +155,7 @@ async def test_a_grant_the_holder_never_received_serves_nothing(tmp_path) -> Non
     reference = pair.store.write("local", _BODY, media_type="application/json")
     forged = _grant(reference)
 
-    hydration = asyncio.ensure_future(pair.client.hydrate(reference, "tsk-1"))
+    hydration = asyncio.ensure_future(_read(pair.client, reference, "tsk-1", tmp_path))
     await asyncio.sleep(0)
     pair.client.deliver_grant(forged)
 
@@ -149,7 +170,7 @@ async def test_an_expired_grant_serves_nothing(tmp_path) -> None:
     grant = _grant(reference, expires_at_epoch=time.time() - 1)
     pair.holder.accept_grant(grant)
 
-    hydration = asyncio.ensure_future(pair.client.hydrate(reference, "tsk-1"))
+    hydration = asyncio.ensure_future(_read(pair.client, reference, "tsk-1", tmp_path))
     await asyncio.sleep(0)
     pair.client.deliver_grant(grant)
 
@@ -166,7 +187,7 @@ async def test_a_grant_for_a_superseded_holder_incarnation_serves_nothing(
     grant = _grant(reference)
     pair.holder.accept_grant(grant)
 
-    hydration = asyncio.ensure_future(pair.client.hydrate(reference, "tsk-1"))
+    hydration = asyncio.ensure_future(_read(pair.client, reference, "tsk-1", tmp_path))
     await asyncio.sleep(0)
     pair.client.deliver_grant(grant)
 
@@ -184,7 +205,7 @@ async def test_a_rebound_holder_serves_its_new_registration_s_grants(
     grant = _grant(reference, holder_id="wkr-3", holder_generation=2)
     pair.holder.accept_grant(grant)
 
-    hydration = asyncio.ensure_future(pair.client.hydrate(reference, "tsk-1"))
+    hydration = asyncio.ensure_future(_read(pair.client, reference, "tsk-1", tmp_path))
     await asyncio.sleep(0)
     pair.client.deliver_grant(grant)
 
@@ -201,7 +222,7 @@ async def test_a_rebound_holder_refuses_its_previous_registration_s_grants(
     grant = _grant(reference)
     pair.holder.accept_grant(grant)
 
-    hydration = asyncio.ensure_future(pair.client.hydrate(reference, "tsk-1"))
+    hydration = asyncio.ensure_future(_read(pair.client, reference, "tsk-1", tmp_path))
     await asyncio.sleep(0)
     pair.client.deliver_grant(grant)
 
@@ -216,7 +237,7 @@ async def test_an_object_the_holder_lost_is_a_typed_failure(tmp_path) -> None:
     grant = _grant(reference)
     pair.holder.accept_grant(grant)
 
-    hydration = asyncio.ensure_future(pair.client.hydrate(reference, "tsk-1"))
+    hydration = asyncio.ensure_future(_read(pair.client, reference, "tsk-1", tmp_path))
     await asyncio.sleep(0)
     pair.client.deliver_grant(grant)
 
@@ -229,7 +250,7 @@ async def test_a_denied_request_fails_with_controls_reason(tmp_path) -> None:
     pair = _Pair(tmp_path)
     reference = reference_for("local", _BODY, media_type="application/json")
 
-    hydration = asyncio.ensure_future(pair.client.hydrate(reference, "tsk-1"))
+    hydration = asyncio.ensure_future(_read(pair.client, reference, "tsk-1", tmp_path))
     await asyncio.sleep(0)
     pair.client.deliver_denial(reference, "no binding authorizes this reference")
 
@@ -244,12 +265,12 @@ async def test_a_grant_is_good_for_one_transfer(tmp_path) -> None:
     grant = _grant(reference)
     pair.holder.accept_grant(grant)
 
-    first = asyncio.ensure_future(pair.client.hydrate(reference, "tsk-1"))
+    first = asyncio.ensure_future(_read(pair.client, reference, "tsk-1", tmp_path))
     await asyncio.sleep(0)
     pair.client.deliver_grant(grant)
     assert await first == _BODY
 
-    replay = asyncio.ensure_future(pair.client.hydrate(reference, "tsk-1"))
+    replay = asyncio.ensure_future(_read(pair.client, reference, "tsk-1", tmp_path))
     await asyncio.sleep(0)
     pair.client.deliver_grant(grant)
     with pytest.raises(ContentHydrationError, match="consumed"):
@@ -264,7 +285,7 @@ async def test_an_object_larger_than_one_chunk_reassembles(tmp_path) -> None:
     grant = _grant(reference)
     pair.holder.accept_grant(grant)
 
-    hydration = asyncio.ensure_future(pair.client.hydrate(reference, "tsk-1"))
+    hydration = asyncio.ensure_future(_read(pair.client, reference, "tsk-1", tmp_path))
     await asyncio.sleep(0)
     pair.client.deliver_grant(grant)
 
@@ -275,7 +296,7 @@ async def test_an_object_larger_than_one_chunk_reassembles(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_a_transfer_in_flight_holds_its_object_against_the_sweep(
-    tmp_path,
+    tmp_path, monkeypatch
 ) -> None:
     """A copy being served survives a sweep that would otherwise drop it.
 
@@ -287,21 +308,24 @@ async def test_a_transfer_in_flight_holds_its_object_against_the_sweep(
     reference = pair.store.write("local", _BODY, media_type="application/json")
     reading = threading.Event()
     release = threading.Event()
-    served = pair.store.fetch
+    # Whether the test let the open go, rather than the open giving up waiting: the
+    # holder opens off its loop, so the test runs while the open is held.
+    released: list[bool] = []
+    served = pair.store.open_pinned
 
-    def _blocking_fetch(ref: ContentReference) -> bytes:
+    def _blocking_open(ref: ContentReference) -> BinaryIO:
         reading.set()
-        release.wait(5)
+        released.append(release.wait(5))
         return served(ref)
 
-    pair.store.fetch = _blocking_fetch  # type: ignore[assignment]
+    monkeypatch.setattr(pair.store, "open_pinned", _blocking_open)
     grant = _grant(reference)
     pair.holder.accept_grant(grant)
 
-    hydration = asyncio.ensure_future(pair.client.hydrate(reference, "tsk-1"))
+    hydration = asyncio.ensure_future(_read(pair.client, reference, "tsk-1", tmp_path))
     await asyncio.sleep(0)
     pair.client.deliver_grant(grant)
-    await asyncio.to_thread(reading.wait, 5)
+    assert await asyncio.to_thread(reading.wait, 5)
 
     # Mid-serve: the object is named as in transfer, and a sweep with no room for
     # anything leaves it alone while every other copy goes.
@@ -313,6 +337,7 @@ async def test_a_transfer_in_flight_holds_its_object_against_the_sweep(
 
     release.set()
     assert await hydration == _BODY
+    assert released == [True]
 
 
 @pytest.mark.asyncio
@@ -324,8 +349,8 @@ async def test_two_reads_of_one_object_each_take_their_own_grant(tmp_path) -> No
     pair.holder.accept_grant(second)
 
     reads = [
-        asyncio.ensure_future(pair.client.hydrate(reference, "tsk-1")),
-        asyncio.ensure_future(pair.client.hydrate(reference, "tsk-2")),
+        asyncio.ensure_future(_read(pair.client, reference, "tsk-1", tmp_path)),
+        asyncio.ensure_future(_read(pair.client, reference, "tsk-2", tmp_path)),
     ]
     await asyncio.sleep(0)
     pair.client.deliver_grant(first)
@@ -364,7 +389,7 @@ async def test_a_grant_naming_another_session_serves_nothing(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_an_abandoned_transfer_releases_the_holder(tmp_path) -> None:
+async def test_an_abandoned_transfer_releases_the_holder(tmp_path, monkeypatch) -> None:
     """A requester that gives up tells the holder, which stops serving and lets go.
 
     A transfer only advances as the requester drains, so one abandoned in silence
@@ -375,21 +400,24 @@ async def test_an_abandoned_transfer_releases_the_holder(tmp_path) -> None:
     reference = pair.store.write("local", _BODY, media_type="application/json")
     reading = threading.Event()
     release = threading.Event()
-    served = pair.store.fetch
+    # Whether the test let the open go, rather than the open giving up waiting: the
+    # holder opens off its loop, so the test runs while the open is held.
+    released: list[bool] = []
+    served = pair.store.open_pinned
 
-    def _blocking_fetch(ref: ContentReference) -> bytes:
+    def _blocking_open(ref: ContentReference) -> BinaryIO:
         reading.set()
-        release.wait(5)
+        released.append(release.wait(5))
         return served(ref)
 
-    pair.store.fetch = _blocking_fetch  # type: ignore[assignment]
+    monkeypatch.setattr(pair.store, "open_pinned", _blocking_open)
     grant = _grant(reference)
     pair.holder.accept_grant(grant)
 
-    hydration = asyncio.ensure_future(pair.client.hydrate(reference, "tsk-1"))
+    hydration = asyncio.ensure_future(_read(pair.client, reference, "tsk-1", tmp_path))
     await asyncio.sleep(0)
     pair.client.deliver_grant(grant)
-    await asyncio.to_thread(reading.wait, 5)
+    assert await asyncio.to_thread(reading.wait, 5)
     assert reference.content_digest in pair.holder.in_transfer
 
     hydration.cancel()
@@ -397,6 +425,7 @@ async def test_an_abandoned_transfer_releases_the_holder(tmp_path) -> None:
         await hydration
     release.set()
     await asyncio.sleep(0.05)
+    assert released == [True]
 
     assert any(
         frame.kind is RelayFrameKind.CANCEL for frame in pair.to_holder.frames
@@ -462,7 +491,7 @@ async def test_a_slow_transfer_runs_as_long_as_it_keeps_progressing(tmp_path) ->
     holder.accept_grant(grant)
 
     started = time.monotonic()
-    hydration = asyncio.ensure_future(client.hydrate(reference, "tsk-1"))
+    hydration = asyncio.ensure_future(_read(client, reference, "tsk-1", tmp_path))
     await asyncio.sleep(0)
     client.deliver_grant(grant)
 
@@ -497,7 +526,7 @@ async def test_a_holder_gives_up_a_requester_that_stops_reading(tmp_path) -> Non
     grant = _grant(reference)
     holder.accept_grant(grant)
 
-    hydration = asyncio.ensure_future(client.hydrate(reference, "tsk-1"))
+    hydration = asyncio.ensure_future(_read(client, reference, "tsk-1", tmp_path))
     await asyncio.sleep(0)
     client.deliver_grant(grant)
     for _ in range(50):
@@ -511,3 +540,60 @@ async def test_a_holder_gives_up_a_requester_that_stops_reading(tmp_path) -> Non
     hydration.cancel()
     with pytest.raises(asyncio.CancelledError):
         await hydration
+
+
+@pytest.mark.asyncio
+async def test_a_holder_copy_that_is_not_the_object_is_refused_and_dropped(
+    tmp_path,
+) -> None:
+    pair = _Pair(tmp_path)
+    data = os.urandom(5 * CHUNK_BYTES)
+    reference = pair.store.write("local", data)
+    (copy,) = [
+        p for p in pair.store_root.rglob("*") if p.is_file() and "objects" in p.parts
+    ]
+    corrupted = bytearray(data)
+    corrupted[-1] ^= 0xFF
+    copy.write_bytes(bytes(corrupted))
+    grant = _grant(reference)
+    pair.holder.accept_grant(grant)
+
+    hydration = asyncio.ensure_future(_read(pair.client, reference, "tsk-1", tmp_path))
+    await asyncio.sleep(0)
+    pair.client.deliver_grant(grant)
+
+    with pytest.raises(ContentHydrationError):
+        await hydration
+    assert not pair.store.holds(reference)
+    assert list((tmp_path / "staging").iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_a_transfer_streams_without_holding_the_object(tmp_path) -> None:
+    pair = _Pair(tmp_path)
+    # The pair's sinks keep every frame for inspection, which this test cannot afford.
+    pair.to_requester.record = pair.to_holder.record = False
+    data = os.urandom(16 << 20)
+    reference = pair.store.write("local", data)
+    del data
+    grant = _grant(reference)
+    pair.holder.accept_grant(grant)
+
+    tracemalloc.start()
+    try:
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        hydration = asyncio.ensure_future(
+            pair.client.hydrate_to_file(reference, "tsk-1", staging)
+        )
+        await asyncio.sleep(0)
+        pair.client.deliver_grant(grant)
+        landed = await hydration
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert landed.stat().st_size == reference.size_bytes
+    # Both ends run in this process, so the peak covers the holder's reads, the frames
+    # in flight and the requester's write buffer: a few MiB, not the object.
+    assert peak < 6 << 20

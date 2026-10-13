@@ -12,9 +12,11 @@ import asyncio
 import concurrent.futures
 import contextlib
 import logging
+import shutil
 import threading
 import time
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Iterator
+from pathlib import Path
 from typing import Any
 
 from shared.content import (
@@ -23,8 +25,10 @@ from shared.content import (
     ContentHydrationGrant,
     ContentReference,
 )
+from shared.content.config import DEFAULT_TRANSFER_WINDOW_BYTES
 from shared.network.frame_stream import WireFrameSink
 from shared.network.relay_frame import CONTENT_FRAME_KIND, RelayDirection, RelayFrame
+from shared.utils.atomic import write_replacing
 
 from .client import AnnounceHolding, ContentHydrationClient, RequestGrant
 from .holder import ContentHolder
@@ -46,6 +50,7 @@ class ContentLaneHost:
         worker_id: str,
         generation: int,
         transfer_timeout_sec: float = 60.0,
+        window_bytes: int = DEFAULT_TRANSFER_WINDOW_BYTES,
         announce: AnnounceHolding | None = None,
         holder_report_ttl_sec: float = 300.0,
         logger: logging.Logger | None = None,
@@ -56,6 +61,7 @@ class ContentLaneHost:
         self._worker_id = worker_id
         self._generation = generation
         self._transfer_timeout_sec = transfer_timeout_sec
+        self._window_bytes = window_bytes
         self._announce = announce
         self._holder_report_ttl_sec = holder_report_ttl_sec
         self._logger = logger or logging.getLogger("content-lane-host")
@@ -82,6 +88,7 @@ class ContentLaneHost:
             sink=sink,
             holder_id=self._worker_id,
             generation=self._generation,
+            window_bytes=self._window_bytes,
             stall_timeout_sec=self._transfer_timeout_sec,
             logger=self._logger,
         )
@@ -89,28 +96,77 @@ class ContentLaneHost:
             sink=sink,
             request_grant=self._request_grant,
             transfer_timeout_sec=self._transfer_timeout_sec,
+            window_bytes=self._window_bytes,
             logger=self._logger,
         )
         self._sweep = asyncio.ensure_future(self._keep_held_reachable())
 
-    def hydrate(self, reference: ContentReference, task_id: str) -> bytes:
-        """Fetch one object, from this worker's own store or from its holder."""
-        if self._store.holds(reference):
+    def read_local(self, reference: ContentReference) -> bytes:
+        """This worker's own verified copy of an object."""
+        data = self._store.hydrate(reference)
+        self._logger.info(
+            "content %s read from the local cache", reference.content_digest
+        )
+        return data
+
+    def copy_local(self, reference: ContentReference, dest: Path) -> None:
+        """Copy this worker's own verified copy of an object to ``dest``."""
+        self._store.hydrate_to(reference, dest)
+        self._logger.info(
+            "content %s read from the local cache", reference.content_digest
+        )
+
+    def read_peer(self, reference: ContentReference, task_id: str) -> bytes:
+        """An object's verified bytes from the peer control resolves, kept here too;
+        the copy is announced by whoever asked for the read."""
+        with self._from_peer(reference, task_id) as verified:
+            return verified.read_bytes()
+
+    def copy_peer(self, reference: ContentReference, task_id: str, dest: Path) -> None:
+        """An object's verified bytes from a peer copied to ``dest``, kept here too."""
+        with self._from_peer(reference, task_id) as verified:
+            _copy_file(verified, dest)
+
+    @contextlib.contextmanager
+    def _from_peer(self, reference: ContentReference, task_id: str) -> Iterator[Path]:
+        """The verified file a peer transfer lands in, taken into the cache once the
+        caller has read it.
+
+        The caller reads the transfer's own file rather than the cached copy, which an
+        eviction is free to remove the moment it is adopted.
+        """
+        verified = self._transfer(reference, task_id)
+        try:
+            yield verified
             self._logger.info(
-                "content %s read from the local cache", reference.content_digest
+                "content %s read from a peer cache", reference.content_digest
             )
-            return self._store.hydrate(reference)
+            try:
+                self._store.adopt(reference, verified)
+            except Exception:
+                self._logger.warning(
+                    "could not cache %s locally",
+                    reference.content_digest,
+                    exc_info=True,
+                )
+        finally:
+            verified.unlink(missing_ok=True)
+
+    def _transfer(self, reference: ContentReference, task_id: str) -> Path:
         if self._client is None:
             raise RuntimeError("content lane is not started")
         client = self._client
-        transfer = self._call(lambda: client.hydrate(reference, task_id))
+        staging = self._store.staging_dir(reference.authorization_scope)
+        transfer = self._call(
+            lambda: client.hydrate_to_file(reference, task_id, staging)
+        )
         # The client bounds each wait by the stall timeout, so a transfer that keeps
         # making progress runs as long as it needs. This is the backstop for a lane
         # that stops making any progress at all, and it fails the read the same typed
         # way.
         while True:
             try:
-                data = transfer.result(timeout=self._transfer_timeout_sec)
+                return transfer.result(timeout=self._transfer_timeout_sec)
             except concurrent.futures.TimeoutError as exc:
                 idle = time.monotonic() - client.last_progress
                 if idle < self._transfer_timeout_sec * 2:
@@ -119,10 +175,6 @@ class ContentLaneHost:
                 raise ContentHydrationError(
                     f"hydrating {reference.content_digest} stopped making progress"
                 ) from exc
-            self._logger.info(
-                "content %s read from a peer cache", reference.content_digest
-            )
-            return data
 
     def keep(
         self, scope: str, data: bytes, *, media_type: str = OCTET_STREAM
@@ -132,7 +184,26 @@ class ContentLaneHost:
         None when the copy did not survive the bounds — an object larger than the whole
         disk budget — so nothing is announced for a copy that is not here.
         """
-        reference = self._store.write(scope, data, media_type=media_type)
+        return self.held(self._store.write(scope, data, media_type=media_type))
+
+    def keep_file(
+        self, reference: ContentReference, path: Path
+    ) -> ContentReference | None:
+        """Cache a copy of a file holding the reference's bytes, as ``keep`` does.
+
+        The copy is hashed as it is taken, and one that turns out not to be the
+        reference's bytes — the file changed after it was stored — is not kept.
+        """
+        copied = self._store.write_file(
+            reference.authorization_scope, path, media_type=reference.media_type
+        )
+        if copied != reference:
+            self._store.drop(copied)
+            return None
+        return self.held(reference)
+
+    def held(self, reference: ContentReference) -> ContentReference | None:
+        """The reference while a copy of it is here, once the cache is in bounds."""
         self.evict()
         return reference if self._store.holds(reference) else None
 
@@ -264,3 +335,9 @@ class ContentLaneHost:
                 self._call(self._holder.aclose).result(timeout=min(5.0, left()))
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join(timeout=min(5.0, left()))
+
+
+def _copy_file(source: Path, dest: Path) -> None:
+    """Copy a file to ``dest``, which appears only whole."""
+    with source.open("rb") as src:
+        write_replacing(dest, lambda fh: shutil.copyfileobj(src, fh))

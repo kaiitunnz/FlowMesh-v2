@@ -2,12 +2,13 @@
 
 The consumer side of a transfer: the worker asks the control plane for a grant on one
 exact reference, and control answers with a grant naming the holder it resolved or a
-typed denial. With a grant in hand the worker opens the transfer, streams the object
-from that holder, and verifies the assembled bytes against the reference before handing
-them back. Nothing here decides that the worker may read the object — control does,
-against the consumer binding that entitles it — and nothing here recreates an outcome,
-re-resolves an input, or releases a credit when a transfer fails: an unavailable holder
-is a typed hydration failure and the consumer's own recovery decides what follows.
+typed denial. With a grant in hand the worker opens the transfer and streams the object
+from that holder into a file, hashing as it goes, and hands the file back only once its
+bytes verify against the reference; a transfer that fails leaves no file behind.
+Nothing here decides that the worker may read the object — control does, against the
+consumer binding that entitles it — and nothing here recreates an outcome, re-resolves
+an input, or releases a credit when a transfer fails: an unavailable holder is a typed
+hydration failure and the consumer's own recovery decides what follows.
 """
 
 import asyncio
@@ -16,13 +17,15 @@ import logging
 import time
 from collections import deque
 from collections.abc import Callable, Sequence
+from pathlib import Path
 
 from shared.content import (
     ContentHydrationError,
     ContentHydrationGrant,
     ContentReference,
-    verify_content,
+    ContentVerifier,
 )
+from shared.content.config import DEFAULT_TRANSFER_WINDOW_BYTES
 from shared.content.wire import (
     KIND_CHUNK,
     KIND_DONE,
@@ -33,6 +36,7 @@ from shared.content.wire import (
 from shared.network.frame_stream import FrameSink
 from shared.network.relay_frame import RelayFrame
 from shared.network.session import FramedRelaySession, RelaySessionRole
+from shared.utils.atomic import temp_path
 
 # Asks the control plane to authorize hydrating one reference for one task.
 RequestGrant = Callable[[ContentReference, str], None]
@@ -40,6 +44,10 @@ RequestGrant = Callable[[ContentReference, str], None]
 # Reports the objects this worker holds, each by its scope and digest, to the holder
 # directory. One call carries a whole report so a periodic re-report is one message.
 AnnounceHolding = Callable[[Sequence[tuple[str, str]]], None]
+
+# How much of a transfer collects in memory before it is written out, so the file is
+# written in large blocks off the loop rather than frame by frame on it.
+_WRITE_BUFFER_BYTES = 1 << 20
 
 # Keyed by the object a request waits on: control answers a grant or a typed denial
 # naming that same reference, so an answer finds its request by what it is about.
@@ -60,7 +68,7 @@ class ContentHydrationClient:
         sink: FrameSink,
         request_grant: RequestGrant,
         transfer_timeout_sec: float = 60.0,
-        window_bytes: int = 65536,
+        window_bytes: int = DEFAULT_TRANSFER_WINDOW_BYTES,
         logger: logging.Logger | None = None,
     ) -> None:
         self._sink = sink
@@ -83,8 +91,11 @@ class ContentHydrationClient:
     def _progressed(self) -> None:
         self._last_progress = time.monotonic()
 
-    async def hydrate(self, reference: ContentReference, task_id: str) -> bytes:
-        """Fetch and verify one object from whichever holder control resolves."""
+    async def hydrate_to_file(
+        self, reference: ContentReference, task_id: str, staging: Path
+    ) -> Path:
+        """Fetch one object from whichever holder control resolves into a new file in
+        ``staging``, and return the file once its bytes verify."""
         self._progressed()
         grant = await self._grant_for(reference, task_id)
         session = FramedRelaySession(
@@ -95,13 +106,15 @@ class ContentHydrationClient:
             window_bytes=self._window_bytes,
         )
         self._sessions[grant.transfer_session_id] = session
+        target = temp_path(staging)
         served = False
         try:
-            data = verify_content(reference, await self._transfer(session, grant))
+            await self._transfer(session, grant, target)
             served = True
-            return data
+            return target
         finally:
             if not served:
+                target.unlink(missing_ok=True)
                 # A transfer only advances as this end drains and grants window, so
                 # abandoning one silently would leave the holder blocked on a send
                 # nobody is reading — holding the object against eviction for as long
@@ -141,39 +154,39 @@ class ContentHydrationClient:
         return answer
 
     async def _transfer(
-        self, session: FramedRelaySession, grant: ContentHydrationGrant
-    ) -> bytes:
+        self, session: FramedRelaySession, grant: ContentHydrationGrant, target: Path
+    ) -> None:
         await session.send_wire(KIND_FETCH, grant=grant.model_dump(mode="json"))
-        chunks: list[bytes] = []
-        received = 0
-        limit = grant.reference.size_bytes
-        while True:
-            frame = await session.recv_body_wire(timeout=self._timeout)
-            if frame is None:
-                raise ContentHydrationError(
-                    f"content transfer {session.session_id} ended without the object"
-                )
-            message, body = frame
-            kind = message.get("kind")
-            if kind == KIND_CHUNK:
-                received += len(body)
-                if received > limit:
-                    # The reference says how big the object is, so a holder sending
-                    # past it is never going to verify; stop reading rather than
-                    # assembling an unbounded amount of it to find that out.
+        verifier = ContentVerifier(grant.reference)
+        pending: list[bytes] = []
+        buffered = 0
+        with target.open("xb") as fh:
+            while True:
+                frame = await session.recv_body_wire(timeout=self._timeout)
+                if frame is None:
                     raise ContentHydrationError(
-                        f"content transfer {session.session_id} overran "
-                        f"{limit} declared bytes"
+                        f"content transfer {session.session_id} ended without the "
+                        "object"
                     )
-                chunks.append(body)
-            elif kind == KIND_DONE:
-                return b"".join(chunks)
-            elif kind == KIND_REJECT:
-                raise ContentHydrationError(
-                    f"holder refused the transfer: {message.get('reason')}"
-                )
-            elif kind != KIND_HEAD:
-                raise ContentHydrationError("unexpected content transfer message")
+                message, body = frame
+                kind = message.get("kind")
+                if kind == KIND_CHUNK:
+                    verifier.update(body)
+                    pending.append(body)
+                    buffered += len(body)
+                    if buffered >= _WRITE_BUFFER_BYTES:
+                        await asyncio.to_thread(fh.writelines, pending)
+                        pending, buffered = [], 0
+                elif kind == KIND_DONE:
+                    await asyncio.to_thread(fh.writelines, pending)
+                    verifier.finish()
+                    return
+                elif kind == KIND_REJECT:
+                    raise ContentHydrationError(
+                        f"holder refused the transfer: {message.get('reason')}"
+                    )
+                elif kind != KIND_HEAD:
+                    raise ContentHydrationError("unexpected content transfer message")
 
     def deliver_grant(self, grant: ContentHydrationGrant) -> None:
         """Hand a control-minted grant to the request waiting for its object."""

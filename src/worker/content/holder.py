@@ -1,24 +1,28 @@
 """Serving the objects this worker holds to the workers control authorizes.
 
 The holder answers one transfer at a time per session: it admits the presented grant
-against the ones control pre-delivered, verifies the stored object against the exact
-reference that grant names, and streams the bytes back over the session's window. A
-refusal is a typed rejection the requester surfaces as a hydration failure — never a
-partial or unverified object, and never bytes for a grant this holder was not handed.
+against the ones control pre-delivered, opens its copy of the exact object that grant
+names, and streams it back over the session's window, hashing as it reads. A copy that
+turns out not to be the object ends the transfer with a refusal instead of its last
+message and is dropped from the cache. A refusal is a typed rejection the requester
+surfaces as a hydration failure — never a completed transfer of bytes the reference does
+not name, and never bytes for a grant this holder was not handed.
 """
 
 import asyncio
 import logging
-from typing import Any
+from typing import Any, BinaryIO
 
 from shared.content import (
     ContentHydrationError,
     ContentHydrationGrant,
+    ContentReference,
     ContentStoreError,
+    ContentVerifier,
     GrantRejection,
     HolderGrantGate,
-    verify_content,
 )
+from shared.content.config import DEFAULT_TRANSFER_WINDOW_BYTES
 from shared.content.wire import (
     CHUNK_BYTES,
     KIND_CHUNK,
@@ -57,7 +61,7 @@ class ContentHolder:
         sink: FrameSink,
         holder_id: str,
         generation: int,
-        window_bytes: int = 65536,
+        window_bytes: int = DEFAULT_TRANSFER_WINDOW_BYTES,
         grant_arrival_wait_sec: float = _GRANT_ARRIVAL_WAIT_SEC,
         stall_timeout_sec: float = _STALL_TIMEOUT_SEC,
         logger: logging.Logger | None = None,
@@ -164,24 +168,49 @@ class ContentHolder:
         reference = grant.reference
         self._track(session_id, reference.content_digest)
         try:
-            # Reading the object and hashing it are both work proportional to its size,
-            # and this loop also carries every other transfer's frames and the grants
-            # control delivers, so neither runs on it.
-            data = await asyncio.to_thread(
-                lambda: verify_content(reference, self._store.fetch(reference))
-            )
-        except (ContentStoreError, ContentHydrationError) as exc:
+            # The open file outlives an eviction that unlinks it mid-transfer, so the
+            # copy this transfer serves cannot be taken out from under it.
+            fh = await asyncio.to_thread(self._store.open_pinned, reference)
+        except (ContentStoreError, OSError) as exc:
             self._logger.warning("holder cannot serve %s: %s", session_id, exc)
             await session.send_wire(KIND_REJECT, reason="unavailable")
             return
+        with fh:
+            await self._stream(session, reference, fh)
+
+    async def _stream(
+        self,
+        session: FramedRelaySession,
+        reference: ContentReference,
+        fh: BinaryIO,
+    ) -> None:
+        verifier = ContentVerifier(reference)
+
+        def read_chunk() -> bytes:
+            # Reading and hashing are both work proportional to the object, and this
+            # loop also carries every other transfer's frames and the grants control
+            # delivers, so neither runs on it.
+            chunk = fh.read(CHUNK_BYTES)
+            verifier.update(chunk)
+            return chunk
+
         loop = asyncio.get_running_loop()
         async with asyncio.timeout(self._stall_timeout_sec) as stall:
-            await session.send_wire(KIND_HEAD, size_bytes=len(data))
-            for start in range(0, len(data), CHUNK_BYTES):
-                stall.reschedule(loop.time() + self._stall_timeout_sec)
-                await session.send_body_wire(
-                    KIND_CHUNK, data[start : start + CHUNK_BYTES]
+            await session.send_wire(KIND_HEAD, size_bytes=reference.size_bytes)
+            try:
+                while chunk := await asyncio.to_thread(read_chunk):
+                    stall.reschedule(loop.time() + self._stall_timeout_sec)
+                    await session.send_body_wire(KIND_CHUNK, chunk)
+                await asyncio.to_thread(verifier.finish)
+            except (ContentHydrationError, OSError) as exc:
+                self._logger.warning(
+                    "held copy of %s is not the object: %s",
+                    reference.content_digest,
+                    exc,
                 )
+                self._store.drop(reference)
+                await session.send_wire(KIND_REJECT, reason="unavailable")
+                return
             stall.reschedule(loop.time() + self._stall_timeout_sec)
             await session.send_wire(KIND_DONE)
 

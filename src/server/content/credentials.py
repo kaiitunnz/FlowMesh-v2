@@ -25,6 +25,7 @@ from shared.content import (
     ObjectStoreConfig,
     ScopedContentCredential,
     SharedFilesystemObjectStore,
+    renewal_lead_sec,
 )
 from shared.content.s3_store import S3ObjectStore
 
@@ -34,18 +35,21 @@ _SessionKey = tuple[str, tuple[ContentOperationKind, ...]]
 _MIN_SESSION_SEC = 900
 
 
-def _client_config() -> Config:
-    """Short, single-attempt timeouts for the calls control makes to the store.
+def _client_config(stall_timeout_sec: float = 10.0, attempts: int = 2) -> Config:
+    """Short timeouts and few attempts for the calls control makes to the store.
 
-    These run on the dispatch path, so an unreachable store has to cost a dispatch a
-    moment rather than botocore's minute-long default with retries behind it — the task
-    goes on to fail its first content read, which is the outcome either way.
+    Minting and provisioning run on the dispatch path, so an unreachable store costs a
+    dispatch a moment rather than botocore's minute-long default. ``read_timeout``
+    bounds how long one socket read may wait for bytes, not how long an object takes,
+    so a read of any size runs while it keeps moving and fails only once it stalls.
+    Attempts cover the request alone: once a body is flowing, a failure surfaces to the
+    reader rather than restarting a response part of which it has already consumed.
     """
     return Config(
         signature_version="s3v4",
         connect_timeout=5,
-        read_timeout=10,
-        retries={"max_attempts": 1},
+        read_timeout=stall_timeout_sec,
+        retries={"total_max_attempts": attempts},
     )
 
 
@@ -62,7 +66,8 @@ class MintedCredential:
 
 
 _READ_ACTIONS = ("s3:GetObject",)
-_WRITE_ACTIONS = ("s3:PutObject",)
+# A writer aborts the multipart uploads it gives up on.
+_WRITE_ACTIONS = ("s3:PutObject", "s3:AbortMultipartUpload")
 
 
 def scope_policy(
@@ -127,7 +132,9 @@ def ensure_bucket(cfg: ObjectStoreConfig, logger: logging.Logger) -> None:
         )
 
 
-def open_deployment_store(cfg: ObjectStoreConfig) -> FabricObjectStore:
+def open_deployment_store(
+    cfg: ObjectStoreConfig, *, read_stall_timeout_sec: float, read_attempts: int
+) -> FabricObjectStore:
     """The shared store opened under the control plane's own deployment credential."""
     if cfg.backend == BACKEND_FILESYSTEM:
         return SharedFilesystemObjectStore(cfg.filesystem_root)
@@ -137,7 +144,7 @@ def open_deployment_store(cfg: ObjectStoreConfig) -> FabricObjectStore:
         aws_access_key_id=cfg.access_key or None,
         aws_secret_access_key=cfg.secret_key or None,
         region_name=cfg.region,
-        config=_client_config(),
+        config=_client_config(read_stall_timeout_sec, read_attempts),
     )
     return S3ObjectStore(client, cfg.bucket, prefix=cfg.prefix)
 
@@ -171,10 +178,6 @@ class StsScopedCredentialMinter:
     added isolation.
     """
 
-    # How long before a session's end it stops being handed out, so a task never starts
-    # with access that expires under it.
-    _RENEW_MARGIN_SEC = 60.0
-
     def __init__(self, cfg: ObjectStoreConfig, sts_client: Any) -> None:
         self._cfg = cfg
         self._sts = sts_client
@@ -182,7 +185,7 @@ class StsScopedCredentialMinter:
 
     @property
     def policy_version(self) -> str:
-        return "sts-scope-prefix-1"
+        return "sts-scope-prefix-2"
 
     def mint(
         self, scope: str, operations: tuple[ContentOperationKind, ...], ttl_sec: float
@@ -190,9 +193,11 @@ class StsScopedCredentialMinter:
         key = (scope, operations)
         now = time.time()
         cached = self._sessions.get(key)
+        # A session is handed out only while more of it remains than a worker asks
+        # ahead of its end, so a renewal is always answered with a later expiry.
         if (
             cached is not None
-            and now + self._RENEW_MARGIN_SEC < cached.expires_at_epoch
+            and now + renewal_lead_sec(ttl_sec) < cached.expires_at_epoch
         ):
             return cached
         minted = self._cut(scope, operations, ttl_sec)

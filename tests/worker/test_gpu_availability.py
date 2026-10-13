@@ -682,7 +682,7 @@ class _Plane:
     def __init__(self, root: Path) -> None:
         self.store = SharedFilesystemObjectStore(root)
 
-    def for_task(self, task_id: str) -> SharedFilesystemObjectStore:
+    def for_task(self, task_id: str, scope: str) -> SharedFilesystemObjectStore:
         return self.store
 
 

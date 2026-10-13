@@ -1,7 +1,9 @@
-"""The lane host's backstop on a peer read: it bounds a stall, never a slow transfer."""
+"""The lane host's peer reads: the backstop bounds a stall, never a slow transfer, and
+what the cache does with a verified read never fails it."""
 
 import asyncio
 import time
+from pathlib import Path
 from typing import cast
 
 import pytest
@@ -21,13 +23,17 @@ class _Client:
         self._progressing = progressing
         self.last_progress = time.monotonic()
 
-    async def hydrate(self, reference: ContentReference, task_id: str) -> bytes:
+    async def hydrate_to_file(
+        self, reference: ContentReference, task_id: str, staging: Path
+    ) -> Path:
         deadline = time.monotonic() + self._duration_sec
         while time.monotonic() < deadline:
             await asyncio.sleep(_STALL / 4)
             if self._progressing:
                 self.last_progress = time.monotonic()
-        return b"body"
+        landed = staging / "transfer"
+        landed.write_bytes(b"body")
+        return landed
 
 
 def _lane(tmp_path, client: _Client) -> ContentLaneHost:
@@ -47,7 +53,7 @@ def _lane(tmp_path, client: _Client) -> ContentLaneHost:
 def test_a_peer_read_that_keeps_progressing_is_not_cut_off(tmp_path) -> None:
     lane = _lane(tmp_path, _Client(_STALL * 6, progressing=True))
     try:
-        assert lane.hydrate(reference_for("local", b"body"), "tsk-1") == b"body"
+        assert lane.read_peer(reference_for("local", b"body"), "tsk-1") == b"body"
     finally:
         lane.stop()
 
@@ -57,7 +63,23 @@ def test_a_peer_read_that_stops_progressing_fails_typed(tmp_path) -> None:
     try:
         started = time.monotonic()
         with pytest.raises(ContentHydrationError, match="stopped making progress"):
-            lane.hydrate(reference_for("local", b"body"), "tsk-1")
+            lane.read_peer(reference_for("local", b"body"), "tsk-1")
         assert time.monotonic() - started < _STALL * 10
+    finally:
+        lane.stop()
+
+
+def test_a_verified_peer_read_survives_a_copy_the_cache_cannot_take(
+    tmp_path, monkeypatch
+) -> None:
+    lane = _lane(tmp_path, _Client(0.0, progressing=True))
+
+    def refuse(reference: ContentReference, verified: Path) -> None:
+        raise OSError("cache disk full")
+
+    monkeypatch.setattr(lane._store, "adopt", refuse)
+    try:
+        assert lane.read_peer(reference_for("local", b"body"), "tsk-1") == b"body"
+        assert list(lane._store.staging_dir("local").iterdir()) == []
     finally:
         lane.stop()

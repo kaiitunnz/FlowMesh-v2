@@ -68,7 +68,7 @@ class _Plane:
     def __init__(self, store: InMemoryContentStore) -> None:
         self._store = store
 
-    def for_task(self, task_id: str) -> InMemoryContentStore:
+    def for_task(self, task_id: str, scope: str) -> InMemoryContentStore:
         return self._store
 
 

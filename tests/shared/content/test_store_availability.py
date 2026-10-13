@@ -14,13 +14,14 @@ from shared.content import (
     SharedFilesystemObjectStore,
 )
 from shared.content.s3_store import S3ObjectStore
+from tests.shared.fake_s3 import UnusedWrites
 
 _REF = ContentReference(
     authorization_scope="org", content_digest="a" * 64, size_bytes=1
 )
 
 
-class _Client:
+class _Client(UnusedWrites):
     def __init__(self, error: Exception) -> None:
         self._error = error
 

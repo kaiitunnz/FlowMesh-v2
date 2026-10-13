@@ -28,6 +28,9 @@ from shared.schemas.result.binding import (
 from shared.tasks.result_binding import ResultBinding
 
 _CACHE_MAX_BYTES = 64 * 1024 * 1024
+# The largest envelope the cache keeps, so one large result never displaces the many
+# small ones a dispatch loop rereads.
+_CACHE_MAX_ENTRY_BYTES = 8 * 1024 * 1024
 # What a cached entry holds besides its payload: its reference key, the payload's object
 # header and its slot, about 1.3 KiB measured. The budget counts it, so it bounds the
 # memory the cache holds.
@@ -79,11 +82,13 @@ class ResultReader:
     def verify(self, reference: ContentReference) -> None:
         """Read one object from the store itself, bypassing the cache, and verify it.
 
-        Raises ``ResultUnavailable`` while the store cannot be reached and
-        ``ResultUnreadable`` for an object that is missing or corrupt.
+        The object streams through and is never held whole. Raises
+        ``ResultUnavailable`` while the store cannot be reached and ``ResultUnreadable``
+        for an object that is missing or corrupt.
         """
         try:
-            self._store.hydrate(reference)
+            for _ in self._store.open(reference):
+                pass
         except ContentUnavailable as exc:
             raise ResultUnavailable(str(exc)) from exc
         except ContentStoreError as exc:
@@ -105,7 +110,7 @@ class ResultReader:
         return data
 
     def _remember(self, key: ContentReference, data: bytes) -> None:
-        if _charge(data) > self._cache_max_bytes:
+        if len(data) > _CACHE_MAX_ENTRY_BYTES or _charge(data) > self._cache_max_bytes:
             return
         with self._lock:
             if key in self._cache:

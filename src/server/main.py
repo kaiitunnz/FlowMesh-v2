@@ -227,7 +227,13 @@ if IS_ROOT_NODE:
         WORKFLOW_REGISTRY,
         WORKER_REGISTRY,
         config.orchestration,
-        ResultReader(open_deployment_store(config.object_store)),
+        ResultReader(
+            open_deployment_store(
+                config.object_store,
+                read_stall_timeout_sec=config.content_store.read_stall_timeout_sec,
+                read_attempts=config.content_store.read_attempts,
+            )
+        ),
         logger,
         credential_vault=CREDENTIAL_VAULT,
         surface=POLICY_SURFACE,

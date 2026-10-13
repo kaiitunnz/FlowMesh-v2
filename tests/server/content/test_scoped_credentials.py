@@ -1,5 +1,6 @@
 """What a scope's minted session is cut to, and when a new one is cut."""
 
+import json
 import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -8,6 +9,7 @@ from server.content import StsScopedCredentialMinter
 from server.content.credentials import scope_policy
 from shared.content import ContentOperationKind, ObjectStoreConfig
 from shared.content.s3_store import S3ObjectStore
+from tests.shared.fake_s3 import UnusedWrites
 
 _OPS = (ContentOperationKind.READ, ContentOperationKind.WRITE)
 _CFG = ObjectStoreConfig(
@@ -46,7 +48,7 @@ def test_the_policy_covers_exactly_the_scopes_own_keys() -> None:
     """
     written: dict[str, Any] = {}
 
-    class _Recording:
+    class _Recording(UnusedWrites):
         def put_object(self, **kwargs: Any) -> Any:
             written.update(kwargs)
 
@@ -72,6 +74,17 @@ def test_a_read_only_grant_asks_for_no_write_action() -> None:
     policy = scope_policy("bucket", "", "tenant-a", (ContentOperationKind.READ,))
 
     assert "s3:GetObject" in policy and "s3:PutObject" not in policy
+
+
+def test_a_write_grant_may_abort_its_uploads_and_nothing_more() -> None:
+    policy = json.loads(scope_policy("bucket", "", "tenant-a", _OPS))
+    actions = {a for s in policy["Statement"] for a in _as_list(s["Action"])}
+
+    assert actions == {"s3:GetObject", "s3:PutObject", "s3:AbortMultipartUpload"}
+
+
+def _as_list(value: str | list[str]) -> list[str]:
+    return [value] if isinstance(value, str) else value
 
 
 def test_one_session_serves_a_scopes_tasks_until_it_nears_its_end() -> None:
@@ -106,6 +119,19 @@ def test_a_session_near_its_end_is_cut_again() -> None:
     minter.mint("tenant-a", _OPS, 900.0)
 
     assert len(sts.calls) == 2
+
+
+def test_a_renewal_inside_a_workers_lead_gets_a_later_expiry() -> None:
+    """A session a worker is already asking to replace is never handed back to it."""
+    sts = _FakeSts(expires_in_sec=100.0)
+    minter = StsScopedCredentialMinter(_CFG, sts)
+    first = minter.mint("tenant-a", _OPS, 900.0)
+
+    sts._expires_in_sec = 900.0
+    renewed = minter.mint("tenant-a", _OPS, 900.0)
+
+    assert len(sts.calls) == 2
+    assert renewed.expires_at_epoch > first.expires_at_epoch + 600.0
 
 
 def test_the_grant_never_outlives_the_session_it_opens() -> None:

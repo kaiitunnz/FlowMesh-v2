@@ -885,10 +885,9 @@ STACK_ENV_SCHEMA = EnvSchema(
                 EnvVar(
                     "CONTENT_ACCESS_TTL_SEC",
                     "900",
-                    description="Store-access grant lifetime (seconds).",
+                    description="Store-access grant lifetime (seconds, at least 60).",
                     var_type=EnvVarType.FLOAT,
-                    min_value=0,
-                    min_inclusive=False,
+                    min_value=60,
                 ),
                 EnvVar(
                     "CONTENT_HYDRATION_ENABLED",
@@ -940,6 +939,57 @@ STACK_ENV_SCHEMA = EnvSchema(
                     var_type=EnvVarType.FLOAT,
                     min_value=0,
                     min_inclusive=False,
+                ),
+                EnvVar(
+                    "CONTENT_TRANSFER_WINDOW_BYTES",
+                    "1048576",
+                    description="Bytes a content transfer keeps in flight.",
+                    var_type=EnvVarType.INT,
+                    min_value=65536,
+                ),
+                EnvVar(
+                    "CONTENT_PEER_TRANSFER_MAX_BYTES",
+                    "67108864",
+                    description=(
+                        "Objects this size or larger read from the store before a peer "
+                        "while it is reachable (0 = peer first)."
+                    ),
+                    var_type=EnvVarType.INT,
+                    min_value=0,
+                ),
+                EnvVar(
+                    "CONTENT_STORE_PART_BYTES",
+                    "16777216",
+                    description=(
+                        "Part size of a large object's upload (bytes, 5 MiB to 5 GiB)."
+                    ),
+                    var_type=EnvVarType.INT,
+                    min_value=5242880,
+                    max_value=5368709120,
+                ),
+                EnvVar(
+                    "CONTENT_STORE_UPLOAD_CONCURRENCY",
+                    "4",
+                    description="Parts one upload sends at once.",
+                    var_type=EnvVarType.INT,
+                    min_value=1,
+                ),
+                EnvVar(
+                    "CONTENT_STORE_READ_STALL_TIMEOUT_SEC",
+                    "10",
+                    description=(
+                        "Longest a control-plane store read waits for bytes (seconds)."
+                    ),
+                    var_type=EnvVarType.FLOAT,
+                    min_value=0,
+                    min_inclusive=False,
+                ),
+                EnvVar(
+                    "CONTENT_STORE_READ_ATTEMPTS",
+                    "2",
+                    description="Request attempts per control-plane store read.",
+                    var_type=EnvVarType.INT,
+                    min_value=1,
                 ),
             ],
         ),

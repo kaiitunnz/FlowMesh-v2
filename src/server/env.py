@@ -5,6 +5,12 @@ from pathlib import Path
 
 from pydantic import SecretStr
 
+from shared.content.config import (
+    DEFAULT_PART_BYTES,
+    DEFAULT_PEER_TRANSFER_MAX_BYTES,
+    DEFAULT_TRANSFER_WINDOW_BYTES,
+    DEFAULT_UPLOAD_CONCURRENCY,
+)
 from shared.schemas.worker import SSHBackendName
 from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
 from shared.utils import (
@@ -175,6 +181,18 @@ CONTENT_STORE_FILESYSTEM_ROOT: str = os.getenv(
 ).strip()
 CONTENT_TRANSFER_TIMEOUT_SEC: float = parse_float_env(
     "CONTENT_TRANSFER_TIMEOUT_SEC", 60.0
+)
+CONTENT_TRANSFER_WINDOW_BYTES: int = parse_int_env(
+    "CONTENT_TRANSFER_WINDOW_BYTES", DEFAULT_TRANSFER_WINDOW_BYTES
+)
+CONTENT_PEER_TRANSFER_MAX_BYTES: int = parse_int_env(
+    "CONTENT_PEER_TRANSFER_MAX_BYTES", DEFAULT_PEER_TRANSFER_MAX_BYTES
+)
+CONTENT_STORE_PART_BYTES: int = parse_int_env(
+    "CONTENT_STORE_PART_BYTES", DEFAULT_PART_BYTES
+)
+CONTENT_STORE_UPLOAD_CONCURRENCY: int = parse_int_env(
+    "CONTENT_STORE_UPLOAD_CONCURRENCY", DEFAULT_UPLOAD_CONCURRENCY
 )
 HF_CACHE_DIR: str | None = os.getenv("HF_CACHE_DIR") or None
 PREDOWNLOAD_MODEL_LIST: str = os.getenv("PREDOWNLOAD_MODEL_LIST", "")
