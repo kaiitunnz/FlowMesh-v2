@@ -154,7 +154,10 @@ A content read repeats safely, so the resident rule against switching transport 
 not apply to it. The route names its peer transports in ladder order, and a dial that
 fails sends nothing, so its grant goes to the next one, then over the relay where the
 read allows it; a transfer that breaks after its fetch is dropped, its unverified
-bytes with it, and a retry takes a fresh grant. Only a dial failure or a connection lost
+bytes with it, and a retry takes a fresh grant. A lost connection ends the transfer at
+once, and a node drops each dialed content connection to a holder worker that ends there,
+so a requester never waits out its stall deadline for a holder that is gone; a
+transfer over `control_relay` is bounded by that deadline. Only a dial failure or a connection lost
 mid-transfer demotes a path — a refusal or a copy that does not verify does not.
 
 ## Reverse-rendezvous relay
