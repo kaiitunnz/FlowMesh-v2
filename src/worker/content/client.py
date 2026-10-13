@@ -41,6 +41,7 @@ from shared.content.wire import (
     KIND_FETCH,
     KIND_HEAD,
     KIND_REJECT,
+    REJECT_WRONG_REQUESTER,
 )
 from shared.network.frame_stream import FrameSink
 from shared.network.relay_frame import RelayFrame
@@ -73,6 +74,10 @@ _TRANSFER_ATTEMPTS = 2
 
 class GrantDenied(ContentHydrationError):
     """The control plane refused to authorize this hydration."""
+
+
+class RequesterRefused(ContentHydrationError):
+    """The holder refused this worker's node as not the transfer's requester."""
 
 
 class ContentHydrationClient:
@@ -188,6 +193,17 @@ class ContentHydrationClient:
                 connection.route.transport if connection else "the root relay",
             )
             return target
+        except RequesterRefused:
+            if connection is not None:
+                connection.refused_requester()
+                self._logger.warning(
+                    "the holder refused this worker's node as not the requester of %s "
+                    "over %s: the node's peer certificate does not cover the host it "
+                    "advertises",
+                    grant.transfer_session_id,
+                    connection.route.transport,
+                )
+            raise
         except OSError as exc:
             raise ContentHydrationError(
                 f"content transfer {grant.transfer_session_id} lost its carriage"
@@ -264,9 +280,13 @@ class ContentHydrationClient:
                     verifier.finish()
                     return
                 elif kind == KIND_REJECT:
-                    raise ContentHydrationError(
-                        f"holder refused the transfer: {message.get('reason')}"
+                    reason = message.get("reason")
+                    refused = (
+                        RequesterRefused
+                        if reason == REJECT_WRONG_REQUESTER
+                        else ContentHydrationError
                     )
+                    raise refused(f"holder refused the transfer: {reason}")
                 elif kind != KIND_HEAD:
                     raise ContentHydrationError("unexpected content transfer message")
 

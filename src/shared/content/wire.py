@@ -14,6 +14,8 @@ KIND_HEAD = "content_head"
 KIND_CHUNK = "content_chunk"
 KIND_DONE = "content_done"
 KIND_REJECT = "content_reject"
+# The refusal a holder gives a dialed connection that is not the transfer's requester.
+REJECT_WRONG_REQUESTER = "wrong_requester"
 
 # How much of an object rides one frame. The session's window bounds what is in flight;
 # this bounds one frame so a large object streams rather than arriving as one payload.
@@ -26,4 +28,5 @@ __all__ = [
     "KIND_FETCH",
     "KIND_HEAD",
     "KIND_REJECT",
+    "REJECT_WRONG_REQUESTER",
 ]

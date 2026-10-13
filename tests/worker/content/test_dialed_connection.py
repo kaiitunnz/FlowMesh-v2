@@ -1,8 +1,8 @@
 """One dialed content connection carries one transfer, and how it ends is classified.
 
 The holder closes the connection after the transfer it carried, and the requester
-reports only what the path did: a connection that breaks is a network failure, one the
-holder's end closes says nothing of the path.
+reports what the path did: a connection that ends before its transfer does is a network
+failure, classified by how it ended.
 """
 
 import asyncio
@@ -96,8 +96,10 @@ async def _ended_with(
 
 
 @pytest.mark.asyncio
-async def test_a_connection_the_holder_closes_is_no_path_evidence() -> None:
-    assert await _ended_with(lambda reader: reader.feed_eof()) == []
+async def test_a_connection_that_ends_before_its_transfer_is_a_route_failure() -> None:
+    assert await _ended_with(lambda reader: reader.feed_eof()) == [
+        RouteObservationOutcome.ROUTE_FAILURE
+    ]
 
 
 @pytest.mark.asyncio

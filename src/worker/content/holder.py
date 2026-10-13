@@ -37,6 +37,7 @@ from shared.content.wire import (
     KIND_FETCH,
     KIND_HEAD,
     KIND_REJECT,
+    REJECT_WRONG_REQUESTER,
 )
 from shared.network.frame_stream import FrameSink
 from shared.network.mtls_listener import ConnectionFrameSink, PeerContext
@@ -214,7 +215,7 @@ class ContentHolder:
                     "refused content transfer %s: the dialer is not its requester",
                     session_id,
                 )
-                await session.send_wire(KIND_REJECT, reason="wrong_requester")
+                await session.send_wire(KIND_REJECT, reason=REJECT_WRONG_REQUESTER)
                 return
         rejection = self._gate.admit(grant)
         if rejection is GrantRejection.UNKNOWN_GRANT and await self._await_grant(

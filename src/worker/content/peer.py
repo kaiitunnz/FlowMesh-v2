@@ -2,12 +2,12 @@
 
 A requester reaches a holder's content listener directly, or the holder node's listener
 that forwards to it, only at the address control resolved beside the transfer's grant.
-The connection carries that one transfer in both directions and closes with it, from
-either end. Path evidence goes back to control as it does for a resident origin, each
-failure classified: a failed dial or a connection that breaks mid-transfer is a network
-failure, while a busy or purpose-less target, a holder that closes the connection, and
-what the holder answers — a refusal, a copy that does not verify — say nothing of the
-path.
+The connection carries that one transfer in both directions and closes with it. Path
+evidence goes back to control as it does for a resident origin, each failure classified:
+a failed dial or a connection that ends before its transfer does is a network failure,
+and a holder refusing this node as not the transfer's requester is a TLS failure, since
+the pair's identities do not fit. A busy or purpose-less target is no evidence at all,
+and nor is anything else the holder answers, such as a copy that does not verify.
 """
 
 import asyncio
@@ -88,26 +88,27 @@ class PeerConnection:
                 if frame.session_id == session.session_id:
                     self._on_frame()
                     await session.on_frame(frame)
-        except asyncio.IncompleteReadError as exc:
-            # The holder's end closed the connection: the transfer is over or the holder
-            # gave up on it, neither of which is the path's doing.
-            if exc.partial:
-                self._lose(exc)
-            session.abort()
-        except (OSError, FrameStreamError) as exc:
+        except (asyncio.IncompleteReadError, OSError, FrameStreamError) as exc:
             # The transfer is waiting on frames this connection will never carry, so it
             # ends now rather than at its stall deadline.
             self._lose(exc)
             session.abort()
 
     def _lose(self, exc: BaseException) -> None:
+        self._report(
+            RouteObservationOutcome.ROUTE_FAILURE
+            if isinstance(exc, (FrameStreamError, asyncio.IncompleteReadError))
+            else classify_peer_error(exc)
+        )
+
+    def refused_requester(self) -> None:
+        """Record that the holder refused this node as not the transfer's requester."""
+        self._report(RouteObservationOutcome.TLS_FAILURE)
+
+    def _report(self, outcome: RouteObservationOutcome) -> None:
         if not self._lost and not self._closing:
             self._lost = True
-            self._on_loss(
-                RouteObservationOutcome.ROUTE_FAILURE
-                if isinstance(exc, (FrameStreamError, asyncio.IncompleteReadError))
-                else classify_peer_error(exc)
-            )
+            self._on_loss(outcome)
 
     async def aclose(self) -> None:
         self._closing = True

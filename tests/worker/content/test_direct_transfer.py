@@ -239,9 +239,10 @@ async def test_a_grant_redeemed_from_another_node_releases_nothing(
         with pytest.raises(ContentHydrationError, match="wrong_requester"):
             await fabric.read(reference, peer_only=True)
 
-    # Each attempt was refused before admission, and none counts against the path.
+    # Each attempt was refused before admission, and each refusal demotes the pair:
+    # this node's certificate does not fit the host it advertises.
     assert len(fabric.grants) == 2
-    assert fabric.observed == ["verified", "verified"]
+    assert fabric.observed == ["verified", "tls_failure", "verified", "tls_failure"]
     assert fabric.staged() == []
 
 
