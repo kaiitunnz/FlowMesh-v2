@@ -502,6 +502,20 @@ class EventMonitor:
             key: value for key, value in payload.items() if key != "input_resolution"
         }
 
+    def _handle_artifact_published(
+        self, event: TaskEvent, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bind a reported checkpoint publication and keep it out of the task's
+        updates."""
+        if (published := payload.get("artifact_published")) is None:
+            return payload
+        self._runtime.record_artifact_published(
+            event.task_id, event.worker_id, published, event.dispatch_id
+        )
+        return {
+            key: value for key, value in payload.items() if key != "artifact_published"
+        }
+
     def handle_task_event(self, event: TaskEvent) -> None:
         with self._runtime.event_tail(event.task_id):
             self._handle_task_event(event)
@@ -530,6 +544,7 @@ class EventMonitor:
                     self._unapplied(event, EventEffect.STALE)
                     return
                 payload = self._handle_input_resolution(event, payload)
+                payload = self._handle_artifact_published(event, payload)
                 payload = self._handle_ssh_task_update(
                     event.task_id, worker_id, payload
                 )

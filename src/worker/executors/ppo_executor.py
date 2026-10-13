@@ -39,9 +39,11 @@ from shared.tasks.specs import PPOSpecStrict
 from shared.tasks.task_type import TaskType
 from shared.utils.parsing import safe_float, safe_int, to_bool
 
+from ..content.artifacts import checkpoint_spool_dir
 from ..utils.logging import configure_hf_library_logging
 from .base_executor import ExecutionError, Executor, ExecutorTask
 from .mixins.training import TrainingMixin
+from .utils.checkpoint_spool import CheckpointSpool
 from .utils.checkpoints import (
     archive_path_for,
     maybe_upload_artifacts,
@@ -689,6 +691,7 @@ class PPOExecutor(TrainingMixin, Executor):
                 train_dataset=dataset,
                 eval_dataset=dataset,
                 data_collator=_PPOCollator(tokenizer),
+                callbacks=[CheckpointSpool(checkpoint_spool_dir(out_dir))],
             )
             self._ppo_trainer = ppo_trainer
             self._install_trainer_save_overrides(ppo_trainer)

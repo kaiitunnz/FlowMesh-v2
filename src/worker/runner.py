@@ -1,6 +1,7 @@
 """Task runner that executes assignments relayed by the server."""
 
 import logging
+import shutil
 import socket
 import threading
 import time
@@ -30,7 +31,7 @@ from shared.network.mtls import MutualTlsMaterial
 from shared.network.relay_frame import SSH_FRAME_KIND
 from shared.outcome import FabricContentStore
 from shared.schemas.result import RESULT_MEDIA_TYPE, BaseExecutorResult
-from shared.tasks.artifact_binding import ArtifactKind
+from shared.tasks.artifact_binding import ArtifactBinding, ArtifactKind
 from shared.tasks.credentials import dispatched_credentials
 from shared.tasks.specs import (
     EmbeddingSpecStrict,
@@ -63,7 +64,13 @@ from shared.utils.recent import RecentSet
 from shared.utils.redact import credential_scrubber
 from shared.utils.time import now_iso
 
-from .content.artifacts import ArtifactChanged, ArtifactPublisher, declared_archives
+from .content.artifacts import (
+    ArtifactChanged,
+    ArtifactPublisher,
+    checkpoint_spool_dir,
+    declared_archives,
+)
+from .content.checkpoints import CheckpointPublishFailed, CheckpointUploader
 from .content.inputs import TaskInputHydrator, input_unreadable, read_input
 from .egress import MediatedEgressSidecar, ModelEgress, SearchEgress
 from .executors.base_executor import ExecutionError, Executor, TaskCancelledError
@@ -81,6 +88,17 @@ from .model_turn import HeldModelEgress, ModelTurnRendezvous, ResponsesFacade
 from .resident.lane_host import ResidentLaneHost
 from .telemetry import otel
 from .utils.logging import TaskLogEmitter
+
+# Task types whose trainers save checkpoints that publish as they are saved.
+_TRAINING_TASK_TYPES = frozenset(
+    {
+        TaskType.SFT,
+        TaskType.LORA_SFT,
+        TaskType.DPO,
+        TaskType.PPO,
+        TaskType.IMAGE_CLASSIFICATION_TRAINING,
+    }
+)
 
 
 def _publishes_result(result: BaseExecutorResult) -> bool:
@@ -806,11 +824,49 @@ class Runner:
         prepare_output_dir(out_dir)
         return out_dir
 
+    def _checkpoint_uploader(
+        self, msg: WorkerTaskMessage, out_dir: Path
+    ) -> CheckpointUploader | None:
+        """Publish a training task's checkpoints as its trainer saves them."""
+        if msg.task_type not in _TRAINING_TASK_TYPES:
+            return None
+        store = self._object_store(msg)
+        if store is None:
+            return None
+        spool = checkpoint_spool_dir(out_dir)
+        shutil.rmtree(spool, ignore_errors=True)
+        task_id = msg.task_id
+
+        def report(binding: ArtifactBinding) -> None:
+            self.lifecycle.notify_task_update(
+                task_id, {"artifact_published": [binding.model_dump(mode="json")]}
+            )
+
+        uploader = CheckpointUploader(
+            ArtifactPublisher(store, msg.content_scope), spool, report, self.logger
+        )
+        uploader.start()
+        return uploader
+
+    def _drain_checkpoints(
+        self, task_id: str, uploader: CheckpointUploader | None
+    ) -> list[ArtifactBinding]:
+        if uploader is None:
+            return []
+        try:
+            return uploader.drain()
+        except CheckpointPublishFailed as exc:
+            raise ExecutionError(
+                f"task {task_id} could not publish a checkpoint: {exc}",
+                retryable=True,
+            ) from exc
+
     def _write_results(
         self,
         msg: WorkerTaskMessage,
         out_dir: Path,
         result: BaseExecutorResult | None,
+        checkpoints: list[ArtifactBinding] | None = None,
     ) -> dict[str, Any]:
         """Store a task's result and each merged child's, returning their references.
 
@@ -836,6 +892,7 @@ class Runner:
         references: dict[str, Any] = {
             "result_reference": reference.model_dump(mode="json")
         }
+        artifacts += [binding.model_dump(mode="json") for binding in checkpoints or ()]
         if artifacts:
             references["artifacts"] = artifacts
         child_lookup = {entry.task_id: entry for entry in msg.merged_children or []}
@@ -1385,8 +1442,13 @@ class Runner:
                         # it here, under the lock the stop's delivery reads it with.
                         if self._begin_execution(task_id):
                             executor_to_run.stop(task_id)
+                    uploader = self._checkpoint_uploader(msg, out_dir)
                     try:
                         out = self._run_executor(executor_to_run, msg, out_dir)
+                    except BaseException:
+                        if uploader is not None:
+                            uploader.abort()
+                        raise
                     finally:
                         # A cancel past this point would wait in the warm executor and
                         # end the task's next dispatch.
@@ -1395,7 +1457,8 @@ class Runner:
                     executor_returned = True
                     if isinstance(out, EpisodeStepResult):
                         unreported_step = out
-                    references = self._write_results(msg, out_dir, out)
+                    checkpoints = self._drain_checkpoints(task_id, uploader)
+                    references = self._write_results(msg, out_dir, out, checkpoints)
                     metadata = self._build_task_metadata(
                         task_type,
                         dispatched_at,

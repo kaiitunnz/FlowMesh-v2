@@ -22,6 +22,7 @@ from tests.worker.factories import (
     make_worker_task_message,
     no_mediated_op,
 )
+from worker.content.artifacts import checkpoint_spool_dir, spool_checkpoint
 from worker.executors.base_executor import Executor
 from worker.executors.episode_support import EpisodeStepResult
 from worker.runner import Runner
@@ -254,3 +255,53 @@ def test_artifacts_the_store_refuses_fail_the_task_retryably(tmp_path: Path) -> 
 
     lifecycle.set_succeeded.assert_not_called()
     assert lifecycle.set_failed.call_args.kwargs["retryable"] is True
+
+
+class _Training(_Returning):
+    """Saves a checkpoint mid-run, as a trainer's save callback hands it over."""
+
+    def run(self, task: Any, out_dir: Path) -> BaseExecutorResult:
+        checkpoint = out_dir / "artifacts" / "checkpoints" / "checkpoint-5"
+        checkpoint.mkdir(parents=True, exist_ok=True)
+        (checkpoint / "model.bin").write_bytes(b"step five")
+        spool_checkpoint(checkpoint, checkpoint_spool_dir(out_dir), 5)
+        return self.result
+
+
+def test_a_training_task_reports_its_checkpoints_as_it_runs_and_at_success(
+    tmp_path: Path,
+) -> None:
+    lifecycle = MagicMock()
+    lifecycle.worker_id = "wrk-test"
+    lifecycle.cost_per_hour = 1.0
+    lifecycle.client.create_task_log_emitter.return_value = None
+    lifecycle.client.iter_interrupts.return_value = []
+    lifecycle.client.iter_stops.return_value = []
+    lifecycle.client.next_mediated_op.side_effect = no_mediated_op
+    lifecycle.content_plane = _Plane(SharedFilesystemObjectStore(tmp_path / "cas"))
+    msg = make_worker_task_message(
+        {"taskType": "echo"},
+        task_type=TaskType.ECHO,
+        task_id="tsk-1",
+        content_scope="org-a",
+    ).model_copy(update={"task_type": TaskType.SFT.value})
+    executor = _Training(BaseExecutorResult())
+    Runner(
+        lifecycle=lifecycle,
+        task_stream=[msg],
+        results_dir=tmp_path / "out",
+        hardware=make_worker_hardware(),
+        executors={"sft": executor, "default": executor},
+        default_executor=executor,
+        logger=MagicMock(),
+    ).start()
+
+    revisions = {(b["name"], b["revision"]) for b in _metadata(lifecycle)["artifacts"]}
+    assert ("checkpoints", "step-5") in revisions
+    updates = [
+        call.args[1]
+        for call in lifecycle.notify_task_update.call_args_list
+        if "artifact_published" in call.args[1]
+    ]
+    assert [u["artifact_published"][0]["revision"] for u in updates] == ["step-5"]
+    assert not (tmp_path / "out" / "tsk-1" / ".checkpoint-spool").exists()

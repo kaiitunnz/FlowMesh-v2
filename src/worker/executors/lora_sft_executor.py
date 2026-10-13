@@ -24,10 +24,12 @@ from shared.schemas.result import LoRAResult
 from shared.tasks.specs import LoRASFTSpecStrict
 from shared.tasks.task_type import TaskType
 
+from ..content.artifacts import checkpoint_spool_dir
 from ..utils.logging import configure_hf_library_logging
 from .base_executor import ExecutionError, Executor, ExecutorTask
 from .mixins.training import TrainingMixin
 from .sft_executor import SFT_LAUNCHER_FLAG, SFTExecutor
+from .utils.checkpoint_spool import CheckpointSpool
 from .utils.checkpoints import (
     archive_path_for,
     determine_resume_path,
@@ -226,6 +228,7 @@ class LoRASFTExecutor(TrainingMixin, Executor):
                 args=sft_config,
                 train_dataset=train_dataset,
                 processing_class=tokenizer,
+                callbacks=[CheckpointSpool(checkpoint_spool_dir(out_dir))],
             )
 
             orig_compute_loss = trainer.compute_loss

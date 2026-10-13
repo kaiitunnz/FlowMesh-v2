@@ -3438,6 +3438,50 @@ class TaskRuntime:
                 # A replay acknowledges only once what it replays is durable.
                 self._committer.close_locked(record.workflow_id)
 
+    def record_artifact_published(
+        self,
+        task_id: str,
+        worker_id: str | None,
+        payload: Any,
+        dispatch_id: str | None = None,
+    ) -> bool:
+        """Bind the checkpoints a running task reports it published, and save them.
+
+        Only the dispatch holding a task that is still running binds: a stale or
+        cancelled one, or a task already settled, binds nothing. A publication already
+        bound stands. Returns whether anything new was bound.
+        """
+        bindings = reported_artifacts(payload)
+        if not bindings:
+            if bindings is None:
+                self._logger.warning(
+                    "Task %s reported a publication that does not parse", task_id
+                )
+            return False
+        with self._transition():
+            record = self._reported_record_locked(task_id)
+            if record is None or not self._fence.accepts_event_locked(
+                record, worker_id, dispatch_id
+            ):
+                return False
+            if record.status != TaskStatus.DISPATCHED:
+                self._logger.info(
+                    "Not binding checkpoints task %s published while %s",
+                    task_id,
+                    record.status,
+                )
+                self._committer.close_locked(record.workflow_id)
+                return False
+            accepted = self._content_bindings.bind_artifacts_locked(
+                record, bindings, dispatch_id
+            )
+            if accepted:
+                self._committer.commit_locked(task_id, sched=False)
+            else:
+                # A replay acknowledges only once what it replays is durable.
+                self._committer.close_locked(record.workflow_id)
+            return bool(accepted)
+
     def input_resolution_binding(self, task_id: str) -> InputResolutionBinding | None:
         """The binding a task's recorded resolution carries, if one was recorded."""
         with self._lock:

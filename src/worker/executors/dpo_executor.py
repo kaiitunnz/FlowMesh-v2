@@ -30,9 +30,11 @@ from shared.schemas.result import DPOResult
 from shared.tasks.specs import DPOSpecStrict
 from shared.tasks.task_type import TaskType
 
+from ..content.artifacts import checkpoint_spool_dir
 from ..utils.logging import configure_hf_library_logging
 from .base_executor import ExecutionError, Executor, ExecutorTask
 from .mixins.training import TrainingMixin
+from .utils.checkpoint_spool import CheckpointSpool
 from .utils.checkpoints import (
     archive_path_for,
     maybe_upload_artifacts,
@@ -400,6 +402,7 @@ class DPOExecutor(TrainingMixin, Executor):
                 args=dpo_config,
                 train_dataset=dataset,
                 processing_class=tokenizer,
+                callbacks=[CheckpointSpool(checkpoint_spool_dir(out_dir))],
             )
             self._current_trainer = dpo_trainer
 

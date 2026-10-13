@@ -14,7 +14,7 @@ from server.config import OrchestrationConfig
 from server.registries.workflow import WorkflowRegistry
 from server.task.models import EventEffect, TaskStatus
 from server.task.redrive import StoreRedriveScheduler
-from server.task.runtime import TaskRuntime
+from server.task.runtime import TaskRuntime, TransitionNotDurable
 from shared.content import ContentReference
 from shared.tasks.artifact_binding import ArchiveFacts, ArtifactBinding, ArtifactKind
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
@@ -271,3 +271,87 @@ def test_the_catalog_reads_answer_alike_from_a_thread_or_the_loop(
     via_loop = asyncio.run(getattr(registry, f"{method}_async")(*args))
 
     assert sync == via_loop
+
+
+def _step(step: int, data: bytes = b"ckpt") -> ArtifactBinding:
+    return _tree("checkpoints", data).model_copy(update={"revision": f"step-{step}"})
+
+
+def _publish(
+    runtime: TaskRuntime, task_id: str, binding: ArtifactBinding, dispatch_id: str
+) -> bool:
+    return runtime.record_artifact_published(
+        task_id, "wkr-1", [binding.model_dump(mode="json")], dispatch_id
+    )
+
+
+def test_a_running_task_binds_each_checkpoint_it_publishes() -> None:
+    registry = _registry()
+    runtime = _runtime(registry)
+    _, (train, _use) = _register(runtime)
+    record_dispatch(runtime, train, dispatch_id="dsp-1")
+
+    assert _publish(runtime, train, _step(10), "dsp-1")
+    assert not _publish(runtime, train, _step(10), "dsp-1")
+    assert not _publish(runtime, train, _step(10, b"retried"), "dsp-1")
+
+    stored = _stored(registry, train)
+    assert set(stored) == {("step-10", "checkpoints")}
+    assert stored[("step-10", "checkpoints")].reference == _ref(b"ckpt")
+
+
+def test_a_stale_or_settled_dispatch_binds_no_checkpoint() -> None:
+    registry = _registry()
+    runtime = _runtime(registry)
+    _, (train, _use) = _register(runtime)
+    record_dispatch(runtime, train, dispatch_id="dsp-1")
+
+    assert not _publish(runtime, train, _step(1), "dsp-0")
+    _succeed(runtime, train, [], "dsp-1")
+    assert not _publish(runtime, train, _step(2), "dsp-1")
+    assert _stored(registry, train) == {}
+
+
+def test_a_cancelling_task_binds_no_checkpoint() -> None:
+    registry = _registry()
+    runtime = _runtime(registry)
+    workflow_id, (train, _use) = _register(runtime)
+    record_dispatch(runtime, train, dispatch_id="dsp-1")
+    runtime.cancel_workflow(workflow_id)
+
+    assert runtime._tasks[train].status == TaskStatus.CANCELLING
+    assert not _publish(runtime, train, _step(1), "dsp-1")
+    assert _stored(registry, train) == {}
+
+
+def test_a_held_publication_is_not_acknowledged_until_it_lands() -> None:
+    registry = _registry()
+    runtime = _runtime(registry)
+    workflow_id, (train, _use) = _register(runtime)
+    record_dispatch(runtime, train, dispatch_id="dsp-1")
+    registry.refuse = 1
+
+    with pytest.raises(TransitionNotDurable), runtime.acknowledging():
+        _publish(runtime, train, _step(5), "dsp-1")
+    assert _stored(registry, train) == {}
+
+    with runtime.acknowledging():
+        assert not _publish(runtime, train, _step(5), "dsp-1")
+    assert set(_stored(registry, train)) == {("step-5", "checkpoints")}
+    del workflow_id
+
+
+def test_success_binds_a_checkpoint_whose_report_was_lost() -> None:
+    registry = _registry()
+    runtime = _runtime(registry)
+    _, (train, _use) = _register(runtime)
+    record_dispatch(runtime, train, dispatch_id="dsp-1")
+    _publish(runtime, train, _step(10), "dsp-1")
+
+    _succeed(runtime, train, [_tree(), _step(10), _step(20)], "dsp-1")
+
+    assert set(_stored(registry, train)) == {
+        ("final", "final_model"),
+        ("step-10", "checkpoints"),
+        ("step-20", "checkpoints"),
+    }

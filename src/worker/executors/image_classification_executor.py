@@ -30,9 +30,11 @@ from shared.schemas.result import ImageClassificationTrainingResult
 from shared.tasks.specs import ImageClassificationTrainingSpecStrict
 from shared.tasks.task_type import TaskType
 
+from ..content.artifacts import checkpoint_spool_dir
 from ..utils.logging import configure_hf_library_logging
 from .base_executor import ExecutionError, Executor, ExecutorTask
 from .mixins.training import TrainingMixin
+from .utils.checkpoint_spool import CheckpointSpool
 from .utils.checkpoints import (
     archive_path_for,
     determine_resume_path,
@@ -206,6 +208,7 @@ class ImageClassificationTrainingExecutor(TrainingMixin, Executor):
                 data_collator=_image_collate,
                 processing_class=processor,
                 compute_metrics=_compute_accuracy if eval_dataset is not None else None,
+                callbacks=[CheckpointSpool(checkpoint_spool_dir(out_dir))],
             )
             self._current_trainer = trainer
 

@@ -11,6 +11,7 @@ names bytes that outlive this worker.
 import hashlib
 import os
 import re
+import shutil
 import stat
 from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path, PurePosixPath
@@ -38,10 +39,60 @@ CHECKPOINTS_DIR = "checkpoints"
 _CHECKPOINT = re.compile(r"checkpoint-(0|[1-9][0-9]*)")
 _READ_BYTES = 1 << 20
 _ARCHIVE_SUFFIX = ".tar.gz"
+_SPOOLED = re.compile(r"step-(0|[1-9][0-9]*)")
+CHECKPOINT_SPOOL_DIR = ".checkpoint-spool"
 
 
 class ArtifactChanged(RuntimeError):
     """A file changed while it was being published."""
+
+
+def checkpoint_spool_dir(out_dir: Path) -> Path:
+    """Where a task's closed checkpoints wait to publish, beside its artifacts."""
+    return out_dir / CHECKPOINT_SPOOL_DIR
+
+
+def spool_checkpoint(checkpoint_dir: Path, spool_dir: Path, step: int) -> Path | None:
+    """Snapshot a closed ``checkpoint-<n>`` directory into the spool by hard link.
+
+    The snapshot appears whole, under ``step-<n>``, once every file is linked, so the
+    uploader never sees half of it. A trainer rotating its checkpoints only unlinks
+    them, which leaves the snapshot's links in place. Returns the snapshot, or None
+    when the step already has one.
+    """
+    ready = spool_dir / f"step-{step}"
+    if ready.exists():
+        return None
+    staging = spool_dir / f".step-{step}.partial"
+    shutil.rmtree(staging, ignore_errors=True)
+    target = staging / checkpoint_dir.name
+    for rel, opened in regular_files(checkpoint_dir):
+        if isinstance(opened, OSError):
+            raise opened
+        opened.close()
+        dest = target / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.link(checkpoint_dir / rel, dest)
+        except OSError:
+            shutil.copy2(checkpoint_dir / rel, dest)
+    target.mkdir(parents=True, exist_ok=True)
+    staging.rename(ready)
+    return ready
+
+
+def spooled_steps(spool_dir: Path) -> list[tuple[int, Path]]:
+    """The snapshots waiting in the spool, by step."""
+    try:
+        entries = list(os.scandir(spool_dir))
+    except FileNotFoundError:
+        return []
+    steps = [
+        (int(match.group(1)), Path(entry.path))
+        for entry in entries
+        if (match := _SPOOLED.fullmatch(entry.name)) and entry.is_dir()
+    ]
+    return sorted(steps)
 
 
 def checkpoint_step(name: str) -> int | None:
@@ -231,6 +282,10 @@ def _entries(directory: Path, prefix: str) -> Iterator[tuple[str, Path, bool]]:
 
 __all__ = [
     "CHECKPOINTS_DIR",
+    "CHECKPOINT_SPOOL_DIR",
+    "checkpoint_spool_dir",
+    "spool_checkpoint",
+    "spooled_steps",
     "ArtifactChanged",
     "ArtifactPublisher",
     "archive_top",
