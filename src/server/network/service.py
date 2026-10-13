@@ -100,6 +100,19 @@ class NetworkPlane:
         return self._config.connect_budget_sec
 
     @property
+    def route_ttl_sec(self) -> float:
+        return self._config.route_ttl_sec
+
+    @property
+    def worker_directly_routable(self) -> bool:
+        """Whether the deployment declares its workers' listeners reachable off-host."""
+        return self._config.worker_directly_routable
+
+    def peer_trust(self, protocol: str) -> TrustedPeerPolicy:
+        """The deployment's peer rule for a route carrying ``protocol``."""
+        return self._trust.model_copy(update={"protocol": protocol})
+
+    @property
     def probe_trust(self) -> TrustedPeerPolicy:
         """The rule a reachability probe resolves under.
 

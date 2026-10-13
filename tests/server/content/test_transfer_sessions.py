@@ -1,5 +1,6 @@
 """A transfer's routing record lasts as long as its object can take to relay."""
 
+import asyncio
 from typing import Any, cast
 
 from server.content.sessions import ContentTransferSessions
@@ -15,7 +16,7 @@ class _Pipeline:
     def expire(self, key: str, ttl_sec: int) -> None:
         self._expiries[key] = ttl_sec
 
-    def execute(self) -> None:
+    async def execute(self) -> None:
         pass
 
 
@@ -28,13 +29,15 @@ class _Redis:
 
 
 def _open(sessions: ContentTransferSessions, session_id: str, size_bytes: int) -> None:
-    sessions.open(
-        session_id,
-        origin_node="node-a",
-        target_node="node-b",
-        origin_worker="wkr-a",
-        target_worker="wkr-b",
-        size_bytes=size_bytes,
+    asyncio.run(
+        sessions.open(
+            session_id,
+            origin_node="node-a",
+            target_node="node-b",
+            origin_worker="wkr-a",
+            target_worker="wkr-b",
+            size_bytes=size_bytes,
+        )
     )
 
 

@@ -50,7 +50,7 @@ class ContentHolderDirectory:
             }
         )
 
-    def record_many(
+    async def record_many(
         self,
         held: Sequence[tuple[str, str]],
         *,
@@ -61,7 +61,7 @@ class ContentHolderDirectory:
         """Record a holder's whole report in one round trip.
 
         A holder re-reports everything it has on each cadence, so this is proportional
-        to that worker's cache and runs on the thread taking every worker's events. One
+        to that worker's cache and runs on the loop serving every content request. One
         pipelined round trip keeps a large cache from costing two commands per object
         there.
         """
@@ -70,14 +70,14 @@ class ContentHolderDirectory:
         expires_at = time.time() + self._ttl
         field = self._field(expires_at, node_id, generation)
         ttl = int(self._ttl * 2) + 1
-        pipeline = self._rds.sync.control_pipeline()
+        pipeline = self._rds.asyncio.control_pipeline()
         for scope, digest in held:
             key = content_holders_key(scope, digest)
             pipeline.hset(key, mapping={worker_id: field})
             pipeline.expire(key, ttl)
-        pipeline.execute()
+        await pipeline.execute()
 
-    def record(
+    async def record(
         self,
         scope: str,
         digest: str,
@@ -94,15 +94,18 @@ class ContentHolderDirectory:
             expires_at_epoch=time.time() + self._ttl,
         )
         key = content_holders_key(scope, digest)
-        self._rds.sync.hash_set(
+        await self._rds.asyncio.hash_set(
             key, {worker_id: self._field(record.expires_at_epoch, node_id, generation)}
         )
-        self._rds.sync.expire(key, int(self._ttl * 2) + 1)
+        await self._rds.asyncio.expire(key, int(self._ttl * 2) + 1)
         return record
 
-    def holders(self, scope: str, digest: str) -> list[ContentHolderRecord]:
+    async def holders(self, scope: str, digest: str) -> list[ContentHolderRecord]:
         """Every live holder reported for this object, freshest report first."""
-        raw = self._rds.sync.hash_getall(content_holders_key(scope, digest)) or {}
+        raw = (
+            await self._rds.asyncio.hash_getall(content_holders_key(scope, digest))
+            or {}
+        )
         records: list[ContentHolderRecord] = []
         for worker_id, value in raw.items():
             try:
@@ -120,6 +123,8 @@ class ContentHolderDirectory:
         records.sort(key=lambda r: r.expires_at_epoch, reverse=True)
         return records
 
-    def forget(self, scope: str, digest: str, worker_id: str) -> None:
+    async def forget(self, scope: str, digest: str, worker_id: str) -> None:
         """Drop one holder's report, for a worker that can no longer serve it."""
-        self._rds.sync.hash_delete(content_holders_key(scope, digest), worker_id)
+        await self._rds.asyncio.hash_delete(
+            content_holders_key(scope, digest), worker_id
+        )
