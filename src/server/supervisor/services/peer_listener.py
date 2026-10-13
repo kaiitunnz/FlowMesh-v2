@@ -25,13 +25,15 @@ import logging
 from collections import OrderedDict
 from collections.abc import Callable
 
-from shared.network.frame_stream import FrameSink, FrameStreamError, PeerPurpose
+from shared.content.config import DEFAULT_TRANSFER_WINDOW_BYTES
+from shared.network.frame_stream import FrameStreamError, PeerPurpose
 from shared.network.mtls import MutualTlsMaterial
 from shared.network.mtls_listener import (
     ConnectionFrameSink,
     ConnectionHandler,
     MutualTlsFrameListener,
     PeerContext,
+    QueuedFrameSink,
 )
 from shared.network.relay_frame import RelayFrame
 
@@ -47,7 +49,7 @@ class _UplinkConnection(ConnectionHandler):
     def __init__(
         self,
         bridge: RelayWorkerBridge,
-        sink: FrameSink,
+        sink: QueuedFrameSink,
         peer: PeerContext,
         on_close: Callable[["_UplinkConnection"], None],
         ended: Callable[[str], bool],
@@ -85,12 +87,12 @@ class _UplinkConnection(ConnectionHandler):
 
     def end(self) -> None:
         """Drop the connection, ending every session it carries."""
-        if isinstance(self._sink, ConnectionFrameSink):
-            self._sink.abort()
+        self._sink.abort()
 
     def close(self) -> None:
         for session_id in self._sessions:
             self._bridge.release_peer(session_id, self._sink)
+        self._sink.close()
         self._on_close(self)
 
 
@@ -103,9 +105,14 @@ class NodePeerListener:
         endpoint: str,
         material: MutualTlsMaterial | None,
         bridges: dict[PeerPurpose, RelayWorkerBridge],
+        send_limit_bytes: int = 2 * DEFAULT_TRANSFER_WINDOW_BYTES,
+        send_stall_sec: float = 60.0,
         logger: logging.Logger | None = None,
     ) -> None:
         self._endpoint = endpoint
+        self._send_limit_bytes = send_limit_bytes
+        self._send_stall_sec = send_stall_sec
+        self._logger = logger or logging.getLogger("node-peer-listener")
         self._connections: set[_UplinkConnection] = set()
         # Workers that ended here, newest last; an ended id is never registered again.
         self._ended: OrderedDict[str, None] = OrderedDict()
@@ -114,7 +121,7 @@ class NodePeerListener:
             material=material,
             handler=lambda sink, peer: self._open(bridges[peer.purpose], sink, peer),
             purposes=frozenset(bridges),
-            logger=logger or logging.getLogger("node-peer-listener"),
+            logger=self._logger,
         )
 
     @property
@@ -122,11 +129,19 @@ class NodePeerListener:
         return self._listener.port
 
     def _open(
-        self, bridge: RelayWorkerBridge, sink: FrameSink, peer: PeerContext
+        self, bridge: RelayWorkerBridge, sink: ConnectionFrameSink, peer: PeerContext
     ) -> _UplinkConnection:
+        # The worker's frames answer over this connection from the supervisor's
+        # event stream for that worker, so a dialer that stops reading must never hold
+        # that stream: they are queued, and the dialer is dropped past its bound.
         connection = _UplinkConnection(
             bridge,
-            sink,
+            QueuedFrameSink(
+                sink,
+                limit_bytes=self._send_limit_bytes,
+                stall_sec=self._send_stall_sec,
+                logger=self._logger,
+            ),
             peer,
             on_close=self._connections.discard,
             ended=self._ended.__contains__,

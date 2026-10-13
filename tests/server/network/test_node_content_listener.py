@@ -6,6 +6,7 @@ for a dialer whose certificate covers the host control named for its requester.
 
 import asyncio
 import contextlib
+import time
 from collections.abc import AsyncIterator
 from typing import Any, cast
 
@@ -30,12 +31,14 @@ class _Uplink:
         self._records = records
         self.frames: list[RelayFrame] = []
         self.bound: list[str] = []
+        self.sinks: dict[str, Any] = {}
 
     async def session(self, session_id: str) -> dict[str, str]:
         return self._records.get(session_id, {})
 
     def bind_peer(self, session_id: str, sink: Any) -> None:
         self.bound.append(session_id)
+        self.sinks[session_id] = sink
 
     def release_peer(self, session_id: str, sink: Any) -> None:
         return None
@@ -261,3 +264,52 @@ async def _closes(reader: asyncio.StreamReader) -> bool:
         return await asyncio.wait_for(reader.read(), 0.3) == b""
     except TimeoutError:
         return False
+
+
+def test_a_dialer_that_stops_reading_never_holds_the_worker_answering_it(
+    ca: _TestCa,
+) -> None:
+    """The worker's frames answer from its event stream, which must keep moving."""
+    content = _Uplink("nde-b", _records())
+
+    async def run() -> tuple[float, bytes]:
+        async with _listener(ca, {PeerPurpose.CONTENT: content}) as endpoint:
+            reader, writer = await open_accepted_connection(
+                endpoint,
+                client_context(ca.material("node-a", _REQUESTER_HOST)),
+                5.0,
+                PeerPurpose.CONTENT,
+            )
+            await write_relay_frame(writer, _frame("rly-here"))
+            for _ in range(200):
+                if "rly-here" in content.sinks:
+                    break
+                await asyncio.sleep(0.01)
+            sink = content.sinks["rly-here"]
+            answer = RelayFrame(
+                kind=RelayFrameKind.DATA,
+                session_id="rly-here",
+                correlation_id="chg-1",
+                operation_id="",
+                direction=RelayDirection.TARGET_TO_ORIGIN,
+                seq=1,
+                payload=b"x" * (64 * 1024),
+            )
+            started = time.monotonic()
+            async with asyncio.timeout(5.0):
+                for _ in range(256):
+                    await sink.send(answer)
+            elapsed = time.monotonic() - started
+            with contextlib.suppress(ConnectionError):
+                async with asyncio.timeout(5.0):
+                    while await reader.read(1 << 20):
+                        pass
+            tail = await reader.read()
+            writer.close()
+            return elapsed, tail
+
+    elapsed, tail = asyncio.run(run())
+    # 16 MiB answered to a dialer reading nothing: queued at once, and the dialer is
+    # dropped past its bound rather than holding the sender.
+    assert elapsed < 1.0
+    assert tail == b""

@@ -6,6 +6,8 @@ from pathlib import Path
 from pydantic import SecretStr
 
 from shared.content import ObjectStoreConfig
+from shared.content.config import DEFAULT_TRANSFER_WINDOW_BYTES
+from shared.content.wire import CHUNK_BYTES
 from shared.tasks.specs import ModelBindingMode
 from shared.telemetry.config import TelemetryConfig
 from shared.utils.parsing import (
@@ -581,6 +583,8 @@ class ContentStoreConfig:
     control-granted transfer instead of going to the shared store.
     ``read_stall_timeout_sec`` bounds how long a control-plane read waits on a store
     that has stopped sending, and ``read_attempts`` how many times its request is made.
+    ``transfer_window_bytes`` and ``transfer_timeout_sec`` are the window and stall
+    deadline the workers' transfers run under, which a node relaying one sizes by.
     """
 
     hydration_enabled: bool = False
@@ -589,6 +593,8 @@ class ContentStoreConfig:
     access_grant_ttl_sec: float = 900.0
     read_stall_timeout_sec: float = _DEFAULT_READ_STALL_TIMEOUT_SEC
     read_attempts: int = _DEFAULT_READ_ATTEMPTS
+    transfer_window_bytes: int = DEFAULT_TRANSFER_WINDOW_BYTES
+    transfer_timeout_sec: float = 60.0
 
     @classmethod
     def from_env(cls) -> "ContentStoreConfig":
@@ -603,6 +609,13 @@ class ContentStoreConfig:
             read_stall_timeout_sec=parse_float_env(
                 "CONTENT_STORE_READ_STALL_TIMEOUT_SEC", _DEFAULT_READ_STALL_TIMEOUT_SEC
             ),
+            transfer_window_bytes=max(
+                CHUNK_BYTES,
+                parse_int_env(
+                    "CONTENT_TRANSFER_WINDOW_BYTES", DEFAULT_TRANSFER_WINDOW_BYTES
+                ),
+            ),
+            transfer_timeout_sec=parse_float_env("CONTENT_TRANSFER_TIMEOUT_SEC", 60.0),
             read_attempts=max(
                 1, parse_int_env("CONTENT_STORE_READ_ATTEMPTS", _DEFAULT_READ_ATTEMPTS)
             ),

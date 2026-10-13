@@ -25,6 +25,9 @@ from .relay_frame import (
     WindowStalled,
 )
 
+# The window a session keeps in flight unless its protocol sets its own.
+DEFAULT_WINDOW_BYTES = 64 * 1024
+
 
 class RelaySessionRole(Enum):
     """Which end of the exchange this session drives."""
@@ -58,7 +61,7 @@ class FramedRelaySession:
         sink: FrameSink,
         correlation_id: str = "",
         operation_id: str = "",
-        window_bytes: int = 65536,
+        window_bytes: int = DEFAULT_WINDOW_BYTES,
         strict_sequence: bool = False,
         send_deadline_sec: float | None = None,
     ) -> None:

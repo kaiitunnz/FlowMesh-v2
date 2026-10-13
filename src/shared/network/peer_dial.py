@@ -9,8 +9,10 @@ dialer's certificate or its own capacity.
 """
 
 import asyncio
+import contextlib
 import socket
 import ssl
+from typing import Any
 
 from shared.schemas.network import RouteObservationOutcome
 
@@ -26,6 +28,29 @@ from .frame_stream import (
 
 # A failed dial raises a socket or TLS failure, or a parse failure of the endpoint.
 PEER_DIAL_ERRORS = (OSError, ValueError)
+
+# A peer that vanishes without a close (a partition, a host that died) is found by
+# keepalive probes, and unacknowledged writes give up after the user timeout.
+_KEEPALIVE_IDLE_SEC = 30
+_KEEPALIVE_INTERVAL_SEC = 10
+_KEEPALIVE_PROBES = 3
+_USER_TIMEOUT_MS = 60_000
+
+
+def keep_alive(sock: Any) -> None:
+    """Make a peer connection's socket notice a peer that is gone without a close."""
+    if sock is None:
+        return
+    with contextlib.suppress(OSError):
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        for name, value in (
+            ("TCP_KEEPIDLE", _KEEPALIVE_IDLE_SEC),
+            ("TCP_KEEPINTVL", _KEEPALIVE_INTERVAL_SEC),
+            ("TCP_KEEPCNT", _KEEPALIVE_PROBES),
+            ("TCP_USER_TIMEOUT", _USER_TIMEOUT_MS),
+        ):
+            if (option := getattr(socket, name, None)) is not None:
+                sock.setsockopt(socket.IPPROTO_TCP, option, value)
 
 
 class PeerAcceptError(OSError):
@@ -45,7 +70,7 @@ async def open_peer_connection(
 ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
     """Open a stream to the peer listener at ``endpoint`` (``host:port``)."""
     host, port = split_host_port(endpoint)
-    return await asyncio.wait_for(
+    reader, writer = await asyncio.wait_for(
         asyncio.open_connection(
             host,
             port,
@@ -54,6 +79,8 @@ async def open_peer_connection(
         ),
         timeout=timeout,
     )
+    keep_alive(writer.get_extra_info("socket"))
+    return reader, writer
 
 
 async def open_accepted_connection(
@@ -137,6 +164,7 @@ __all__ = [
     "PEER_DIAL_ERRORS",
     "PeerAcceptError",
     "classify_peer_error",
+    "keep_alive",
     "open_accepted_connection",
     "open_peer_connection",
 ]

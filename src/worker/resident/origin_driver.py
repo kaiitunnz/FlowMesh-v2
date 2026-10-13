@@ -23,7 +23,11 @@ from opentelemetry.trace import Span
 
 from shared.network.frame_stream import FrameSink
 from shared.network.relay_frame import RelayFrame
-from shared.network.session import FramedRelaySession, RelaySessionRole
+from shared.network.session import (
+    DEFAULT_WINDOW_BYTES,
+    FramedRelaySession,
+    RelaySessionRole,
+)
 from shared.outcome import FabricContentStore, OutcomeManifest
 from shared.resident.carriage import (
     CarriageUnavailable,
@@ -99,7 +103,7 @@ class ResidentOriginDriver:
         content_store_for: OutcomeStoreFor,
         report_ack: AckSink,
         report_outcome: OutcomeSink,
-        window_bytes: int = 65536,
+        window_bytes: int = DEFAULT_WINDOW_BYTES,
         stream_deadline_sec: float = 300.0,
         auth_deadline_sec: float = 60.0,
         logger: logging.Logger | None = None,

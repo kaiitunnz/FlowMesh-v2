@@ -35,6 +35,7 @@ import contextlib
 import logging
 import socket
 import ssl
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -54,6 +55,7 @@ from .frame_stream import (
     write_relay_frame,
 )
 from .mtls import MutualTlsMaterial, PeerNames, peer_identities, server_context
+from .peer_dial import keep_alive
 from .relay_frame import RelayFrame
 
 HANDSHAKE_TIMEOUT_SEC = 10.0
@@ -84,10 +86,6 @@ class PeerContext:
     names: PeerNames = PeerNames()
 
 
-# Builds the handler for one accepted connection, given the sink that answers over it
-# and what the listener verified about the connection.
-ConnectionHandlerFactory = Callable[[FrameSink, PeerContext], ConnectionHandler]
-
 # Whether the verified identities belong to an origin this endpoint admits.
 PeerAdmission = Callable[[frozenset[str]], bool]
 
@@ -111,6 +109,97 @@ class ConnectionFrameSink(FrameSink):
     def abort(self) -> None:
         """Drop the connection at once, so its dialer sees it end."""
         self._writer.transport.abort()
+
+
+# Builds the handler for one accepted connection, given the sink that answers over it
+# and what the listener verified about the connection.
+ConnectionHandlerFactory = Callable[
+    [ConnectionFrameSink, PeerContext], ConnectionHandler
+]
+
+
+# What one queued frame is counted as beyond its payload: its header and framing.
+_FRAME_OVERHEAD_BYTES = 256
+
+
+class QueuedFrameSink(FrameSink):
+    """Answers over one connection without ever waiting on its peer.
+
+    A frame is queued and written by the sink's own task, so a caller carrying other
+    traffic is never held by a peer that stops reading. A peer that lets more than
+    ``limit_bytes`` queue, or whose connection takes no bytes for ``stall_sec``, has
+    the connection dropped, and what is sent to it afterwards is discarded.
+    """
+
+    def __init__(
+        self,
+        sink: ConnectionFrameSink,
+        *,
+        limit_bytes: int,
+        stall_sec: float,
+        logger: logging.Logger | None = None,
+    ) -> None:
+        self._sink = sink
+        self._limit_bytes = limit_bytes
+        self._stall_sec = stall_sec
+        self._logger = logger or logging.getLogger("peer-frame-listener")
+        self._queue: deque[RelayFrame] = deque()
+        self._queued_bytes = 0
+        self._ready = asyncio.Event()
+        self._dropped = False
+        self._task = asyncio.get_running_loop().create_task(self._write_queued())
+
+    async def send(self, frame: RelayFrame) -> None:
+        if self._dropped:
+            return
+        size = len(frame.payload) + _FRAME_OVERHEAD_BYTES
+        if self._queued_bytes + size > self._limit_bytes:
+            self._drop("its peer let more than its bound queue")
+            return
+        self._queue.append(frame)
+        self._queued_bytes += size
+        self._ready.set()
+
+    async def _write_queued(self) -> None:
+        while True:
+            await self._ready.wait()
+            self._ready.clear()
+            while self._queue and not self._dropped:
+                frame = self._queue[0]
+                try:
+                    async with asyncio.timeout(self._stall_sec):
+                        await self._sink.send(frame)
+                except TimeoutError:
+                    self._drop(f"its peer took nothing for {self._stall_sec}s")
+                    return
+                except (OSError, ssl.SSLError, FrameStreamError):
+                    self._drop("its connection failed")
+                    return
+                self._queue.popleft()
+                self._queued_bytes -= len(frame.payload) + _FRAME_OVERHEAD_BYTES
+
+    def _drop(self, why: str) -> None:
+        if self._dropped:
+            return
+        self._dropped = True
+        self._queue.clear()
+        self._queued_bytes = 0
+        self._logger.warning("dropping a peer connection: %s", why)
+        self._sink.abort()
+
+    def abort(self) -> None:
+        """Drop the connection at once, so its dialer sees it end."""
+        if not self._dropped:
+            self._dropped = True
+            self._queue.clear()
+            self._queued_bytes = 0
+            self._sink.abort()
+
+    def close(self) -> None:
+        """Stop writing; the connection itself is closed by its listener."""
+        self._dropped = True
+        self._queue.clear()
+        self._task.cancel()
 
 
 async def close_writer(writer: asyncio.StreamWriter) -> None:
@@ -216,6 +305,7 @@ class MutualTlsFrameListener:
             self._logger.warning("refusing a peer dialer that is not a known origin")
             await self._decline(writer, AcceptStatus.REFUSED)
             return
+        keep_alive(writer.get_extra_info("socket"))
         self._open += 1
         self._connections.add(writer)
         handler: ConnectionHandler | None = None
@@ -297,6 +387,7 @@ __all__ = [
     "ConnectionHandler",
     "ConnectionHandlerFactory",
     "MutualTlsFrameListener",
+    "QueuedFrameSink",
     "PeerAdmission",
     "PeerContext",
     "close_writer",

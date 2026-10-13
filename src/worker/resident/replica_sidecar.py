@@ -24,7 +24,11 @@ from pydantic import ValidationError
 
 from shared.network.frame_stream import FrameSink
 from shared.network.relay_frame import RelayFrame, RelayFrameKind, WindowStalled
-from shared.network.session import FramedRelaySession, RelaySessionRole
+from shared.network.session import (
+    DEFAULT_WINDOW_BYTES,
+    FramedRelaySession,
+    RelaySessionRole,
+)
 from shared.resident.contracts import (
     AdmissionHandoff,
     ReplicaEndpoint,
@@ -118,7 +122,7 @@ class ResidentReplicaSidecar:
         engine_open: EngineOpen,
         engine_open_raw: RawEngineOpen | None = None,
         engine_unload: EngineUnload | None = None,
-        window_bytes: int = 65536,
+        window_bytes: int = DEFAULT_WINDOW_BYTES,
         stream_deadline_sec: float = 300.0,
         on_load: LoadSink | None = None,
         logger: logging.Logger | None = None,

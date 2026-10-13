@@ -10,6 +10,7 @@ import contextlib
 import socket
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import Any
 
 import pytest
 
@@ -285,3 +286,39 @@ def test_a_dialer_that_opens_no_session_frees_its_slot(
             silent.close()
 
     asyncio.run(run())
+
+
+def test_both_ends_of_a_peer_connection_keep_it_alive() -> None:
+    """A peer gone without a close is noticed by keepalive, at either end."""
+
+    async def run() -> tuple[int, int, int]:
+        def _keepalive(sock: Any) -> int:
+            return sock.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE)
+
+        listener = MutualTlsFrameListener(
+            material=None,
+            handler=lambda sink, _: _Recording([]),
+            admits=lambda _: True,
+        )
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        await listener.start_on_socket(sock)
+        try:
+            _, writer = await open_accepted_connection(
+                f"127.0.0.1:{listener.port}", None, _BUDGET, PeerPurpose.RESIDENT
+            )
+            dialed = writer.get_extra_info("socket")
+            user_timeout = dialed.getsockopt(
+                socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT
+            )
+            served = [
+                _keepalive(w.get_extra_info("socket")) for w in listener._connections
+            ]
+            writer.close()
+            return _keepalive(dialed), user_timeout, served[0]
+        finally:
+            await listener.stop()
+
+    dialed, user_timeout, served = asyncio.run(run())
+    assert dialed == 1 and user_timeout > 0
+    assert served == 1

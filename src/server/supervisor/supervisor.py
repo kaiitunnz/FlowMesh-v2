@@ -18,6 +18,7 @@ from shared.network.mtls import (
     MutualTlsMaterialError,
     client_context,
 )
+from shared.network.session import DEFAULT_WINDOW_BYTES
 from shared.schemas.command import CommandMessage, CommandResponse
 from shared.schemas.network import (
     CONTENT_PEER_PROTOCOL,
@@ -532,6 +533,11 @@ def _run_supervisor(
             endpoint=network_cfg.peer.node_listener_url,
             material=peer_material,
             bridges=peer_bridges,
+            # Two windows of whichever session relays the most: a reader keeping up
+            # never has more than one outstanding.
+            send_limit_bytes=2
+            * max(content_cfg.transfer_window_bytes, DEFAULT_WINDOW_BYTES),
+            send_stall_sec=content_cfg.transfer_timeout_sec,
             logger=logger,
         )
 
