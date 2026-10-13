@@ -34,8 +34,10 @@ class _Uplink:
         self.sinks: dict[str, Any] = {}
         self.released: list[str] = []
         self.dropped: list[str] = []
+        self.loads: dict[str, int] = {}
 
     async def session(self, session_id: str) -> dict[str, str]:
+        self.loads[session_id] = self.loads.get(session_id, 0) + 1
         return self._records.get(session_id, {})
 
     def bind_peer(self, session_id: str, sink: Any) -> None:
@@ -45,10 +47,10 @@ class _Uplink:
     def release_peer(self, session_id: str, sink: Any) -> None:
         self.released.append(session_id)
 
-    async def drop_peer(self, session_id: str, sink: Any) -> None:
+    async def drop_peer(self, session_id: str, sink: Any, record: Any) -> None:
         self.dropped.append(session_id)
 
-    async def on_frame(self, frame: RelayFrame) -> None:
+    async def forward(self, frame: RelayFrame, record: Any) -> None:
         self.frames.append(frame)
 
 
@@ -85,11 +87,13 @@ async def _send(
     dialer: MutualTlsMaterial,
     purpose: PeerPurpose,
     session_id: str,
+    frames: int = 1,
 ) -> None:
     reader, writer = await open_accepted_connection(
         endpoint, client_context(dialer), 5.0, purpose
     )
-    await write_relay_frame(writer, _frame(session_id))
+    for _ in range(frames):
+        await write_relay_frame(writer, _frame(session_id))
     with contextlib.suppress(asyncio.TimeoutError, ConnectionError):
         await asyncio.wait_for(reader.read(), 0.5)
     writer.close()
@@ -121,6 +125,24 @@ def test_a_content_session_reaches_only_the_content_uplink(ca: _TestCa) -> None:
     asyncio.run(run())
     assert [frame.session_id for frame in content.frames] == ["rly-here"]
     assert [frame.session_id for frame in resident.frames] == ["rly-resident"]
+
+
+def test_a_session_loads_its_routing_record_once_for_all_its_frames(
+    ca: _TestCa,
+) -> None:
+    content = _Uplink("nde-b", _records())
+    resident = _Uplink("nde-b", {"rly-resident": {"target_worker": "wkr-r"}})
+
+    async def run() -> None:
+        bridges = {PeerPurpose.CONTENT: content, PeerPurpose.RESIDENT: resident}
+        async with _listener(ca, bridges) as endpoint:
+            requester = ca.material("node-a", _REQUESTER_HOST)
+            await _send(endpoint, requester, PeerPurpose.CONTENT, "rly-here", 20)
+            await _send(endpoint, requester, PeerPurpose.RESIDENT, "rly-resident", 20)
+
+    asyncio.run(run())
+    assert len(content.frames) == 20 and content.loads == {"rly-here": 1}
+    assert len(resident.frames) == 20 and resident.loads == {"rly-resident": 1}
 
 
 @pytest.mark.parametrize(
@@ -327,7 +349,7 @@ def test_a_closed_content_connection_drops_its_sessions_and_a_resident_one_relea
         "rly-here": {"target_node": "nde-b", "origin_host": _REQUESTER_HOST},
     }
     content = _Uplink("nde-b", records)
-    resident = _Uplink("nde-b", {})
+    resident = _Uplink("nde-b", {"rly-resident": {"target_worker": "wkr-r"}})
 
     async def run() -> None:
         bridges = {PeerPurpose.CONTENT: content, PeerPurpose.RESIDENT: resident}
@@ -372,3 +394,35 @@ def test_a_worker_id_registered_again_is_admitted_again(ca: _TestCa) -> None:
 
     asyncio.run(run())
     assert [frame.session_id for frame in content.frames] == ["rly-to-h"]
+
+
+def test_stopping_the_listener_cancels_the_drops_still_pending(ca: _TestCa) -> None:
+    class _StuckUplink(_Uplink):
+        async def drop_peer(self, session_id: str, sink: Any, record: Any) -> None:
+            self.dropped.append(session_id)
+            await asyncio.Event().wait()
+
+    content = _StuckUplink("nde-b", _records())
+
+    async def run() -> list[asyncio.Task[Any]]:
+        listener = NodePeerListener(
+            endpoint="127.0.0.1:0",
+            material=ca.material("node-b", "127.0.0.1"),
+            bridges=cast(Any, {PeerPurpose.CONTENT: content}),
+        )
+        await listener.start()
+        await _send(
+            f"127.0.0.1:{listener.port}",
+            ca.material("node-a", _REQUESTER_HOST),
+            PeerPurpose.CONTENT,
+            "rly-here",
+        )
+        async with asyncio.timeout(5.0):
+            while not content.dropped:
+                await asyncio.sleep(0.01)
+        pending = list(listener._deferred)
+        await listener.stop()
+        return pending
+
+    pending = asyncio.run(run())
+    assert pending and all(task.cancelled() for task in pending)

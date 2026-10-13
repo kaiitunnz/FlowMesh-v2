@@ -155,7 +155,7 @@ def test_a_dropped_dialed_session_is_cancelled_and_kept_off_the_root_relay() -> 
         )
         dialer = _Sink()
         bridge.bind_peer("s1", dialer)
-        await bridge.drop_peer("s1", dialer)
+        await bridge.drop_peer("s1", dialer, await sessions.load("s1"))
         dropped = _frame(RelayDirection.TARGET_TO_ORIGIN)
         await bridge.publish_up(dropped)
         other = RelayFrame(

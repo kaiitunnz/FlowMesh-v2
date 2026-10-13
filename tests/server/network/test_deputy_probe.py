@@ -47,7 +47,10 @@ class _Bridge:
     def release_peer(self, session_id: str, sink: Any) -> None:
         pass
 
-    async def on_frame(self, frame: RelayFrame) -> None:
+    async def session(self, session_id: str) -> dict[str, str]:
+        return {"target_worker": "wkr-1"}
+
+    async def forward(self, frame: RelayFrame, record: Any) -> None:
         self.frames.append(frame)
 
 

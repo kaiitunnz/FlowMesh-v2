@@ -64,21 +64,25 @@ class _UplinkConnection(ConnectionHandler):
         self._on_close = on_close
         self._ended = ended
         self._defer = defer
-        self._sessions: set[str] = set()
+        # Each session's routing record, loaded once when the session is admitted.
+        self._sessions: dict[str, dict[str, str]] = {}
         # The workers this connection's content sessions are served by.
         self.targets: set[str] = set()
 
     async def on_frame(self, frame: RelayFrame) -> None:
-        if frame.session_id not in self._sessions:
-            await self._admit(frame.session_id)
-            self._sessions.add(frame.session_id)
-            self._bridge.bind_peer(frame.session_id, self._sink)
-        await self._bridge.on_frame(frame)
+        record = self._sessions.get(frame.session_id)
+        if record is None:
+            record = await self._bridge.session(frame.session_id)
+            self._admit(record)
+            if record:
+                # A record not yet written is looked up again on the next frame.
+                self._sessions[frame.session_id] = record
+                self._bridge.bind_peer(frame.session_id, self._sink)
+        await self._bridge.forward(frame, record)
 
-    async def _admit(self, session_id: str) -> None:
+    def _admit(self, record: dict[str, str]) -> None:
         if self._peer.purpose is not PeerPurpose.CONTENT:
             return
-        record = await self._bridge.session(session_id)
         if record.get("target_node") != self._bridge.node_id:
             raise FrameStreamError("a content session control did not route here")
         if self._peer.identities and not self._peer.names.covers(
@@ -98,8 +102,8 @@ class _UplinkConnection(ConnectionHandler):
         if self._peer.purpose is PeerPurpose.CONTENT:
             # The holder is still streaming to a requester that can no longer read it:
             # cancel it there, and keep its frames off the root relay.
-            for session_id in self._sessions:
-                self._defer(self._bridge.drop_peer(session_id, self._sink))
+            for session_id, record in self._sessions.items():
+                self._defer(self._bridge.drop_peer(session_id, self._sink, record))
         else:
             for session_id in self._sessions:
                 self._bridge.release_peer(session_id, self._sink)
@@ -207,6 +211,10 @@ class NodePeerListener:
 
     async def stop(self) -> None:
         await self._listener.stop()
+        deferred = list(self._deferred)
+        for task in deferred:
+            task.cancel()
+        await asyncio.gather(*deferred, return_exceptions=True)
 
 
 __all__ = ["NodePeerListener"]

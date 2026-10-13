@@ -12,7 +12,7 @@ transfers runs one bridge per keyspace.
 
 import logging
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from shared.network.frame_stream import FrameSink
@@ -62,7 +62,14 @@ class RelayWorkerBridge:
 
     async def on_frame(self, frame: RelayFrame) -> None:
         """Forward one down frame to the local worker its session and direction name."""
-        record = await self._sessions.load(frame.session_id)
+        await self.forward(frame, await self._sessions.load(frame.session_id))
+
+    async def forward(self, frame: RelayFrame, record: Mapping[str, str]) -> None:
+        """Forward one frame by its session's routing record, already loaded.
+
+        A session's record never changes, so a connection carrying many of its frames
+        loads it once.
+        """
         if not record:
             return
         if frame.direction is RelayDirection.TARGET_TO_ORIGIN:
@@ -108,7 +115,9 @@ class RelayWorkerBridge:
         if self._peers.get(session_id) is sink:
             del self._peers[session_id]
 
-    async def drop_peer(self, session_id: str, sink: FrameSink) -> None:
+    async def drop_peer(
+        self, session_id: str, sink: FrameSink, record: Mapping[str, str]
+    ) -> None:
         """End a session whose dialed connection is gone, at the worker serving it.
 
         The worker is cancelled, and anything it still produces for the session is
@@ -120,14 +129,15 @@ class RelayWorkerBridge:
         self._dropped[session_id] = None
         while len(self._dropped) > _DROPPED_MEMORY:
             self._dropped.popitem(last=False)
-        await self.on_frame(
+        await self.forward(
             RelayFrame(
                 kind=RelayFrameKind.CANCEL,
                 session_id=session_id,
                 correlation_id="",
                 operation_id="",
                 direction=RelayDirection.ORIGIN_TO_TARGET,
-            )
+            ),
+            record,
         )
 
     async def publish_up(self, frame: RelayFrame) -> None:
