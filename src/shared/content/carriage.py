@@ -13,9 +13,7 @@ import time
 
 from pydantic import BaseModel, ConfigDict, Field
 
-CONTROL_RELAY = "control_relay"
-WORKER_DIRECT = "worker_direct"
-NODE_RELAY = "node_relay"
+from shared.schemas.network import Transport
 
 
 class ContentPeerRoute(BaseModel):
@@ -23,7 +21,7 @@ class ContentPeerRoute(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    transport: str
+    transport: Transport
     endpoint: str
 
 
@@ -74,9 +72,6 @@ class ContentRouteObservation(BaseModel):
 
 
 __all__ = [
-    "CONTROL_RELAY",
-    "NODE_RELAY",
-    "WORKER_DIRECT",
     "ContentCarriagePlan",
     "ContentPeerRoute",
     "ContentRouteObservation",

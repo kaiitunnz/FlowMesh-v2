@@ -14,7 +14,7 @@ import logging
 import ssl
 from collections.abc import Callable
 
-from shared.content.carriage import ContentCarriagePlan, ContentPeerRoute
+from shared.content import ContentCarriagePlan, ContentPeerRoute
 from shared.network.frame_stream import (
     FrameStreamError,
     PeerPurpose,

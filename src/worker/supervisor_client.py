@@ -18,8 +18,7 @@ from google.protobuf.struct_pb2 import Struct
 from pydantic import ValidationError
 
 from shared._version import FLOWMESH_RELEASE_VERSION
-from shared.content import ContentReference
-from shared.content.carriage import ContentRouteObservation
+from shared.content import ContentReference, ContentRouteObservation
 from shared.grpc.supervisor.v1 import supervisor_pb2, supervisor_pb2_grpc
 from shared.resident.reports import (
     ResidentBootstrapAck,

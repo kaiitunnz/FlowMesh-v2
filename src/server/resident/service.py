@@ -48,7 +48,7 @@ from shared.resident.reports import (
     ResidentStreamHead,
     ResidentStreamStatus,
 )
-from shared.schemas.network import PEER_PROTOCOL
+from shared.schemas.network import RESIDENT_PEER_PROTOCOL
 from shared.telemetry.ids import SpanIdKind, derived_span_id, workflow_to_trace_id_int
 from shared.telemetry.semconv import (
     PHYSICAL_TASK_ID,
@@ -1984,7 +1984,9 @@ class ResidentCapacityControl:
             node_id=node_id,
             worker_id=worker_id,
             routes=(peer_listener or f"resident://{worker_id}",),
-            protocols=(("resident", PEER_PROTOCOL) if peer_listener else ("resident",)),
+            protocols=(
+                ("resident", RESIDENT_PEER_PROTOCOL) if peer_listener else ("resident",)
+            ),
             directly_routable=deps.directly_routable and peer_listener is not None,
         )
         # The listener fence is durable before any handoff names it.

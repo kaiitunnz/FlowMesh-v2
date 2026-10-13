@@ -21,7 +21,7 @@ from shared.network.mtls import (
 from shared.schemas.command import CommandMessage, CommandResponse
 from shared.schemas.network import (
     CONTENT_PEER_PROTOCOL,
-    PEER_PROTOCOL,
+    RESIDENT_PEER_PROTOCOL,
     NetworkEndpointAdvertisement,
     ReachabilityClass,
 )
@@ -299,7 +299,9 @@ def _endpoint_advertisement_provider(
     protocols: tuple[str, ...] = ()
     if peer.enabled:
         protocols = (
-            (PEER_PROTOCOL, CONTENT_PEER_PROTOCOL) if content_peer else (PEER_PROTOCOL,)
+            (RESIDENT_PEER_PROTOCOL, CONTENT_PEER_PROTOCOL)
+            if content_peer
+            else (RESIDENT_PEER_PROTOCOL,)
         )
     try:
         reachability_class = ReachabilityClass(network_cfg.reachability_class)

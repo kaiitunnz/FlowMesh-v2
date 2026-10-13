@@ -9,8 +9,7 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
-from shared.content import ContentReference
-from shared.content.carriage import ContentRouteObservation
+from shared.content import ContentReference, ContentRouteObservation
 from shared.resident.reports import (
     ResidentBootstrapAck,
     ResidentOpOutcome,

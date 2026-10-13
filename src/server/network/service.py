@@ -9,7 +9,7 @@ reachability for diagnostics.
 import logging
 import time
 
-from shared.schemas.network import PEER_PROTOCOL
+from shared.schemas.network import RESIDENT_PEER_PROTOCOL
 from shared.utils.ids import new_route_origin_id
 
 from ..config import NetworkPlaneConfig
@@ -66,7 +66,7 @@ def _peer_policy(config: NetworkPlaneConfig) -> TrustedPeerPolicy:
             for value in peer.classes
             if value in _REACHABILITY_CLASSES
         ),
-        protocol=PEER_PROTOCOL,
+        protocol=RESIDENT_PEER_PROTOCOL,
     )
 
 

@@ -20,8 +20,7 @@ from server.network.state import (
     RouteHop,
     TrustedPeerPolicy,
 )
-from shared.content import ContentHydrationGrant, reference_for
-from shared.content.carriage import ContentRouteObservation
+from shared.content import ContentHydrationGrant, ContentRouteObservation, reference_for
 from shared.schemas.network import (
     CONTENT_PEER_PROTOCOL,
     RouteObservationOutcome,

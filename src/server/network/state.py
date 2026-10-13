@@ -70,11 +70,12 @@ class ReachabilityState(StrEnum):
 class RouteTarget(Protocol):
     """The route-target facts the pure resolver reads.
 
-    Both the resident ``ReplicaListenerAdvertisement`` and the nonresident external-tool
-    ``NonresidentSidecarTarget`` satisfy it, so one resolver serves both without either
-    carrying the other's contract. ``incarnation`` and ``listener_generation`` are
-    distinct reachability-view keys (a resident target moves them independently); a
-    nonresident target mirrors both to its target generation.
+    The resident ``ReplicaListenerAdvertisement``, the nonresident external-tool
+    ``NonresidentSidecarTarget`` and a holder's ``ContentListenerTarget`` satisfy it, so
+    one resolver serves them all without any carrying another's contract.
+    ``incarnation`` and ``listener_generation`` are distinct reachability-view keys (a
+    resident target moves them independently); every other target mirrors both to its
+    target generation.
     """
 
     node_id: str

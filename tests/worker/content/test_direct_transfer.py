@@ -18,19 +18,15 @@ from shared.content import (
     ContentCarriagePlan,
     ContentHydrationError,
     ContentHydrationGrant,
-    ContentReference,
-)
-from shared.content.carriage import (
-    CONTROL_RELAY,
-    NODE_RELAY,
-    WORKER_DIRECT,
     ContentPeerRoute,
+    ContentReference,
 )
 from shared.content.wire import CHUNK_BYTES
 from shared.network.frame_stream import PeerPurpose
 from shared.network.mtls import MutualTlsMaterial, client_context
 from shared.network.mtls_listener import MutualTlsFrameListener
 from shared.network.relay_frame import RelayDirection, RelayFrame, RelayFrameKind
+from shared.schemas.network import Transport
 from shared.utils.ids import new_hydration_grant_id, new_relay_session_id
 from tests.support.certs import TestCa as _TestCa
 from tests.support.certs import new_ca
@@ -90,7 +86,7 @@ class _Fabric:
         *,
         requester: MutualTlsMaterial,
         cache: type[WorkerContentCache] = WorkerContentCache,
-        transport: str = WORKER_DIRECT,
+        transport: Transport = Transport.WORKER_DIRECT,
         transfer_timeout_sec: float = _STALL_SEC,
     ) -> None:
         self.tmp_path = tmp_path
@@ -116,7 +112,7 @@ class _Fabric:
         self.transport = transport
         self.endpoint = ""
         # Routes dialed before the listener's own, as an unreachable first candidate.
-        self.leading: list[tuple[str, str]] = []
+        self.leading: list[tuple[Transport, str]] = []
         self.client = ContentHydrationClient(
             sink=self.to_holder,
             request_grant=self._grant,
@@ -130,8 +126,8 @@ class _Fabric:
         self.to_requester.peer = self.client.on_frame
         self.to_holder.peer = self.holder.on_frame
 
-    def routes(self) -> list[tuple[str, str]]:
-        if self.transport == CONTROL_RELAY:
+    def routes(self) -> list[tuple[Transport, str]]:
+        if self.transport == Transport.CONTROL_RELAY:
             return []
         return [*self.leading, (self.transport, self.endpoint)]
 
@@ -359,7 +355,9 @@ async def test_one_grant_fetched_twice_at_once_is_served_once(
             holder_generation=1,
             listener_generation=1,
             routes=(
-                ContentPeerRoute(transport=WORKER_DIRECT, endpoint=fabric.endpoint),
+                ContentPeerRoute(
+                    transport=Transport.WORKER_DIRECT, endpoint=fabric.endpoint
+                ),
             ),
             fresh_for_sec=30.0,
         )
@@ -429,8 +427,8 @@ async def test_a_route_that_does_not_connect_gives_way_to_the_next_under_one_gra
     closed.bind(("127.0.0.1", 0))
     dead = f"127.0.0.1:{closed.getsockname()[1]}"
     closed.close()
-    async with _fabric(tmp_path, ca, transport=NODE_RELAY) as fabric:
-        fabric.leading = [(WORKER_DIRECT, dead)]
+    async with _fabric(tmp_path, ca, transport=Transport.NODE_RELAY) as fabric:
+        fabric.leading = [(Transport.WORKER_DIRECT, dead)]
         reference = fabric.cache.write("org", b"payload")
 
         assert await fabric.read(reference, peer_only=True) == b"payload"

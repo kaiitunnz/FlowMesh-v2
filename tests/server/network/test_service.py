@@ -17,7 +17,7 @@ from server.network.state import (
 )
 from server.registries.node import Node
 from server.supervisor.supervisor import _endpoint_advertisement_provider
-from shared.schemas.network import PEER_PROTOCOL
+from shared.schemas.network import RESIDENT_PEER_PROTOCOL
 
 
 class _FakeNodeRegistry:
@@ -254,13 +254,13 @@ def test_a_peer_node_without_a_listener_dials_a_trusted_worker_directly() -> Non
             network_endpoint=origin_ad,
         )
     )
-    registry.set(_node("nde-2", generation=1, protocols=(PEER_PROTOCOL,)))
+    registry.set(_node("nde-2", generation=1, protocols=(RESIDENT_PEER_PROTOCOL,)))
     plane = NetworkPlane(
         NetworkPlaneConfig(enabled=True, trust_domain="fm", peer=peer),
         registry,  # type: ignore[arg-type]
         logging.getLogger("test-network"),
     )
-    listener = _listener().model_copy(update={"protocols": (PEER_PROTOCOL,)})
+    listener = _listener().model_copy(update={"protocols": (RESIDENT_PEER_PROTOCOL,)})
 
     result = asyncio.run(plane.resolve("nde-1", listener))
 
@@ -287,9 +287,9 @@ def test_the_root_serve_ingress_and_the_nodes_workers_keep_separate_evidence(
     # but a failure one of them observes never steers the other's route.
     registry = _FakeNodeRegistry()
     for node_id in ("nde-1", "nde-2"):
-        registry.set(_node(node_id, generation=1, protocols=(PEER_PROTOCOL,)))
+        registry.set(_node(node_id, generation=1, protocols=(RESIDENT_PEER_PROTOCOL,)))
     plane = _plane(registry, trusted=True)
-    listener = _listener().model_copy(update={"protocols": (PEER_PROTOCOL,)})
+    listener = _listener().model_copy(update={"protocols": (RESIDENT_PEER_PROTOCOL,)})
 
     def head(policy_class: PolicyClass) -> tuple[str, str]:
         result = asyncio.run(

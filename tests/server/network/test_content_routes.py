@@ -12,7 +12,7 @@ from server.network.state import (
     Transport,
     TrustedPeerPolicy,
 )
-from shared.schemas.network import CONTENT_PEER_PROTOCOL, PEER_PROTOCOL
+from shared.schemas.network import CONTENT_PEER_PROTOCOL, RESIDENT_PEER_PROTOCOL
 
 CONTENT = TrustedPeerPolicy(
     enabled=True,
@@ -20,7 +20,7 @@ CONTENT = TrustedPeerPolicy(
     classes=frozenset(ReachabilityClass),
     protocol=CONTENT_PEER_PROTOCOL,
 )
-BOTH = (PEER_PROTOCOL, CONTENT_PEER_PROTOCOL)
+BOTH = (RESIDENT_PEER_PROTOCOL, CONTENT_PEER_PROTOCOL)
 
 
 def _origin(
@@ -95,13 +95,15 @@ def test_a_holder_not_declared_routable_is_reached_through_its_node() -> None:
 
 def test_a_node_that_cannot_carry_content_is_never_a_content_hop() -> None:
     assert _ladder(
-        _origin(), _holder(directly_routable=False), _endpoint((PEER_PROTOCOL,))
+        _origin(),
+        _holder(directly_routable=False),
+        _endpoint((RESIDENT_PEER_PROTOCOL,)),
     ) == [Transport.CONTROL_RELAY]
 
 
 def test_an_origin_that_cannot_dial_content_keeps_the_relay() -> None:
     assert _ladder(
-        _origin(protocols=(PEER_PROTOCOL,)),
+        _origin(protocols=(RESIDENT_PEER_PROTOCOL,)),
         _holder(directly_routable=True),
         _endpoint(),
     ) == [Transport.CONTROL_RELAY]

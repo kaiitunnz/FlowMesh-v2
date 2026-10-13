@@ -31,8 +31,13 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
-from shared.content import ContentCarriagePlan, ContentHydrationGrant, ContentReference
-from shared.content.carriage import ContentPeerRoute, ContentRouteObservation
+from shared.content import (
+    ContentCarriagePlan,
+    ContentHydrationGrant,
+    ContentPeerRoute,
+    ContentReference,
+    ContentRouteObservation,
+)
 from shared.network.frame_stream import split_host_port
 from shared.schemas.command import MediatedOpMessage
 from shared.schemas.network import (
@@ -374,7 +379,7 @@ class ContentHydrationAuthority:
             update={
                 "routes": tuple(
                     ContentPeerRoute(
-                        transport=candidate.transport.value,
+                        transport=candidate.transport,
                         endpoint=candidate.hops[0].endpoint,
                     )
                     for candidate in route.resolved.candidates
