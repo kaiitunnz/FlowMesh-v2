@@ -13,6 +13,7 @@ import pytest
 from server.content.directory import ContentHolderRecord
 from server.registries.artifacts import final_set
 from server.registries.worker import Worker
+from server.task.runtime.content_bindings import UnreadableInput
 from shared.content import TREE_MEDIA_TYPE, ContentReference, TreeManifest, TreeMember
 from shared.tasks.artifact_binding import ArtifactBinding, ArtifactKind
 from tests.server.dispatch_helpers import record_dispatch
@@ -131,6 +132,19 @@ def test_a_busy_holder_leaves_the_task_to_normal_selection() -> None:
 
     assert dispatcher._preferred_holder("tsk-1", _pool("wkr-1")) is None
     assert dispatcher.requeued == []
+
+
+def test_an_upstream_that_cannot_be_read_leaves_no_preference() -> None:
+    holders = _Holders({_WEIGHTS.content_digest: [_holder("wkr-2")]})
+    dispatcher = _dispatcher(holders)
+
+    def unreadable(task_id: str) -> None:
+        raise UnreadableInput("the producer's result is gone")
+
+    dispatcher._runtime.scoped_inputs = unreadable
+
+    assert dispatcher._preferred_holder("tsk-1", _pool("wkr-2")) is None
+    assert holders.reads == []
 
 
 def test_without_a_holder_directory_nothing_is_read() -> None:

@@ -1288,7 +1288,15 @@ class Dispatcher:
         if self._content_holders is None or not pool:
             return None
         by_id = {worker.id: worker for worker in pool}
-        for reference in self._upstream_artifact_objects(task_id):
+        try:
+            objects = self._upstream_artifact_objects(task_id)
+        except Exception:
+            # A preference never fails a dispatch; normal selection places the task.
+            self._logger.debug(
+                "Upstream artifacts of %s unreadable", task_id, exc_info=True
+            )
+            return None
+        for reference in objects:
             try:
                 holders = self._content_holders.holders(
                     reference.authorization_scope, reference.content_digest
