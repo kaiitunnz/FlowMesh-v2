@@ -6,7 +6,13 @@ import tracemalloc
 from pathlib import Path
 
 from server.task.results import ResultReader
-from shared.content import ContentReference, SharedFilesystemObjectStore
+from shared.content import (
+    TREE_MEDIA_TYPE,
+    ContentReference,
+    SharedFilesystemObjectStore,
+    TreeManifest,
+    TreeMember,
+)
 from shared.tasks.result_binding import ResultBinding
 from shared.utils.ids import new_task_id
 
@@ -59,3 +65,22 @@ def test_a_cached_result_is_read_from_memory(tmp_path: Path) -> None:
             path.unlink()
 
     assert reader.read_bytes(binding) == first
+
+
+def test_a_trees_members_are_decoded_once(tmp_path: Path) -> None:
+    store = SharedFilesystemObjectStore(tmp_path / "cas")
+    reader = ResultReader(store, cache_max_bytes=_BUDGET)
+    member = store.write("org", b"weights")
+    manifest = TreeManifest.of(
+        [TreeMember("w.bin", member.content_digest, member.size_bytes)]
+    )
+    tree = store.write("org", manifest.encode(), media_type=TREE_MEDIA_TYPE)
+
+    first = reader.tree_members(tree)
+    reader._cache.clear()
+    for path in (tmp_path / "cas").rglob("*"):
+        if path.is_file():
+            path.unlink()
+
+    assert reader.tree_members(tree) is first
+    assert first == {member.identity}

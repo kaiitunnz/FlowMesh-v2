@@ -18,6 +18,7 @@ from shared.content import (
     ContentReference,
     ContentStoreError,
     ContentUnavailable,
+    DigestAlgorithm,
     FabricObjectStore,
     TreeManifest,
     TreeManifestError,
@@ -39,6 +40,10 @@ _CACHE_MAX_ENTRY_BYTES = 8 * 1024 * 1024
 # header and its slot, about 1.3 KiB measured. The budget counts it, so it bounds the
 # memory the cache holds.
 _CACHE_ENTRY_OVERHEAD_BYTES = 1536
+# The members the decoded-tree cache keeps across its trees.
+_TREE_MEMBERS_MAX = 1 << 20
+
+type ObjectIdentity = tuple[str, str, str]
 
 
 class ResultUnreadable(RuntimeError):
@@ -59,6 +64,10 @@ class ResultReader:
         self._cache_max_bytes = cache_max_bytes
         self._cache: OrderedDict[ContentReference, bytes] = OrderedDict()
         self._cached_bytes = 0
+        self._trees: OrderedDict[ObjectIdentity, frozenset[ObjectIdentity]] = (
+            OrderedDict()
+        )
+        self._tree_members = 0
         self._lock = threading.Lock()
 
     def read_bytes(self, binding: ResultBinding) -> bytes:
@@ -91,6 +100,32 @@ class ResultReader:
             raise ResultUnreadable(
                 f"the stored tree {reference.content_digest} is not a manifest: {exc}"
             ) from exc
+
+    def tree_members(self, reference: ContentReference) -> frozenset[ObjectIdentity]:
+        """The identities of a stored tree's member objects.
+
+        A tree is decoded once and kept for the most recently read trees, so a check
+        against its members is a set lookup.
+        """
+        key = reference.identity
+        with self._lock:
+            if (cached := self._trees.get(key)) is not None:
+                self._trees.move_to_end(key)
+                return cached
+        scope = reference.authorization_scope
+        members = frozenset(
+            (scope, DigestAlgorithm.SHA256.value, member.digest)
+            for member in self.read_manifest(reference).members
+        )
+        if len(members) <= _TREE_MEMBERS_MAX:
+            with self._lock:
+                if key not in self._trees:
+                    self._trees[key] = members
+                    self._tree_members += len(members)
+                    while self._tree_members > _TREE_MEMBERS_MAX:
+                        _, evicted = self._trees.popitem(last=False)
+                        self._tree_members -= len(evicted)
+        return members
 
     def open(self, reference: ContentReference) -> Iterator[bytes]:
         """An object's bytes in chunks, raising before the last one unless they
@@ -167,4 +202,4 @@ def _envelope(data: bytes, source: str) -> ResultEnvelope:
         raise ResultUnreadable(str(exc)) from exc
 
 
-__all__ = ["ResultReader", "ResultUnavailable", "ResultUnreadable"]
+__all__ = ["ObjectIdentity", "ResultReader", "ResultUnavailable", "ResultUnreadable"]

@@ -16,11 +16,15 @@ from server.registries.worker import Worker
 from server.task.runtime import TaskRuntime
 from shared.content import (
     OCTET_STREAM,
+    TREE_MEDIA_TYPE,
     ContentHydrationError,
     ContentReference,
     ContentUnavailable,
     FabricObjectStore,
+    TreeManifest,
+    TreeMember,
 )
+from shared.tasks.artifact_binding import ArtifactBinding, ArtifactKind
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.dispatcher.helpers import CapturingDispatcher
@@ -52,6 +56,7 @@ class _FlakyStore(FabricObjectStore):
     def __init__(self, store: FabricObjectStore) -> None:
         self._store = store
         self.error: Exception | None = None
+        self.only: str | None = None
 
     def write(
         self, scope: str, data: bytes, *, media_type: str = OCTET_STREAM
@@ -59,7 +64,7 @@ class _FlakyStore(FabricObjectStore):
         return self._store.write(scope, data, media_type=media_type)
 
     def fetch(self, reference: ContentReference) -> bytes:
-        if self.error is not None:
+        if self.error is not None and self.only in (None, reference.content_digest):
             raise self.error
         return self._store.fetch(reference)
 
@@ -75,7 +80,9 @@ def _worker() -> Worker:
     )
 
 
-def _dispatch_downstream(error: Exception) -> CapturingDispatcher:
+def _dispatch_downstream(
+    error: Exception, *, tree_only: bool = False
+) -> CapturingDispatcher:
     reader = make_result_reader()
     runtime = TaskRuntime(
         cast(Any, FakeRegistry()),
@@ -88,15 +95,23 @@ def _dispatch_downstream(error: Exception) -> CapturingDispatcher:
     _wf, results = asyncio.run(runtime.register("owner", "org", _DAG, format="native"))
     a, b = (r.task_id for r in results)
     record_dispatch(runtime, a, cast(Any, _worker()))
-    runtime.mark_succeeded(
-        a,
-        "wkr-1",
-        result_payload(reader, a, {"items": [{"output": "alpha"}]}, "org"),
-        "t",
+    member = reader._store.write("org", b"weights")
+    manifest = TreeManifest.of(
+        [TreeMember("w.bin", member.content_digest, member.size_bytes)]
     )
+    tree = reader._store.write("org", manifest.encode(), media_type=TREE_MEDIA_TYPE)
+    payload = result_payload(reader, a, {"items": [{"output": "alpha"}]}, "org")
+    payload["artifacts"] = [
+        ArtifactBinding(
+            name="final_model", kind=ArtifactKind.TREE, reference=tree, size_bytes=7
+        ).model_dump(mode="json")
+    ]
+    runtime.mark_succeeded(a, "wkr-1", payload, "t")
     flaky = _FlakyStore(reader._store)
     reader._store = flaky
     flaky.error = error
+    if tree_only:
+        flaky.only = tree.content_digest
     registry = mock.Mock()
     registry.idle_satisfying_pool.return_value = [_worker()]
     registry.satisfying_workers.return_value = [_worker()]
@@ -118,5 +133,20 @@ def test_an_unreachable_store_requeues_without_spending_an_attempt() -> None:
 
 def test_a_missing_or_corrupt_result_fails_the_task_at_once() -> None:
     dispatcher = _dispatch_downstream(ContentHydrationError("no such object"))
+    assert dispatcher.requeued == []
+    assert len(dispatcher.failed) == 1
+
+
+def test_an_unreachable_upstream_tree_holds_the_task() -> None:
+    dispatcher = _dispatch_downstream(ContentUnavailable("store down"), tree_only=True)
+    assert dispatcher.failed == []
+    ((_task, kwargs),) = dispatcher.requeued
+    assert kwargs == {"reason": "artifact_input_unavailable", "count_retry": False}
+
+
+def test_a_missing_upstream_tree_fails_the_task() -> None:
+    dispatcher = _dispatch_downstream(
+        ContentHydrationError("no such object"), tree_only=True
+    )
     assert dispatcher.requeued == []
     assert len(dispatcher.failed) == 1

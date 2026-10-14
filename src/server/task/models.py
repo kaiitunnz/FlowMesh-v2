@@ -335,6 +335,12 @@ class TaskRecord(BaseModel):
         description="Published artifacts the task's current dispatch names as inputs.",
         exclude=True,
     )
+    dispatched_objects: tuple[frozenset[tuple[str, str, str]], ...] = Field(
+        default=(),
+        description="The identities of every object the dispatched artifacts name or "
+        "hold as tree members.",
+        exclude=True,
+    )
     unwritten_artifacts: list[ArtifactBinding] = Field(
         default_factory=list,
         description="Accepted artifacts the task's next record write adds to its "

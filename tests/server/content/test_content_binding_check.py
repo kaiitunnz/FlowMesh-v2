@@ -79,11 +79,19 @@ class _Manifests:
         self._manifests = manifests
         self.reads = 0
 
-    def read_manifest(self, reference: ContentReference) -> TreeManifest:
+    def tree_members(self, reference: ContentReference) -> frozenset[Any]:
         self.reads += 1
         if (manifest := self._manifests.get(reference.content_digest)) is None:
             raise ResultUnavailable("gone")
-        return manifest
+        return frozenset(
+            member.reference(reference.authorization_scope).identity
+            for member in manifest.members
+        )
+
+
+class _NoStore:
+    def __getattr__(self, name: str) -> Any:
+        raise AssertionError(f"the binding check read the store: {name}")
 
 
 def _record(task_id: str, status: str, **fields: Any) -> Any:
@@ -96,7 +104,8 @@ def _record(task_id: str, status: str, **fields: Any) -> Any:
         org_id="local",
         merged_children=fields.pop("merged_children", None),
         result_skip=None,
-        dispatched_artifacts=fields.pop("artifacts", ()),
+        dispatched_artifacts=(),
+        dispatched_objects=(),
         **fields,
     )
 
@@ -127,7 +136,6 @@ def _runtime(
             status,
             assigned=assigned,
             merged_children=merged_children,
-            artifacts=artifacts,
         )
     }
     settled: dict[str, ContentReference] = {}
@@ -159,6 +167,11 @@ def _runtime(
     runtime._fence = DispatchFence(
         unused, unused, unused, unused, unused, runtime._tasks, runtime._engines
     )
+    if artifacts and manifests is not None:
+        runtime.note_artifact_inputs(
+            "tsk-1", artifacts, runtime.artifact_input_objects(artifacts)
+        )
+    runtime._results = cast(Any, _NoStore())
     return runtime
 
 
@@ -387,10 +400,35 @@ def test_an_artifact_its_dispatch_names_and_its_trees_members_may_be_read() -> N
     assert not runtime.content_binding_authorizes("tsk-1", "wkr-9", _MEMBER)
 
 
-def test_a_member_of_a_tree_whose_manifest_cannot_be_read_is_refused() -> None:
-    runtime = _runtime(assigned="wkr-2", artifacts=(_TREE,))
-    assert runtime.content_binding_authorizes("tsk-1", "wkr-2", _TREE.reference)
-    assert not runtime.content_binding_authorizes("tsk-1", "wkr-2", _MEMBER)
+def test_a_tree_whose_manifest_cannot_be_read_names_no_objects_yet() -> None:
+    runtime = _runtime(assigned="wkr-2")
+    runtime._results = cast(Any, _Manifests({}))
+    with pytest.raises(ResultUnavailable):
+        runtime.artifact_input_objects((_TREE,))
+
+
+def test_a_large_trees_members_are_checked_without_reading_the_store() -> None:
+    members = [reference_for("local", f"m{index}".encode()) for index in range(10_000)]
+    manifest = TreeManifest.of(
+        TreeMember(f"f{index}", member.content_digest, member.size_bytes)
+        for index, member in enumerate(members)
+    )
+    tree = ArtifactBinding(
+        name="big",
+        kind=ArtifactKind.TREE,
+        reference=reference_for("local", manifest.encode(), media_type=TREE_MEDIA_TYPE),
+        size_bytes=sum(member.size_bytes for member in members),
+    )
+    runtime = _runtime(
+        assigned="wkr-2",
+        artifacts=(tree,),
+        manifests={tree.reference.content_digest: manifest},
+    )
+    assert all(
+        runtime.content_binding_authorizes("tsk-1", "wkr-2", member)
+        for member in members
+    )
+    assert not runtime.content_binding_authorizes("tsk-1", "wkr-2", _UNRELATED)
 
 
 def test_a_settled_task_reads_none_of_its_artifact_inputs() -> None:

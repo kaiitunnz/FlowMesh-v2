@@ -556,7 +556,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   a token its worker replaces with the local path it hydrates the artifact to, a ref the
   data a spec projects reads is hydrated from the producer's final publications its
   dispatch carries, and a model archive loads as the tree it archives. Those
-  publications are the task's inputs, so its worker may read them from a peer. An
+  publications are the task's inputs, so its worker may read them from a peer, and a
+  task waits out a store control cannot read an input tree's manifest from. An
   agent's input names an artifact by its download path,
   `/api/v1/results/{task}/files/{path}`, which identifies it by task and path; the
   agent's sandbox has no route to fetch it.

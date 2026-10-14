@@ -58,7 +58,7 @@ from ..task.models import (
     TaskRecord,
     TaskStatus,
 )
-from ..task.results import ResultUnavailable
+from ..task.results import ResultUnavailable, ResultUnreadable
 from ..task.runtime import ScopedInput, TaskRuntime
 from ..task.v2.representations.plan import InferenceEmbodimentMenu
 from ..utils.time import now_iso
@@ -785,6 +785,36 @@ class Dispatcher:
             ]
         )
 
+        dispatched_artifacts = [
+            *artifact_inputs.bindings.values(),
+            *(
+                binding
+                for published in upstream_artifacts.values()
+                for binding in published
+            ),
+        ]
+        try:
+            artifact_objects = self._runtime.artifact_input_objects(
+                dispatched_artifacts
+            )
+        except ResultUnavailable as exc:
+            # Its worker may read a tree's members from a peer only once control knows
+            # them, so the task waits out the store like any input it consumes.
+            self._logger.warning(
+                "Task %s cannot reach an upstream artifact's manifest yet: %s",
+                task_id,
+                exc,
+            )
+            self._runtime.release_merge(task_id)
+            self.requeue_task(
+                task_id, reason="artifact_input_unavailable", count_retry=False
+            )
+            return False
+        except ResultUnreadable as exc:
+            self._runtime.release_merge(task_id)
+            self.fail_task(task_id, str(exc), payload={"error": str(exc)})
+            return True
+
         # 7. Build WorkerTaskMessage
         agent_episode = self._runtime.agent_episode_dispatch(
             task_id, OwnerFence(worker_id=worker.id, incarnation=worker.incarnation)
@@ -825,15 +855,7 @@ class Dispatcher:
 
         # 8. Give the task what it reads and writes its content under, then publish it
         self._runtime.note_artifact_inputs(
-            task_id,
-            [
-                *artifact_inputs.bindings.values(),
-                *(
-                    binding
-                    for published in upstream_artifacts.values()
-                    for binding in published
-                ),
-            ],
+            task_id, dispatched_artifacts, artifact_objects
         )
         match self._runtime.begin_publish(
             task_id, worker, dispatch_id, input_preparation=preparing

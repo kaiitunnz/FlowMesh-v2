@@ -156,7 +156,11 @@ from ..outputs import (
 )
 from ..parser import ParsedWorkflow, parse_workflow
 from ..redrive import StoreRedriveScheduler, manual_redrive
-from ..results import ResultReader, ResultUnavailable, ResultUnreadable
+from ..results import (
+    ObjectIdentity,
+    ResultReader,
+    ResultUnreadable,
+)
 from ..v2 import (
     ExecutionMode,
     FrontendWorkflowSource,
@@ -3575,41 +3579,40 @@ class TaskRuntime:
                 return False
             if self._content_bindings.consumes_locked(record, reference):
                 return True
-            artifacts = record.dispatched_artifacts
-        return self._artifact_input_holds(artifacts, reference)
+            identity = reference.identity
+            return any(identity in objects for objects in record.dispatched_objects)
 
-    def _artifact_input_holds(
-        self, artifacts: Sequence[ArtifactBinding], reference: ContentReference
-    ) -> bool:
-        """Whether one of a dispatch's artifact inputs is, or holds as a member, this
-        object; a tree's members are read from its stored manifest."""
-        identity = reference.identity
-        trees: list[ContentReference] = []
-        for binding in artifacts:
-            if binding.reference.identity == identity:
-                return True
-            if binding.kind is ArtifactKind.TREE:
-                trees.append(binding.reference)
-        for tree in trees:
-            try:
-                manifest = self._results.read_manifest(tree)
-            except (ResultUnavailable, ResultUnreadable):
-                continue
-            if any(
-                member.reference(tree.authorization_scope).identity == identity
-                for member in manifest.members
-            ):
-                return True
-        return False
+    def artifact_input_objects(
+        self, artifacts: Sequence[ArtifactBinding]
+    ) -> tuple[frozenset[ObjectIdentity], ...]:
+        """Every object a dispatch's artifact inputs name, a tree's members included.
+
+        Raises ``ResultUnavailable`` while a tree's manifest cannot be read from the
+        store and ``ResultUnreadable`` for one that is missing or corrupt.
+        """
+        named = frozenset(binding.reference.identity for binding in artifacts)
+        trees = {
+            binding.reference.identity: binding.reference
+            for binding in artifacts
+            if binding.kind is ArtifactKind.TREE
+        }
+        return (
+            named,
+            *(self._results.tree_members(tree) for tree in trees.values()),
+        )
 
     def note_artifact_inputs(
-        self, task_id: str, artifacts: Sequence[ArtifactBinding]
+        self,
+        task_id: str,
+        artifacts: Sequence[ArtifactBinding],
+        objects: tuple[frozenset[ObjectIdentity], ...],
     ) -> None:
-        """Record the published artifacts the dispatch being published names, which
-        its worker may then read from a peer."""
+        """Record the published artifacts the dispatch being published names, and the
+        objects they hold, which its worker may then read from a peer."""
         with self._lock:
             if (record := self._tasks.get(task_id)) is not None:
                 record.dispatched_artifacts = tuple(artifacts)
+                record.dispatched_objects = objects
 
     def upstream_task_ids(self, task_id: str) -> set[str]:
         """Every task of its workflow a task depends on, directly or transitively."""
