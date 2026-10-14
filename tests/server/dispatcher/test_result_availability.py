@@ -8,6 +8,7 @@ once rather than retrying toward a result that will never read.
 
 import asyncio
 import logging
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest import mock
 
@@ -15,6 +16,7 @@ import pytest
 
 from server.config import OrchestrationConfig
 from server.registries.worker import Worker
+from server.task.results import ResultUnavailable
 from server.task.runtime import TaskRuntime
 from shared.content import (
     OCTET_STREAM,
@@ -178,3 +180,34 @@ def test_a_tree_only_an_upstream_value_reaches_never_holds_or_fails_the_task(
     assert dispatcher.requeued == []
     assert dispatcher.failed == []
     cast(Any, dispatcher._worker_registry).publish_task.assert_called_once()
+
+
+def test_an_unreachable_store_ends_the_reading_of_lent_trees() -> None:
+    reads: list[str] = []
+
+    class _Down:
+        def tree_members(self, reference: ContentReference) -> Any:
+            reads.append(reference.content_digest)
+            raise ResultUnavailable("store down")
+
+    lent = [
+        ArtifactBinding(
+            name="final_model",
+            kind=ArtifactKind.TREE,
+            reference=ContentReference(
+                authorization_scope="org",
+                content_digest=f"{n:064x}",
+                size_bytes=1,
+            ),
+            size_bytes=1,
+        )
+        for n in range(3)
+    ]
+    runtime = cast(
+        Any, SimpleNamespace(_results=_Down(), _logger=logging.getLogger("t"))
+    )
+
+    (objects,) = TaskRuntime.artifact_input_objects(runtime, [], lent)
+
+    assert objects == {binding.reference.identity for binding in lent}
+    assert len(reads) == 1

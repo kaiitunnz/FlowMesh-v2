@@ -3698,7 +3698,8 @@ class TaskRuntime:
         raises ``ResultUnavailable`` while its manifest cannot be read from the store
         and ``ResultUnreadable`` for one that is missing or corrupt. A ``lent`` tree is
         one an upstream value reaches, which lends its members only when its manifest
-        reads now, and otherwise only its own object.
+        reads now, and otherwise only its own object; once the store cannot be
+        reached, no further lent manifest is read.
         """
         objects = frozenset(binding.reference.identity for binding in (*named, *lent))
         required = _trees(named)
@@ -3708,10 +3709,13 @@ class TaskRuntime:
                 continue
             try:
                 members.append(self._results.tree_members(tree))
-            except (ResultUnavailable, ResultUnreadable) as exc:
+            except ResultUnreadable as exc:
                 self._logger.debug(
                     "Lending only tree %s itself: %s", tree.content_digest, exc
                 )
+            except ResultUnavailable as exc:
+                self._logger.debug("Lending the lent trees themselves only: %s", exc)
+                break
         return (objects, *members)
 
     def note_artifact_inputs(
