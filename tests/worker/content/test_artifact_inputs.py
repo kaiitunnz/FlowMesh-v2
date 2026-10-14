@@ -22,6 +22,7 @@ from shared.tasks import TaskType
 from shared.tasks.artifact_binding import (
     ArchiveFacts,
     ArtifactBinding,
+    ArtifactInputs,
     ArtifactKind,
     substitute_artifact_tokens,
 )
@@ -166,13 +167,15 @@ def test_text_that_only_looks_like_a_token_is_left_alone(tmp_path: Path) -> None
 
 
 @pytest.mark.parametrize("after", ["5", "_v2", ".1", "/x"])
-def test_text_written_right_after_a_token_follows_its_path(after: str) -> None:
-    scope = "dsp-0123456789abcdef"
-    paths = {f"{scope}.0": "/r/t/.artifact-inputs/abc"}
+def test_text_written_right_after_a_token_follows_its_path(
+    tmp_path: Path, after: str
+) -> None:
+    store = SharedFilesystemObjectStore(tmp_path / "shared")
+    inputs = ArtifactInputs("dsp-0123456789abcdef")
+    token = inputs.token(_publish_file(store))
+    paths = {key: "/r/t/.artifact-inputs/abc" for key in inputs.bindings}
 
-    rendered = substitute_artifact_tokens(
-        f"run_flowmesh-artifact:[{scope}.0]{after}", paths, scope
-    )
+    rendered = substitute_artifact_tokens(f"run_{token}{after}", paths, inputs.scope)
 
     assert rendered == f"run_/r/t/.artifact-inputs/abc{after}"
 
