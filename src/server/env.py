@@ -5,6 +5,7 @@ from pathlib import Path
 
 from pydantic import SecretStr
 
+from shared.content import content_hydration_enabled
 from shared.content.config import (
     DEFAULT_PART_BYTES,
     DEFAULT_RELAY_TRANSFER_MAX_BYTES,
@@ -15,7 +16,6 @@ from shared.network.peer_dial import connect_budget
 from shared.schemas.worker import SSHBackendName
 from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
 from shared.utils import (
-    content_hydration_enabled,
     parse_bool_env,
     parse_float_env,
     parse_int_env,

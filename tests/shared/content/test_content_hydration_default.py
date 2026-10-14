@@ -2,7 +2,7 @@
 
 import pytest
 
-from shared.utils import content_hydration_enabled
+from shared.content import content_hydration_enabled
 
 
 @pytest.mark.parametrize(

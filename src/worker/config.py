@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from shared.content import content_hydration_enabled
 from shared.content.config import (
     DEFAULT_RELAY_TRANSFER_MAX_BYTES,
     DEFAULT_TRANSFER_WINDOW_BYTES,
@@ -24,7 +25,6 @@ from shared.schemas.worker import SSHBackendName, SSHLimits
 from shared.telemetry.config import TelemetryConfig
 from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
 from shared.utils.parsing import (
-    content_hydration_enabled,
     parse_bool_env,
     parse_float_env,
     parse_int_env,

@@ -2,14 +2,16 @@
 
 Both the workers that read and write content and the control plane that cuts their
 access describe the same external store, so they describe it the same way; each process
-builds this at its own configuration edge.
+builds this at its own configuration edge, as it does whether workers cache and hydrate
+content.
 """
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from shared.utils.parsing import parse_bool_env, parse_int_env
+from shared.utils.parsing import parse_bool_env, parse_int_env, to_bool
 
 BACKEND_S3 = "s3"
 BACKEND_FILESYSTEM = "filesystem"
@@ -103,4 +105,27 @@ class ObjectStoreConfig:
         )
 
 
-__all__ = ["BACKEND_FILESYSTEM", "BACKEND_S3", "ObjectStoreConfig"]
+def content_hydration_enabled(environ: Mapping[str, str] | None = None) -> bool:
+    """Return whether workers keep the content cache and hydrate content between them:
+    as ``CONTENT_HYDRATION_ENABLED`` says, and when it is unset, whenever the network
+    plane that carries the transfers is on.
+
+    Raises ``ValueError`` when it is turned on with the network plane off.
+    """
+    env = os.environ if environ is None else environ
+    plane = to_bool(env.get("NETWORK_PLANE_ENABLED"), default=True)
+    explicit = to_bool(env.get("CONTENT_HYDRATION_ENABLED"))
+    if explicit and not plane:
+        raise ValueError(
+            "CONTENT_HYDRATION_ENABLED requires NETWORK_PLANE_ENABLED: a content "
+            "transfer is carried by the network plane's relay"
+        )
+    return plane if explicit is None else explicit
+
+
+__all__ = [
+    "BACKEND_FILESYSTEM",
+    "BACKEND_S3",
+    "ObjectStoreConfig",
+    "content_hydration_enabled",
+]

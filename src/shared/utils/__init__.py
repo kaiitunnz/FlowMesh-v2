@@ -25,7 +25,6 @@ from .json import (
     validate_keys,
 )
 from .parsing import (
-    content_hydration_enabled,
     parse_bool_env,
     parse_float_env,
     parse_int_env,
@@ -35,7 +34,6 @@ from .parsing import (
 from .time import now_iso
 
 __all__ = [
-    "content_hydration_enabled",
     "dedup_json",
     "lookup_deduped_json",
     "new_activation_id",
