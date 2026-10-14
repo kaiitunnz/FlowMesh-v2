@@ -43,6 +43,10 @@ class PathRefused(OSError):
     a directory belongs, a special file, or a segment that leaves its directory."""
 
 
+class TreeTooDeep(PathRefused):
+    """A strict walk reached a directory deeper than it opens."""
+
+
 def is_plain_segment(name: str) -> bool:
     """Whether ``name`` names an entry of its directory: not empty, ``.`` or ``..``,
     and holding no separator or NUL."""
@@ -151,7 +155,9 @@ def remove_below(base_dir: Path) -> None:
         return
 
 
-def walk(top_fd: int) -> Iterator[tuple[str, list[str], list[str], int]]:
+def walk(
+    top_fd: int, strict: bool = False
+) -> Iterator[tuple[str, list[str], list[str], int]]:
     """Walk the tree under the directory ``top_fd`` top-down, never opening a link.
 
     Yields ``(relative directory, subdirectories, other entries, descriptor)`` per
@@ -159,8 +165,9 @@ def walk(top_fd: int) -> Iterator[tuple[str, list[str], list[str], int]]:
     subdirectory is opened without following a link, and one removed or replaced by
     anything but a directory during the walk is skipped. Links and special files are
     other entries. Directories deeper than ``_MAX_WALK_DEPTH`` below the top are
-    listed by their parent but not walked, with one warning per walk, which bounds
-    the descriptors and memory a walk holds.
+    listed by their parent but not walked, which bounds the descriptors and memory a
+    walk holds: a strict walk raises ``TreeTooDeep`` at the first, and any other
+    warns once.
     """
     dirs, others = _list_dir(top_fd)
     yield "", dirs, others, top_fd
@@ -177,6 +184,12 @@ def walk(top_fd: int) -> Iterator[tuple[str, list[str], list[str], int]]:
                 continue
             rel_child = join_relative(rel_dir, name)
             if len(stack) > _MAX_WALK_DEPTH:
+                if strict:
+                    raise TreeTooDeep(
+                        errno.ELOOP,
+                        f"deeper than {_MAX_WALK_DEPTH} directories",
+                        rel_child,
+                    )
                 if not warned:
                     _LOGGER.warning(
                         "Not walking %s: deeper than %d directories",
@@ -294,7 +307,8 @@ def regular_files(top: Path) -> Iterator[tuple[str, BinaryIO | OSError]]:
 
     ``top``'s parent is trusted, as in ``open_dir``. Nothing is yielded when ``top``
     is missing or a link; links, special files, in-flight atomic writes, and names
-    removed during the walk are skipped.
+    removed during the walk are skipped. A directory deeper than a walk opens ends
+    the files with a ``TreeTooDeep`` error.
     """
     try:
         with open_dir(top) as top_fd:
@@ -316,16 +330,19 @@ def regular_files_at(
 
 
 def _regular_files(top_fd: int) -> Iterator[tuple[str, BinaryIO | OSError]]:
-    for rel_dir, dirs, others, dir_fd in walk(top_fd):
-        dirs[:] = [name for name in dirs if not is_atomic_temp(name)]
-        for name in others:
-            if is_atomic_temp(name):
-                continue
-            rel_name = join_relative(rel_dir, name)
-            try:
-                opened = open_regular(dir_fd, name)
-            except OSError as exc:
-                yield rel_name, exc
-                continue
-            if opened is not None:
-                yield rel_name, opened
+    try:
+        for rel_dir, dirs, others, dir_fd in walk(top_fd, strict=True):
+            dirs[:] = [name for name in dirs if not is_atomic_temp(name)]
+            for name in others:
+                if is_atomic_temp(name):
+                    continue
+                rel_name = join_relative(rel_dir, name)
+                try:
+                    opened = open_regular(dir_fd, name)
+                except OSError as exc:
+                    yield rel_name, exc
+                    continue
+                if opened is not None:
+                    yield rel_name, opened
+    except TreeTooDeep as exc:
+        yield str(exc.filename), exc

@@ -167,8 +167,11 @@ def resolve_artifact_path(
     """The binding a path at a revision falls under, with the path inside it.
 
     The binding is the one whose name is ``path`` itself or its longest leading
-    directory; the remainder is empty for the binding's own name.
+    directory; the remainder is empty for the binding's own name. A path that is not
+    a relative path of plain segments falls under none.
     """
+    if not is_member_path(path):
+        return None
     parts = path.split("/")
     for cut in range(len(parts), 0, -1):
         name = "/".join(parts[:cut])

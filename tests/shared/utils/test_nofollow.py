@@ -183,16 +183,30 @@ def test_a_walk_stops_below_its_depth_bound_with_one_warning(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     depth = nofollow._MAX_WALK_DEPTH
+    _chain(tmp_path / "top", depth + 5, {})
+
+    with open_dir(tmp_path / "top") as top_fd:
+        levels = sum(1 for _ in walk(top_fd))
+
+    assert levels == depth + 1
+    assert caplog.text.count("deeper than") == 1
+
+
+def test_the_files_of_a_tree_too_deep_end_refused(tmp_path: Path) -> None:
+    depth = nofollow._MAX_WALK_DEPTH
     _chain(tmp_path / "top", depth + 5, {depth: b"at", depth + 1: b"past"})
 
-    found = []
+    found: list[tuple[int, bytes]] = []
+    errors: list[OSError] = []
     for name, opened in regular_files(tmp_path / "top"):
-        assert not isinstance(opened, OSError)
+        if isinstance(opened, OSError):
+            errors.append(opened)
+            continue
         with opened:
             found.append((name.count("/"), opened.read()))
 
     assert found == [(depth, b"at")]
-    assert caplog.text.count("deeper than") == 1
+    assert len(errors) == 1 and isinstance(errors[0], nofollow.TreeTooDeep)
 
 
 def test_a_walk_of_a_very_deep_tree_holds_bounded_memory(tmp_path: Path) -> None:

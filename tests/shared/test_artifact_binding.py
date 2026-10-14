@@ -73,6 +73,14 @@ def test_a_path_resolves_to_the_longest_bound_name() -> None:
     assert resolve_artifact_path(bindings, "step-7", "checkpoints/c") is None
 
 
+@pytest.mark.parametrize(
+    "path", ["checkpoints/../x", "checkpoints/./x", "checkpoints//x", "/checkpoints"]
+)
+def test_a_path_that_is_not_plain_resolves_to_nothing(path: str) -> None:
+    outer = _binding("checkpoints")
+    assert resolve_artifact_path({outer.key: outer}, "final", path) is None
+
+
 def test_identical_publications_match_and_stamps_do_not_count() -> None:
     first = _binding("a").accepted("dsp-1", "2026-10-14T00:00:00Z")
 
