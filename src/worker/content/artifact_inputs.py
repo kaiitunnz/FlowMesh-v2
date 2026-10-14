@@ -3,11 +3,11 @@
 A dispatch names each artifact its task loads by a token in the spec, or carries the
 publications of the producers whose artifact refs the spec's data reads; the worker
 hydrates every such artifact under the task's output and puts its local path in the
-spec before anything reads it. A tree lands as a directory of its
-files, each verified against the digest its manifest names, under a name keyed by the
-tree's own digest, so two tokens naming one tree share it. The directory appears only
-once whole, and it goes when the task ends: where the worker keeps a cache, each file is
-a link to the cached copy, so what stays on disk is the cache's, under its bounds.
+spec before anything reads it. A tree lands as a directory of its files, each verified
+against its manifest's digest, under a name keyed by the tree's own digest, so two
+tokens naming one tree share it. The directory appears only once whole and goes when
+the task ends: where the worker keeps a cache, each file links to the cached copy, so
+what stays on disk is the cache's, under its bounds.
 """
 
 import os
@@ -51,12 +51,13 @@ class ArtifactInputUnavailable(RuntimeError):
 
 
 def artifact_inputs_dir(out_dir: Path) -> Path:
-    """Where a task's artifact inputs land, beside its own output."""
+    """Return where a task's artifact inputs land, beside its own output."""
     return out_dir / ARTIFACT_INPUTS_DIR
 
 
 def ssh_inputs_dir(out_dir: Path) -> Path:
-    """Where an SSH task's upstream artifacts are staged, beside its own output."""
+    """Return where an SSH task's upstream artifacts are staged, beside its own
+    output."""
     return out_dir / SSH_INPUTS_DIR
 
 
@@ -124,7 +125,7 @@ class ArtifactMaterializer:
         return self._root / rel
 
     def _members(self, binding: ArtifactBinding) -> list[tuple[ContentReference, str]]:
-        """Each member of the tree ``binding`` names, by reference and path."""
+        """Return each member of the tree ``binding`` names, by reference and path."""
         try:
             manifest = TreeManifest.decode(self._manifest_bytes(binding.reference))
         except TreeManifestError as exc:

@@ -32,7 +32,7 @@ EXCLUDED_EXPORT_PATHS: tuple[str, ...] = (
 
 
 def excluded_export_path(path: str) -> str | None:
-    """The excluded path ``path`` is or lies under, or None."""
+    """Return the excluded path ``path`` is or lies under, or None."""
     for excluded in EXCLUDED_EXPORT_PATHS:
         if path == excluded or path.startswith(f"{excluded}/"):
             return excluded
@@ -45,7 +45,7 @@ RESERVED_EXPORT_NAMES: tuple[str, ...] = (CHECKPOINTS_ARTIFACT, RESULTS_NAME)
 
 
 def reserved_export_name(name: str) -> str | None:
-    """The reserved name ``name`` is or lies under, or None."""
+    """Return the reserved name ``name`` is or lies under, or None."""
     top = name.split("/", 1)[0]
     return top if top in RESERVED_EXPORT_NAMES else None
 

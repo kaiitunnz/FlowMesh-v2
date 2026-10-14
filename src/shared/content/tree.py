@@ -26,7 +26,7 @@ class TreeManifestError(ValueError):
 
 
 def is_member_path(path: str) -> bool:
-    """Whether ``path`` is a relative path of plain segments."""
+    """Return whether ``path`` is a relative path of plain segments."""
     return bool(path) and all(is_plain_segment(part) for part in path.split("/"))
 
 
@@ -39,7 +39,7 @@ class TreeMember:
     size_bytes: int
 
     def reference(self, scope: str) -> ContentReference:
-        """The member's object in the tree's scope."""
+        """Return the member's object in the tree's scope."""
         return ContentReference(
             authorization_scope=scope,
             digest_algorithm=DigestAlgorithm.SHA256,
@@ -57,7 +57,8 @@ class TreeManifest:
 
     @classmethod
     def of(cls, members: Iterable[TreeMember]) -> Self:
-        """The canonical manifest of ``members``, refusing a bad or repeated path."""
+        """Build the canonical manifest of ``members``, refusing a bad or repeated
+        path."""
         ordered = tuple(sorted(members, key=lambda member: member.path))
         for index, member in enumerate(ordered):
             _check_member(member)
@@ -70,11 +71,11 @@ class TreeManifest:
         return sum(member.size_bytes for member in self.members)
 
     def largest(self) -> TreeMember | None:
-        """The member holding the most bytes, or None for an empty tree."""
+        """Return the member holding the most bytes, or None for an empty tree."""
         return max(self.members, key=lambda member: member.size_bytes, default=None)
 
     def member(self, path: str) -> TreeMember | None:
-        """The member at ``path``, or None."""
+        """Return the member at ``path``, or None."""
         low, high = 0, len(self.members)
         while low < high:
             mid = (low + high) // 2
@@ -87,7 +88,8 @@ class TreeManifest:
         return None
 
     def under(self, prefix: str) -> Iterator[TreeMember]:
-        """The members at or below directory ``prefix``; every member for ``""``."""
+        """Yield the members at or below directory ``prefix``; every member for
+        ``""``."""
         if not prefix:
             yield from self.members
             return

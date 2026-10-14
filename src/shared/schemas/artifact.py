@@ -24,13 +24,13 @@ class ArtifactContext(BaseModel):
     )
 
     def revision_of(self, path: str) -> str | None:
-        """The revision a ref to ``path`` names, or None for the final set."""
+        """Return the revision a ref to ``path`` names, or None for the final set."""
         if path.split("/", 1)[0] == CHECKPOINTS_ARTIFACT:
             return self.checkpoints
         return None
 
 
 def artifact_download_path(task_id: str, path: str, revision: str | None = None) -> str:
-    """The server route a task's published artifact downloads from."""
+    """Return the server route a task's published artifact downloads from."""
     route = f"/api/v1/results/{task_id}/files/{path}"
     return route if revision is None else f"{route}?revision={revision}"

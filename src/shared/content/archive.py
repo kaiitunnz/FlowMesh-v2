@@ -70,8 +70,8 @@ def _padding(size: int) -> int:
 
 
 def member_headers(path: str, size: int) -> bytes:
-    """The header blocks a member's data follows: a pax header where the path is too
-    long or the size too large for ustar, then the ustar header."""
+    """Return the header blocks a member's data follows: a pax header where the path
+    is too long or the size too large for ustar, then the ustar header."""
     name = path.encode()
     records = b""
     if len(name) > _USTAR_NAME_BYTES:
@@ -153,8 +153,8 @@ class TreeArchive:
         return struct.pack("<BHH", final, length, length ^ 0xFFFF)
 
     def _tar_position(self, position: int) -> int:
-        """The tar offset of the first tar byte at or after archive ``position``,
-        for a position within the deflate body."""
+        """Return the tar offset of the first tar byte at or after archive
+        ``position``, for a position within the deflate body."""
         block, within = divmod(position - len(_GZIP_HEADER), _STRIDE)
         return min(
             self.tar_size,
@@ -169,7 +169,8 @@ class TreeArchive:
         start: int = 0,
         end: int | None = None,
     ) -> Iterator[bytes]:
-        """The archive's bytes ``[start, end)``, its members read through ``read``.
+        """Yield the archive's bytes ``[start, end)``, its members read through
+        ``read``.
 
         ``crc32`` is the tar stream's CRC-32, which the trailer carries.
         """
@@ -205,7 +206,7 @@ class TreeArchive:
             yield trailer[max(0, start - body_end) : end - body_end]
 
     def tar_chunks(self, read: MemberReader) -> Iterator[bytes]:
-        """The whole tar stream the archive frames."""
+        """Yield the whole tar stream the archive frames."""
         return self._tar(0, self.tar_size, read)
 
 

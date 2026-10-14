@@ -364,9 +364,9 @@ class ContentBindings:
     ) -> list[ArtifactBinding]:
         """Accept a task's reported publications; returns those newly accepted.
 
-        The first publication of a revision and name stands: the same bytes again
-        change nothing, and different bytes are refused rather than replacing it. An
-        archive is accepted only over a tree of the same revision already accepted.
+        The first publication of a revision and name is kept: the same bytes again
+        change nothing, and different bytes are refused. An archive is accepted only
+        over a tree of the same revision already accepted.
         """
         published_at = ts_to_iso(time.time())
         accepted: list[ArtifactBinding] = []

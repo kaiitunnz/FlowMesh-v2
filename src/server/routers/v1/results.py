@@ -447,15 +447,15 @@ def _file_response(opened: BinaryIO, name: str) -> _OpenFileResponse:
 
 
 def _names_several_ranges(value: bytes) -> bool:
-    """Whether a ``Range`` header names more than one range. Every non-empty part
-    counts, including one ``FileResponse`` would ignore, so such a request is answered
-    whole rather than as a single range."""
+    """Return whether a ``Range`` header names more than one range. Every non-empty
+    part counts, including one ``FileResponse`` would ignore, so such a request is
+    answered whole."""
     _, _, ranges = value.decode("latin-1").partition("=")
     return len(_range_parts(ranges)) > 1
 
 
 def _range_parts(ranges: str) -> list[str]:
-    """The non-empty ranges of a ``Range`` header's value after its unit."""
+    """Return the non-empty ranges of a ``Range`` header's value after its unit."""
     parts = (part.strip() for part in ranges.split(","))
     return [part for part in parts if part not in {"", "-"}]
 
@@ -569,7 +569,7 @@ class _StreamSlots:
     """A fixed number of bundles the root streams at once.
 
     Each holds a thread and a compressor, so a request past the cap is refused with
-    ``503`` and a ``Retry-After`` rather than queued behind them.
+    ``503`` and a ``Retry-After``.
     """
 
     def __init__(self, capacity: int) -> None:
@@ -578,7 +578,8 @@ class _StreamSlots:
         self._lock = threading.Lock()
 
     def take(self) -> Callable[[], None]:
-        """A slot's release, or a ``503`` when every slot is held."""
+        """Take a slot and return its release, or raise a ``503`` when every slot is
+        held."""
         with self._lock:
             if self._held >= self._capacity:
                 raise HTTPException(
@@ -751,7 +752,7 @@ class ArtifactResponse(Response):
 
 
 def _gather(chunks: Iterator[bytes]) -> tuple[bytes, bool]:
-    """About ``_SEND_BYTES`` of ``chunks``, and whether they are done.
+    """Gather about ``_SEND_BYTES`` of ``chunks``, returned with whether they are done.
 
     The first gather reaches past an archive view's leading headers into its first
     stored member, so an unreachable store answers before the response starts.
@@ -782,8 +783,8 @@ class _UnsatisfiableRange(ValueError):
 
 
 def _single_range(header: str, size: int) -> tuple[int, int] | None:
-    """The one byte range ``[start, end)`` a ``Range`` header names, or None when it
-    names several, which is answered whole."""
+    """Return the one byte range ``[start, end)`` a ``Range`` header names, or None
+    when it names several, which is answered whole."""
     units, sep, ranges = header.partition("=")
     if units.strip().lower() != "bytes" or not sep:
         raise _MalformedRange("Only support bytes range")
@@ -809,8 +810,9 @@ def _single_range(header: str, size: int) -> tuple[int, int] | None:
 
 
 def _disk_files(base_dir: Path, section: str, top: str) -> Iterator[BundleFile]:
-    """The regular files under a section of a task's results directory, read without
-    following a link; a link, an in-flight write and a special file are left out."""
+    """List the regular files under a section of a task's results directory, read
+    without following a link; a link, an in-flight write and a special file are left
+    out."""
     try:
         with open_dir(base_dir, section) as top_fd:
             for rel_dir, dirs, others, dirfd in walk(top_fd):

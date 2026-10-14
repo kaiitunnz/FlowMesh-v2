@@ -72,8 +72,8 @@ class WorkerTaskMessage(BaseModel):
     upstream_artifacts: dict[str, list[ArtifactBinding]] | None = Field(
         default=None,
         description=(
-            "Final artifacts each task whose result an upstream value reads "
-            "published, by producer task id."
+            "Final artifacts of each producer an upstream value reads, by producer "
+            "task id."
         ),
     )
     input_element: ResultElementRef | None = Field(

@@ -80,7 +80,7 @@ class ArtifactDownload:
 def resolve_download(
     reader: ResultReader, bindings: ArtifactBindings, revision: str, path: str
 ) -> ArtifactDownload:
-    """The object ``path`` names among a task's artifacts at ``revision``."""
+    """Resolve the object ``path`` names among a task's artifacts at ``revision``."""
     if (found := resolve_artifact_path(bindings, revision, path)) is None:
         raise ArtifactNotFound(path)
     binding, inner = found
@@ -166,7 +166,7 @@ class BundleFile:
 def artifact_bundle_files(
     reader: ResultReader, bindings: ArtifactBindings, revision: str, top: str
 ) -> Iterator[BundleFile]:
-    """Every published file of a revision under ``top``, a tree as its members.
+    """List every published file of a revision under ``top``, a tree as its members.
 
     An archive view is left out: its bytes are its tree's, already in the bundle.
     """

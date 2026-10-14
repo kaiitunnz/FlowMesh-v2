@@ -201,8 +201,8 @@ class WorkerContentPlane:
     ) -> None:
         """Put the object's verified bytes at ``dest`` for a reader to load.
 
-        Where this worker keeps a copy, ``dest`` links to it rather than holding a
-        second one, so what a task reads counts against the cache's own bounds.
+        Where this worker keeps a copy, ``dest`` links to it, so what a task reads
+        counts against the cache's own bounds.
         """
         lane = self._lane
         if lane is None:

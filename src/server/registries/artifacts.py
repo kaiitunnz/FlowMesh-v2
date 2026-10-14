@@ -50,8 +50,8 @@ def queue_artifact_bindings(
 def decode_artifact_bindings(
     task_id: str, raw: Mapping[Any, Any], revision: str | None = None
 ) -> ArtifactBindings:
-    """A task's catalog from its stored hash, or only ``revision`` of it, skipping a
-    field that does not parse."""
+    """Decode a task's catalog from its stored hash, or only ``revision`` of it,
+    skipping a field that does not parse."""
     bindings: ArtifactBindings = {}
     prefix = None if revision is None else f"{revision}{_SEPARATOR}"
     for field, value in raw.items():
@@ -76,7 +76,7 @@ class ArtifactCatalogStore:
     def artifact_bindings(
         self, task_id: str, revision: str | None = None
     ) -> ArtifactBindings:
-        """A task's catalog, or only ``revision`` of it."""
+        """Read a task's catalog, or only ``revision`` of it."""
         return decode_artifact_bindings(
             task_id, self._rds.sync.hash_getall(task_artifacts_key(task_id)), revision
         )
@@ -93,7 +93,7 @@ class ArtifactCatalogStore:
     def artifact_bindings_many(
         self, task_ids: Sequence[str], revision: str | None = None
     ) -> dict[str, ArtifactBindings]:
-        """Each task's catalog, or only ``revision`` of it, read in one round trip."""
+        """Read each task's catalog, or only ``revision`` of it, in one round trip."""
         if not task_ids:
             return {}
         with self._rds.sync.control_pipeline(transaction=False) as pipe:

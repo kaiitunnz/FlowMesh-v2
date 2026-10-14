@@ -1282,11 +1282,11 @@ class Dispatcher:
         return [worker for worker, score in scored if score == max_score]
 
     def _preferred_holder(self, task_id: str, pool: list[Worker]) -> Worker | None:
-        """An idle worker in ``pool`` that holds a copy of what the task's upstream
-        tasks published, largest first; None when none does.
+        """Return an idle worker in ``pool`` that holds a copy of what the task's
+        upstream tasks published, largest first; None when none does.
 
-        A holder is preferred only over the idle pool, never waited for: a busy or
-        departed holder leaves the task to normal selection.
+        The preference draws from the idle pool alone, so a busy or departed holder
+        leaves the task to normal selection.
         """
         if self._content_holders is None or not pool:
             return None
@@ -1316,8 +1316,8 @@ class Dispatcher:
         return None
 
     def _upstream_artifact_objects(self, task_id: str) -> list[ContentReference]:
-        """The largest object of each final artifact the task's direct upstream tasks
-        published, largest first."""
+        """Return the largest object of each final artifact the task's direct upstream
+        tasks published, largest first."""
         scoped = self._runtime.scoped_inputs(task_id)
         if scoped is not None:
             producers = {
@@ -1401,10 +1401,10 @@ class Dispatcher:
         values: dict[str, BaseExecutorResult],
         artifact_inputs: ArtifactInputs,
     ) -> Any:
-        """The value a placeholder reads from a scoped input: ``${name}`` the value
-        whole, ``${name.path}`` a part of it, and ``${name.task_id}`` the identity of
-        the task whose whole result it is. ``values`` holds each input already read
-        for the task."""
+        """Return the value a placeholder reads from a scoped input: ``${name}`` the
+        value whole, ``${name.path}`` a part of it, and ``${name.task_id}`` the
+        identity of the task whose whole result it is. ``values`` holds each input
+        already read for the task."""
         name, dot, path = expr.strip().partition(".")
         name = name.strip()
         entry = scoped.get(name)
@@ -1505,8 +1505,8 @@ class Dispatcher:
         context: ArtifactContext | None,
         artifact_inputs: ArtifactInputs,
     ) -> str | None:
-        """The token an artifact ref renders as: the producer's published artifact,
-        which the task's worker hydrates and names by its local path.
+        """Return the token an artifact ref renders as: the producer's published
+        artifact, which the task's worker hydrates and names by its local path.
 
         A model archive renders as the tree it archives, which every loader takes as
         a directory, and a ref to a training task's checkpoints renders as the last
@@ -1538,8 +1538,8 @@ class Dispatcher:
         task: TaskEnvelopeStrict,
         artifact_inputs: ArtifactInputs,
     ) -> TaskEnvelopeStrict:
-        """The task with each model it loads by task id named by the token of that
-        task's published artifact, which its worker hydrates.
+        """Return the task with each model it loads by task id named by the token of
+        that task's published artifact, which its worker hydrates.
 
         A ``checkpoint.load`` naming ``task_id`` (or ``taskId``) loads its ``filename``,
         or the producer's model when it names none; a LoRA adapter naming ``task_id``
@@ -1592,8 +1592,8 @@ class Dispatcher:
     def _producer_model(
         self, record: TaskRecord, producer: str, filename: Any
     ) -> tuple[ArtifactBinding, str]:
-        """The published artifact a load by ``producer``'s task id names, in the
-        consumer's own organization."""
+        """Return the published artifact a load by ``producer``'s task id names, in
+        the consumer's own organization."""
         bindings = self._runtime.final_artifacts(producer)
         if filename:
             found = resolve_artifact_input(bindings, str(filename))
@@ -1610,8 +1610,9 @@ class Dispatcher:
     def _upstream_artifacts(
         self, bindings: Iterable[ResultBinding]
     ) -> dict[str, list[ArtifactBinding]]:
-        """The final artifacts each task whose result ``bindings`` read published, for
-        the artifact refs in those values a worker loads itself."""
+        """Return the final artifacts of each producer an upstream value in
+        ``bindings`` reads, by producer task id, for the artifact refs in those values
+        a worker loads itself."""
         producers: set[str] = set()
         for binding in bindings:
             producers |= binding.producers()

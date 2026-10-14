@@ -25,8 +25,8 @@ def artifact_ref_source(
     node: str | None,
     path: Sequence[str | int] = (),
 ) -> tuple[str, str] | None:
-    """The producer task and artifact path a `{path: ...}` ref names, for the value at
-    ``path`` inside upstream ``node``; None for any other value."""
+    """Return the producer task and artifact path a `{path: ...}` ref names, for the
+    value at ``path`` inside upstream ``node``; None for any other value."""
     if (found := _ref_context(value, context, node, path)) is None:
         return None
     task_id, _, rel_path = found
@@ -63,8 +63,8 @@ def hydrated_artifact_ref(
     node: str | None,
     path: Sequence[str | int] = (),
 ) -> Any:
-    """A `{path: ...}` ref as the local path its artifact was hydrated to before the
-    task ran; any other value as it is."""
+    """Render a `{path: ...}` ref as the local path its artifact was hydrated to
+    before the task ran; return any other value as it is."""
     if (named := artifact_ref_source(value, context, node, path)) is None:
         return value
     if (local := spec.hydrated_artifact(*named)) is None:
@@ -81,8 +81,8 @@ def artifact_ref_text(
     node: str | None,
     path: Sequence[str | int] = (),
 ) -> Any:
-    """A `{path: ...}` ref as the text naming its published artifact; any other value
-    as it is."""
+    """Render a `{path: ...}` ref as the text naming its published artifact; return
+    any other value as it is."""
     if (found := _ref_context(value, context, node, path)) is None:
         return value
     task_id, ctx, rel_path = found
@@ -90,7 +90,8 @@ def artifact_ref_text(
 
 
 def list_items_expression(data: Mapping[str, Any]) -> str | None:
-    """The expression list data projects its items from, when it names no items."""
+    """Return the expression list data projects its items from, when it names no
+    items."""
     if data.get("items") is not None:
         return None
     expr = data.get("expr")
@@ -104,7 +105,8 @@ def list_items_expression(data: Mapping[str, Any]) -> str | None:
 def image_embedding_expression(
     raw: Mapping[str, Any],
 ) -> tuple[str, str | None] | None:
-    """The expression an image embedding projects, with the upstream node it reads."""
+    """Return the expression an image embedding projects, with the upstream node it
+    reads."""
     expr = raw.get("expr")
     node: str | None = raw.get("node")
     if not expr and node and (path_hint := raw.get("path")):
@@ -115,7 +117,8 @@ def image_embedding_expression(
 
 
 def data_artifact_refs(spec: TaskSpecStrictBase) -> list[tuple[str, str]]:
-    """The producer task and path of each artifact a spec's data loads the bytes of:
+    """Return the producer task and path of each artifact a spec's data loads the
+    bytes of:
     the images a visual-embedding model reads from its projected list items, and an
     image embedding.
 
@@ -175,7 +178,7 @@ def _effective_port(parsed: ParseResult) -> int | None:
 
 
 def is_flowmesh_origin_url(url: str) -> bool:
-    """Whether `url` targets this worker's configured FlowMesh server.
+    """Return whether `url` targets this worker's configured FlowMesh server.
 
     Gates whether the worker's bearer token (`FLOWMESH_API_KEY`, attached via
     `auth_headers()`) may be sent: only to the worker's own FlowMesh origin

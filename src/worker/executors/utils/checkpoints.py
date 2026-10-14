@@ -43,8 +43,8 @@ def determine_resume_path(
 
 
 def hydrated_path(value: str) -> Path | None:
-    """The local path a reference to a published artifact rendered as, once the
-    worker hydrated it; None for a URL."""
+    """Return the local path a reference to a published artifact rendered as, once
+    the worker hydrated it; None for a URL."""
     if not value:
         return None
     path = Path(value)
@@ -54,7 +54,8 @@ def hydrated_path(value: str) -> Path | None:
 def resolve_checkpoint_load(
     load_cfg: dict[str, Any], out_dir: Path, logger: logging.Logger | None = None
 ) -> Path:
-    """The local path a ``checkpoint.load`` names, downloading it when it is a URL.
+    """Resolve the local path a ``checkpoint.load`` names, downloading it when it is
+    a URL.
 
     A published artifact the worker hydrated resolves whatever ``type`` declares, and
     ``base_url`` with ``task_id`` and ``filename`` fetches that artifact from another
@@ -226,7 +227,7 @@ def select_extracted_subdir(extracted_dir: Path, subdir: str | None) -> Path:
 
 
 def archive_path_for(model_dir: Path) -> Path:
-    """Where a published model directory's archive view is named, beside it."""
+    """Return where a published model directory's archive view is named, beside it."""
     return model_dir.with_name(f"{model_dir.name}.tar.gz")
 
 

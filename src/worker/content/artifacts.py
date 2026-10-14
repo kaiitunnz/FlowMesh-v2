@@ -62,7 +62,8 @@ class ReservedArtifactName(ValueError):
 
 
 def checkpoint_spool_dir(out_dir: Path) -> Path:
-    """Where a task's closed checkpoints wait to publish, beside its artifacts."""
+    """Return where a task's closed checkpoints wait to publish, beside its
+    artifacts."""
     return out_dir / CHECKPOINT_SPOOL_DIR
 
 
@@ -107,7 +108,7 @@ def open_spool(spool_dir: Path) -> None:
 
 
 def spool_is_open(spool_dir: Path) -> bool:
-    """Whether an uploader publishes what the spool holds."""
+    """Return whether an uploader publishes what the spool holds."""
     return (spool_dir / _SPOOL_OPEN).exists()
 
 
@@ -120,12 +121,12 @@ def fail_spool(spool_dir: Path, error: str) -> None:
 
 
 def spool_failed(spool_dir: Path) -> bool:
-    """Whether a spooled checkpoint could not be published."""
+    """Return whether a spooled checkpoint could not be published."""
     return (spool_dir / _SPOOL_FAILED).exists()
 
 
 def spooled_steps(spool_dir: Path) -> list[tuple[int, Path]]:
-    """The snapshots waiting in the spool, by step."""
+    """Return the snapshots waiting in the spool, by step."""
     try:
         entries = list(os.scandir(spool_dir))
     except FileNotFoundError:
@@ -139,7 +140,8 @@ def spooled_steps(spool_dir: Path) -> list[tuple[int, Path]]:
 
 
 def checkpoint_step(name: str) -> int | None:
-    """The training step a trainer's ``checkpoint-<n>`` directory saved, or None."""
+    """Return the training step a trainer's ``checkpoint-<n>`` directory saved, or
+    None."""
     return int(match.group(1)) if (match := _CHECKPOINT.fullmatch(name)) else None
 
 
@@ -299,7 +301,7 @@ class ArtifactPublisher:
 
 
 def declared_archives(result: BaseModel) -> dict[str, str]:
-    """The archive views a result names, each mapped to the tree it archives.
+    """Return the archive views a result names, each mapped to the tree it archives.
 
     An executor names a model's archive in a ``*_archive`` field beside the model, as
     the model's path with ``.tar.gz`` appended.
@@ -316,7 +318,7 @@ def declared_archives(result: BaseModel) -> dict[str, str]:
 
 
 def archive_top(tree_name: str) -> str:
-    """The directory an archive of a tree puts its members under."""
+    """Return the directory an archive of a tree puts its members under."""
     return PurePosixPath(tree_name).name
 
 
@@ -342,7 +344,7 @@ def _verified_reader(top: Path) -> Callable[[TreeMember, int, int], Iterator[byt
 
 
 def _final_entries(top_fd: int, step_revisions: bool) -> Iterator[tuple[str, bool]]:
-    """Each artifact of the ``final`` set: its name and whether it is a tree."""
+    """Yield each artifact of the ``final`` set: its name and whether it is a tree."""
     for name, is_dir in _entries(top_fd):
         if not step_revisions or name != CHECKPOINTS_DIR or not is_dir:
             yield name, is_dir

@@ -362,7 +362,8 @@ class TaskRecord(BaseModel):
 
     @model_validator(mode="after")
     def _drop_unheld_credential_refs(self) -> Self:
-        # A ref into a field a spec retired has nowhere to go back to at dispatch.
+        # A ref into a field the spec does not hold has nowhere to be restored at
+        # dispatch.
         if self.credential_refs:
             self.credential_refs = {
                 pointer: ref
