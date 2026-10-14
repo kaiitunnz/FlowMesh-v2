@@ -235,6 +235,15 @@ class FabricObjectStore(ABC):
         """Fetch and verify content against the reference naming it."""
         return verify_content(reference, self.fetch(reference))
 
+    def stored_size(self, reference: ContentReference) -> int:
+        """The size of the object stored under a reference, read without its bytes
+        where the backend can.
+
+        Raises ``ContentHydrationError`` when nothing is stored there and
+        ``ContentUnavailable`` when the store cannot be reached.
+        """
+        return len(self.fetch(reference))
+
     def write_file(
         self,
         scope: str,

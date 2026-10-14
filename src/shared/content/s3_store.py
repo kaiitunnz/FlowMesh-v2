@@ -381,6 +381,15 @@ class S3ObjectStore(FabricObjectStore):
             ) from exc
         check_existing_size(reference, int(head.get("ContentLength", -1)))
 
+    def stored_size(self, reference: ContentReference) -> int:
+        try:
+            head = self._client.head_object(
+                Bucket=self._bucket, Key=self._key(reference)
+            )
+        except Exception as exc:
+            raise self._read_error(reference, exc) from exc
+        return int(head.get("ContentLength", -1))
+
     def fetch(self, reference: ContentReference) -> bytes:
         body = self._get(reference)
         try:

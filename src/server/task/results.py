@@ -162,6 +162,24 @@ class ResultReader:
         except ContentStoreError as exc:
             raise ResultUnreadable(str(exc)) from exc
 
+    def verify_stored(self, reference: ContentReference) -> None:
+        """Check that one object is in the store at its size, reading none of it.
+
+        Raises ``ResultUnavailable`` while the store cannot be reached and
+        ``ResultUnreadable`` for an object that is missing or of another size.
+        """
+        try:
+            size = self._store.stored_size(reference)
+        except ContentUnavailable as exc:
+            raise ResultUnavailable(str(exc)) from exc
+        except ContentStoreError as exc:
+            raise ResultUnreadable(str(exc)) from exc
+        if size != reference.size_bytes:
+            raise ResultUnreadable(
+                f"content {reference.content_digest} is stored at {size} bytes, not "
+                f"{reference.size_bytes}"
+            )
+
     def _hydrate(self, reference: ContentReference) -> bytes:
         key = reference
         with self._lock:

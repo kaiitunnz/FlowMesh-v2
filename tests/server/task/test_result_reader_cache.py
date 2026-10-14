@@ -133,3 +133,16 @@ def test_the_latest_tree_over_the_cap_is_decoded_once(
 
     assert reader.tree_members(tree) is first
     assert reader._tree_members == 0
+
+
+def test_a_stored_check_reads_no_bytes_and_catches_another_size(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SharedFilesystemObjectStore(tmp_path / "cas")
+    reader = ResultReader(store, cache_max_bytes=_BUDGET)
+    stored = store.write("org", b"weights")
+    monkeypatch.setattr(store, "open", lambda *a, **k: pytest.fail("read the bytes"))
+
+    reader.verify_stored(stored)
+    with pytest.raises(results.ResultUnreadable):
+        reader.verify_stored(stored.model_copy(update={"size_bytes": 3}))

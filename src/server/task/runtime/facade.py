@@ -4295,7 +4295,7 @@ class TaskRuntime:
         if not checks:
             return
         verdicts = {
-            task_id: self._inputs.verify_inputs(check.references)
+            task_id: self._inputs.verify_inputs(check)
             for task_id, check in checks.items()
             if check.unreadable is None
         }
@@ -5154,11 +5154,17 @@ class TaskRuntime:
                     unavailable_inputs or (),
                 ):
                     held_dispatch = record.dispatch_id
+                    members = frozenset(
+                        reference
+                        for reference in consumed
+                        if not self._content_bindings.consumes_locked(record, reference)
+                    )
                     end = self._return_dispatch_locked(
                         record, increment_retry=False, front=False
                     )
+                    record.avoided_worker = worker_id
                     self._inputs.hold_for_input_check_locked(
-                        record, worker_id, held_dispatch, consumed
+                        record, worker_id, held_dispatch, consumed, members
                     )
                     return FailureOutcome(end, record.attempts, [], [])
                 self._logger.warning(

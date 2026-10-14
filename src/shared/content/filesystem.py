@@ -329,6 +329,19 @@ class SharedFilesystemObjectStore(FabricObjectStore):
             reference.authorization_scope, reference.content_digest
         )
 
+    def stored_size(self, reference: ContentReference) -> int:
+        scope, digest = reference.authorization_scope, reference.content_digest
+        try:
+            return self._objects.object_path(scope, digest).stat().st_size
+        except FileNotFoundError as exc:
+            raise ContentHydrationError(
+                f"no content for {digest} in scope {scope}"
+            ) from exc
+        except OSError as exc:
+            raise ContentUnavailable(
+                f"could not read {digest} in scope {scope}: {exc}"
+            ) from exc
+
     def open(
         self, reference: ContentReference, *, chunk_bytes: int = STREAM_CHUNK_BYTES
     ) -> Iterator[bytes]:

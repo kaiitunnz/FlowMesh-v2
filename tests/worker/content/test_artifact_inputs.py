@@ -1,6 +1,7 @@
 """A worker puts the published artifacts its task's spec names on disk, and the spec
 names their local paths."""
 
+import hashlib
 import os
 import stat
 from pathlib import Path
@@ -210,6 +211,22 @@ def test_an_artifact_outside_the_tasks_scope_is_refused(tmp_path: Path) -> None:
         )
     assert not raised.value.retryable
     assert not (tmp_path / "in").exists()
+
+
+def test_a_corrupt_member_is_unreadable_not_unavailable(tmp_path: Path) -> None:
+    store = SharedFilesystemObjectStore(tmp_path / "shared")
+    tree = _publish_tree(store, {"w.bin": b"weights"})
+    member = hashlib.sha256(b"weights").hexdigest()
+    (stored,) = (tmp_path / "shared").rglob(member)
+    stored.chmod(0o644)
+    stored.write_bytes(b"wrights")
+    msg = _message(["flowmesh-artifact:[dsp-1.0]"], {"dsp-1.0": tree})
+
+    with pytest.raises(ExecutionError, match="input_unreadable") as raised:
+        TaskInputHydrator(cast(Any, FakeContentPlane(store))).install_artifacts(
+            msg, tmp_path / "in"
+        )
+    assert not raised.value.retryable
 
 
 def test_an_outage_mid_tree_names_its_input_and_leaves_no_partial_tree(

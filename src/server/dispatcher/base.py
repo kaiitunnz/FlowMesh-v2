@@ -638,6 +638,12 @@ class Dispatcher:
                 return False
             pool = free or pool
 
+        # A worker that could not reach an input of the task is passed over while
+        # another is eligible: the input reads fine at control, so the fault is likely
+        # its own path to the store.
+        if record.avoided_worker is not None:
+            pool = [c for c in pool if c.id != record.avoided_worker] or pool
+
         # 5. Worker selection (best-fit scoring by default)
         selection_info: dict[str, Any] = {}
         worker: Worker | None = None

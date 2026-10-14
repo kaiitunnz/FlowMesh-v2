@@ -357,6 +357,12 @@ class TaskRecord(BaseModel):
         "hold as tree members.",
         exclude=True,
     )
+    avoided_worker: str | None = Field(
+        default=None,
+        description="A worker that reported it could not reach an input the task "
+        "consumes, which its next placement passes over while another is eligible.",
+        exclude=True,
+    )
     members_pending: bool = Field(
         default=False,
         description="Whether a restored dispatch's tree members are still being read, "

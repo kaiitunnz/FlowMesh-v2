@@ -255,7 +255,9 @@ class _Attributing:
 
         reader = make_result_reader()
         self.probe = _Probe()
+        self.stored = _Probe()
         reader.verify = self.probe  # type: ignore[method-assign]
+        reader.verify_stored = self.stored  # type: ignore[method-assign]
         self.runtime = TaskRuntime(
             cast(Any, registry or _Registry()),
             cast(Any, _WorkerRegistryStub()),
@@ -311,7 +313,25 @@ async def test_an_unreachable_artifact_member_is_held_like_any_input() -> None:
     assert record.attempts == 0
     assert record.failed_workers == []
     fixture.scheduler.run_due()
-    assert fixture.probe.reads == [member]
+    assert fixture.probe.reads == []
+    assert fixture.stored.reads == [member]
+    assert record.avoided_worker == "wkr-1"
+
+
+@pytest.mark.anyio
+async def test_an_artifact_member_missing_at_control_fails_the_task() -> None:
+    fixture = _Attributing()
+    runtime = fixture.runtime
+    task_id, _ = await _consumer(runtime)
+    member = reference_for("org", b"weights")
+    runtime.note_artifact_inputs(task_id, [], [], (frozenset({member.identity}),))
+    fixture.stored.error = ResultUnreadable("stored at another size")
+
+    fixture.report(_unavailable(task_id, [member]))
+    fixture.scheduler.run_due()
+
+    assert fixture.probe.reads == []
+    assert runtime._inputs.input_checks[task_id].unreadable is not None
 
 
 @pytest.mark.anyio
