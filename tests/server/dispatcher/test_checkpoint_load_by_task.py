@@ -172,3 +172,30 @@ def test_a_lora_adapter_named_by_task_loads_its_published_adapter() -> None:
         ("https://e/b.tar.gz", None),
     ]
     assert list(inputs.bindings.values()) == [_LORA]
+
+
+@pytest.mark.parametrize("producer", ["tsk-both", "tsk-none"])
+def test_an_adapter_whose_task_has_not_one_model_is_told_to_name_its_path(
+    producer: str,
+) -> None:
+    dispatcher = make_capturing_dispatcher(runtime=_Runtime())
+    task = TaskEnvelopeStrict.model_validate(
+        {
+            "apiVersion": "flowmesh/v1",
+            "kind": "Task",
+            "metadata": {"name": "serve"},
+            "spec": {
+                "taskType": "inference",
+                "model": {
+                    "source": {"type": "huggingface", "identifier": "m"},
+                    "adapters": [{"type": "lora", "name": "a", "task_id": producer}],
+                },
+                "data": {"type": "list", "items": ["hi"]},
+            },
+        }
+    )
+
+    with pytest.raises(ValueError, match="name the adapter to load by its path"):
+        dispatcher._render_checkpoint_load(
+            cast(TaskRecord, SimpleNamespace(org_id=_ORG)), task, ArtifactInputs("d")
+        )

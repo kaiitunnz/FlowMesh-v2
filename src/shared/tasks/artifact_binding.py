@@ -212,11 +212,16 @@ def resolve_artifact_input(
 MODEL_ARTIFACT_NAMES = ("final_model", "final_lora")
 
 
-def model_artifact(bindings: ArtifactBindings, producer: str) -> ArtifactBinding:
+def model_artifact(
+    bindings: ArtifactBindings,
+    producer: str,
+    choose: str = "name the artifact to load by filename",
+) -> ArtifactBinding:
     """Return the model ``producer`` published: its ``final_model`` or ``final_lora``
     tree.
 
-    Raises ``ValueError`` when its final set holds neither or both.
+    Raises ``ValueError`` when its final set holds neither or both, saying how to
+    ``choose`` one instead.
     """
     found = [
         binding
@@ -226,9 +231,7 @@ def model_artifact(bindings: ArtifactBindings, producer: str) -> ArtifactBinding
     ]
     if len(found) != 1:
         held = " and ".join(binding.name for binding in found) or "no model"
-        raise ValueError(
-            f"task {producer} published {held}; name the artifact to load by filename"
-        )
+        raise ValueError(f"task {producer} published {held}; {choose}")
     return found[0]
 
 

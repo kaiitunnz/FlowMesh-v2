@@ -1685,7 +1685,9 @@ class Dispatcher:
                         update={
                             "task_id": None,
                             "url": artifact_inputs.token(
-                                *self._producer_model(record, adapter.task_id, None)
+                                *self._producer_model(
+                                    record, adapter.task_id, None, adapter=True
+                                )
                             ),
                         }
                     )
@@ -1701,7 +1703,7 @@ class Dispatcher:
         return task.model_copy(update={"spec": spec.model_copy(update=update)})
 
     def _producer_model(
-        self, record: TaskRecord, producer: str, filename: Any
+        self, record: TaskRecord, producer: str, filename: Any, adapter: bool = False
     ) -> tuple[ArtifactBinding, str]:
         """Return the published artifact a load by ``producer``'s task id names, in
         the consumer's own organization."""
@@ -1713,7 +1715,15 @@ class Dispatcher:
                     f"task {producer} published no artifact named {filename!r}"
                 )
         else:
-            found = model_artifact(bindings, producer), ""
+            found = (
+                model_artifact(
+                    bindings,
+                    producer,
+                    "name the adapter to load by its path instead of task_id",
+                )
+                if adapter
+                else model_artifact(bindings, producer)
+            ), ""
         if found[0].reference.authorization_scope != record.org_id:
             raise ValueError(f"task {producer} published no artifact to load")
         return found
