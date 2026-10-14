@@ -244,6 +244,15 @@ def test_a_consumer_waits_for_the_busy_holder_that_just_produced_its_input() -> 
     assert _settling()._holder_settling("tsk-1", 100.0)
 
 
+def test_a_consumer_waits_while_its_holder_is_still_reserved_for_the_producer() -> None:
+    dispatcher = _settling()
+    dispatcher._worker_registry.reservation.return_value = SimpleNamespace(
+        dispatch_id="dsp-1"
+    )
+
+    assert dispatcher._holder_settling("tsk-1", 100.0)
+
+
 def _busy_elsewhere(d: Any) -> None:
     d._worker_registry.reservation.return_value = SimpleNamespace(dispatch_id="dsp-9")
 

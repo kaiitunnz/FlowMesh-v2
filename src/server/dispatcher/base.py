@@ -1450,7 +1450,9 @@ class Dispatcher:
                 closes, ended = grace
                 if ended or now >= closes:
                     continue
-            settling = self._settling_holder(reference, record.assigned_worker)
+            settling = self._settling_holder(
+                reference, record.assigned_worker, record.dispatch_id
+            )
             if not settling:
                 if grace is not None:
                     self._holder_graces[key] = (grace[0], True)
@@ -1460,24 +1462,14 @@ class Dispatcher:
             return True
         return False
 
-    def _settling_holder(self, reference: ContentReference, worker_id: str) -> bool:
+    def _settling_holder(
+        self, reference: ContentReference, worker_id: str, dispatch_id: str | None
+    ) -> bool:
         """Return whether ``worker_id`` holds ``reference`` on its live, uncordoned
-        incarnation and is not yet reserved for another dispatch."""
-        assert self._content_holders is not None
+        incarnation and is reserved for no dispatch but ``dispatch_id``, the one that
+        just ended on it."""
         try:
-            holders = self._content_holders.holders(
-                reference.authorization_scope, reference.content_digest
-            )
-            held = [h for h in holders if h.worker_id == worker_id]
-            worker = self._worker_registry.get_worker(worker_id) if held else None
-            return (
-                worker is not None
-                and any(h.generation == worker.incarnation for h in held)
-                and worker.status == WorkerStatus.BUSY
-                and not self._worker_registry.is_worker_stale(worker_id)
-                and not self._worker_registry.is_cordoned(worker)
-                and self._worker_registry.reservation(worker_id) is None
-            )
+            unsettled = self._unsettled_holder(reference, worker_id, dispatch_id)
         except Exception:
             self._logger.debug(
                 "Holder %s of %s unreadable",
@@ -1486,6 +1478,43 @@ class Dispatcher:
                 exc_info=True,
             )
             return False
+        if unsettled is not None:
+            self._logger.debug(
+                "Not waiting for holder %s of %s: it %s",
+                worker_id,
+                reference.content_digest,
+                unsettled,
+            )
+        return unsettled is None
+
+    def _unsettled_holder(
+        self, reference: ContentReference, worker_id: str, dispatch_id: str | None
+    ) -> str | None:
+        """Why ``worker_id`` is no settling holder of ``reference``; None if it is."""
+        assert self._content_holders is not None
+        held = [
+            h
+            for h in self._content_holders.holders(
+                reference.authorization_scope, reference.content_digest
+            )
+            if h.worker_id == worker_id
+        ]
+        if not held:
+            return "holds no copy"
+        if (worker := self._worker_registry.get_worker(worker_id)) is None:
+            return "is gone"
+        if all(h.generation != worker.incarnation for h in held):
+            return "holds the copy on another incarnation"
+        if worker.status != WorkerStatus.BUSY:
+            return f"is {worker.status}"
+        if self._worker_registry.is_worker_stale(worker_id):
+            return "is stale"
+        if self._worker_registry.is_cordoned(worker):
+            return "is cordoned"
+        reservation = self._worker_registry.reservation(worker_id)
+        if reservation is not None and reservation.dispatch_id != dispatch_id:
+            return f"is reserved for {reservation.dispatch_id}"
+        return None
 
     def _resolve_stage_references(
         self,
