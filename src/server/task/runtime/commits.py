@@ -38,7 +38,7 @@ from ..models import (
 )
 from .after_commit import AfterCommitActions, Purge, Settled
 from .record_failures import RecordFailures
-from .reports import membership
+from .reports import clear_dispatched_inputs, membership
 from .reservations import WorkerReservations
 from .resident_tasks import ResidentServeTasks
 from .scheduling import EpochFrontier
@@ -506,14 +506,17 @@ class TransitionCommitter:
         of a terminal, and release the worker of each dispatch the commit ended.
 
         A settled task binds nothing more, so only its final set stays in memory; its
-        checkpoints are read from its stored catalog.
+        checkpoints are read from its stored catalog. It reads nothing more either, so
+        what its last dispatch lent a peer read is dropped.
         """
         self._observe_resident_locked(records)
         for persisted in records:
             record = persisted.record
             record.unwritten_artifacts.clear()
-            if record.status in TERMINAL_TASK_STATUSES and record.artifacts:
-                record.artifacts = final_set(record.artifacts)
+            if record.status in TERMINAL_TASK_STATUSES:
+                clear_dispatched_inputs(record)
+                if record.artifacts:
+                    record.artifacts = final_set(record.artifacts)
         if any(by_status[status] for status in TERMINAL_TASK_STATUSES):
             self._actions.file_locked(workflow_id, Settled(workflow_id))
         self._reservations.release_ended_dispatches_locked(

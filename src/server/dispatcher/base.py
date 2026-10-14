@@ -849,7 +849,6 @@ class Dispatcher:
             if producer not in staged
             for binding in published
         ]
-        dispatched_artifacts = [*named, *lent]
         try:
             artifact_objects = self._runtime.artifact_input_objects(named, lent)
         except ResultUnavailable as exc:
@@ -909,7 +908,10 @@ class Dispatcher:
 
         # 8. Give the task what it reads and writes its content under, then publish it
         self._runtime.note_artifact_inputs(
-            task_id, dispatched_artifacts, artifact_objects
+            task_id,
+            list(artifact_inputs.bindings.values()),
+            upstream_artifacts,
+            artifact_objects,
         )
         match self._runtime.begin_publish(
             task_id, worker, dispatch_id, input_preparation=preparing

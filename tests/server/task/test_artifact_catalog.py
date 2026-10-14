@@ -4,6 +4,8 @@ settles it, and the catalog survives a restart."""
 import asyncio
 import hashlib
 import logging
+import threading
+import time
 from typing import Any, cast
 from unittest import mock
 
@@ -12,11 +14,12 @@ import pytest
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
-from server.clients.redis import task_artifacts_key
+from server.clients.redis import task_artifacts_key, task_state_key
 from server.config import OrchestrationConfig
 from server.registries.workflow import WorkflowRegistry
-from server.task.models import EventEffect, TaskStatus
+from server.task.models import EventEffect, TaskRecord, TaskStatus
 from server.task.redrive import StoreRedriveScheduler
+from server.task.results import ResultUnavailable
 from server.task.runtime import TaskRuntime, TransitionNotDurable
 from shared.content import ContentReference
 from shared.schemas.event import TaskEvent
@@ -340,28 +343,134 @@ def test_a_workflow_failed_at_restore_keeps_its_catalog(
     assert restored._tasks[train].artifacts == _stored(registry, train)
 
 
-def test_a_restart_keeps_what_a_dispatch_s_artifact_inputs_hold(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    registry = _registry()
-    reader = make_result_reader()
-    runtime = _runtime(registry, reader)
+def _widened(runtime: TaskRuntime, task_id: str) -> None:
+    deadline = time.monotonic() + 10
+    while runtime._tasks[task_id].members_pending and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+
+def _dispatched_use(
+    runtime: TaskRuntime, tokens: bool
+) -> tuple[str, str, ArtifactBinding]:
     _, (train, use) = _register(runtime)
     record_dispatch(runtime, train, dispatch_id="dsp-1")
     _succeed(runtime, train, [_tree()], "dsp-1")
     tree = runtime._tasks[train].artifacts[("final", "final_model")]
-    member = _ref(b"weights")
-    runtime.note_artifact_inputs(use, [tree], (frozenset({tree.reference.identity}),))
+    runtime.note_artifact_inputs(
+        use,
+        [tree] if tokens else [],
+        [] if tokens else [train],
+        (frozenset({tree.reference.identity}),),
+    )
     record_dispatch(runtime, use, dispatch_id="dsp-2")
+    return train, use, tree
+
+
+@pytest.mark.parametrize("tokens", [True, False])
+def test_a_restart_keeps_what_a_dispatch_s_artifact_inputs_hold(
+    monkeypatch: pytest.MonkeyPatch, tokens: bool
+) -> None:
+    registry = _registry()
+    reader = make_result_reader()
+    runtime = _runtime(registry, reader)
+    train, use, tree = _dispatched_use(runtime, tokens)
+    member = _ref(b"weights")
 
     restored = _runtime(registry, make_result_reader(reader.store))
     monkeypatch.setattr(
         restored._results, "tree_members", lambda _ref: frozenset({member.identity})
     )
     asyncio.run(restored.rehydrate())
+    _widened(restored, use)
 
-    assert restored._tasks[use].dispatched_artifacts == (tree,)
+    record = restored._tasks[use]
+    assert record.dispatched_artifacts == ((tree,) if tokens else ())
+    assert record.dispatched_producers == (() if tokens else (train,))
+    assert restored.content_binding_authorizes(use, "wkr-1", tree.reference)
     assert restored.content_binding_authorizes(use, "wkr-1", member)
+
+
+def test_a_restart_never_waits_on_the_store_for_members(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = _registry()
+    reader = make_result_reader()
+    runtime = _runtime(registry, reader)
+    _, use, tree = _dispatched_use(runtime, False)
+    released = threading.Event()
+
+    def black_holed(_ref: ContentReference) -> Any:
+        released.wait(30)
+        raise ResultUnavailable("store black-holed")
+
+    restored = _runtime(registry, make_result_reader(reader.store))
+    monkeypatch.setattr(restored._results, "tree_members", black_holed)
+    started = time.monotonic()
+    asyncio.run(restored.rehydrate())
+    took = time.monotonic() - started
+
+    record = restored._tasks[use]
+    assert took < 5
+    assert record.members_pending
+    assert restored.content_binding_authorizes(use, "wkr-1", tree.reference)
+    unknown = _ref(b"a member not yet lent")
+    with restored._lock:
+        assert restored._content_bindings.consumed_inputs_locked(record, [unknown]) == (
+            unknown,
+        )
+    released.set()
+
+
+def test_a_dispatch_s_record_holds_no_upstream_final_set() -> None:
+    registry = _registry()
+    runtime = _runtime(registry)
+    _, (train, use) = _register(runtime)
+    record_dispatch(runtime, train, dispatch_id="dsp-1")
+    files = [_tree(f"file-{n}", f"file-{n}".encode()) for n in range(1000)]
+    _succeed(runtime, train, files, "dsp-1")
+    runtime.note_artifact_inputs(use, [], [train], (frozenset(),))
+    record_dispatch(runtime, use, dispatch_id="dsp-2")
+
+    stored = raw_control(registry).get(task_state_key(use))
+
+    assert stored is not None and len(stored) < 8_000
+    assert "file-999" not in stored
+
+
+def test_a_settled_dispatch_lends_nothing_more() -> None:
+    registry = _registry()
+    runtime = _runtime(registry)
+    train, use, tree = _dispatched_use(runtime, True)
+
+    _succeed(runtime, use, [], "dsp-2")
+
+    record = runtime._tasks[use]
+    assert record.dispatched_artifacts == record.dispatched_producers == ()
+    assert record.dispatched_objects == ()
+    stored = raw_control(registry).get(task_state_key(use))
+    assert stored is not None and tree.reference.content_digest not in stored
+
+
+def test_a_stored_dispatched_artifact_that_no_longer_reads_is_dropped() -> None:
+    record = TaskRecord.model_validate(
+        {
+            "task_id": "tsk-1",
+            "workflow_id": "wfl-1",
+            "owner_id": "owner",
+            "raw_yaml": "",
+            "task": {
+                "apiVersion": "flowmesh/v1",
+                "kind": "Task",
+                "spec": {"taskType": "echo"},
+            },
+            "dispatched_artifacts": [
+                {"name": "x", "kind": "nonsense"},
+                _tree().model_dump(mode="json"),
+            ],
+        }
+    )
+
+    assert record.dispatched_artifacts == (_tree(),)
 
 
 def test_unregistering_a_workflow_removes_its_catalogs() -> None:

@@ -302,7 +302,7 @@ async def test_an_unreachable_artifact_member_is_held_like_any_input() -> None:
     runtime = fixture.runtime
     task_id, _ = await _consumer(runtime)
     member = reference_for("org", b"weights")
-    runtime.note_artifact_inputs(task_id, [], (frozenset({member.identity}),))
+    runtime.note_artifact_inputs(task_id, [], [], (frozenset({member.identity}),))
 
     fixture.report(_unavailable(task_id, [member]))
 

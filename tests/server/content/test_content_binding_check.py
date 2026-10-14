@@ -169,7 +169,7 @@ def _runtime(
     )
     if artifacts and manifests is not None:
         runtime.note_artifact_inputs(
-            "tsk-1", artifacts, runtime.artifact_input_objects(artifacts)
+            "tsk-1", artifacts, [], runtime.artifact_input_objects(artifacts)
         )
     runtime._results = cast(Any, _NoStore())
     return runtime

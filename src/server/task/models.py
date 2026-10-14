@@ -1,9 +1,17 @@
 import hashlib
+import logging
 import time
 from enum import StrEnum
 from typing import Any, NamedTuple, Self
 
-from pydantic import BaseModel, Field, computed_field, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    ValidationError,
+    computed_field,
+    field_validator,
+    model_validator,
+)
 
 from shared.content import ContentReference
 from shared.tasks import TaskEnvelopeTemplate, TaskType
@@ -13,6 +21,8 @@ from shared.tasks.worker_message import HardwareUsage
 
 from ..orchestration.tool_dispatch import FacadeTurnGroup
 from ..utils.time import now_iso
+
+_logger = logging.getLogger(__name__)
 
 TRAINING_TASK_TYPES = {
     "sft",
@@ -332,13 +342,26 @@ class TaskRecord(BaseModel):
     )
     dispatched_artifacts: tuple[ArtifactBinding, ...] = Field(
         default=(),
-        description="Published artifacts the task's current dispatch names as inputs.",
+        description="Published artifacts the task's current dispatch names by token.",
+        exclude=True,
+    )
+    dispatched_producers: tuple[str, ...] = Field(
+        default=(),
+        description="Upstream tasks whose final sets the task's current dispatch "
+        "carries.",
         exclude=True,
     )
     dispatched_objects: tuple[frozenset[tuple[str, str, str]], ...] = Field(
         default=(),
         description="The identities of every object the dispatched artifacts name or "
         "hold as tree members.",
+        exclude=True,
+    )
+    members_pending: bool = Field(
+        default=False,
+        description="Whether a restored dispatch's tree members are still being read, "
+        "so an input it reports unreadable is checked rather than charged to its "
+        "worker.",
         exclude=True,
     )
     unwritten_artifacts: list[ArtifactBinding] = Field(
@@ -359,6 +382,19 @@ class TaskRecord(BaseModel):
         "episode, durable so a restart-replayed completion still routes its whole "
         "ordered membership.",
     )
+
+    @field_validator("dispatched_artifacts", mode="before")
+    @classmethod
+    def _drop_unreadable_dispatched_artifacts(cls, value: Any) -> Any:
+        if not isinstance(value, (list, tuple)):
+            return ()
+        kept = []
+        for item in value:
+            try:
+                kept.append(ArtifactBinding.model_validate(item))
+            except ValidationError:
+                _logger.warning("Dropping a dispatched artifact that no longer reads")
+        return tuple(kept)
 
     @model_validator(mode="after")
     def _drop_unheld_credential_refs(self) -> Self:

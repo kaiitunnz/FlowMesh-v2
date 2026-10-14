@@ -494,11 +494,13 @@ class ContentBindings:
         self, record: TaskRecord, references: Sequence[ContentReference]
     ) -> tuple[ContentReference, ...]:
         """The named objects the task consumes, each once: a bound input, or an
-        object its dispatch's artifact inputs name or hold."""
+        object its dispatch's artifact inputs name or hold. Every named object counts
+        while a restored dispatch's tree members are still being read."""
         return tuple(
             reference
             for reference in dict.fromkeys(references)
-            if self.consumes_locked(record, reference)
+            if record.members_pending
+            or self.consumes_locked(record, reference)
             or any(
                 reference.identity in objects for objects in record.dispatched_objects
             )

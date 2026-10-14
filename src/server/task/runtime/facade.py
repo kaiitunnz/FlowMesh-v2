@@ -1,13 +1,12 @@
 """The task runtime: every workflow's task records, scheduling and dispatch."""
 
-import asyncio
 import itertools
 import logging
 import threading
 import time
 from collections import defaultdict, deque
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from typing import Any, Final
@@ -427,6 +426,10 @@ def _stored_task_info(stored: StoredTask) -> TaskInfo:
 # How many tasks or output members one hold of the runtime lock reads into a settled
 # workflow's history.
 _HISTORY_BUILD_CHUNK = 256
+
+
+# How many threads read a restored dispatch's tree members after a restart.
+_RESTORE_MEMBER_READERS = 4
 
 
 def _trees(
@@ -1153,34 +1156,68 @@ class TaskRuntime:
                     record.artifacts = bindings
 
     async def _restore_dispatched_objects(self, workflow_ids: Sequence[str]) -> None:
-        """Read again which objects each restored dispatch's artifact inputs hold, so
-        its worker may still read them from a peer; an input whose tree cannot be read
-        lends only its own object."""
+        """Lend each restored dispatch the objects its artifact inputs name, at once,
+        and their tree members once those read, off the startup path.
+
+        A restart never waits on the store: members are read on at most
+        ``_RESTORE_MEMBER_READERS`` threads. Until all of a dispatch's are, an input
+        its worker reports unreadable is checked rather than charged to the worker.
+        """
         with self._lock:
-            dispatched = [
-                record
+            restored = [
+                (record, record.dispatched_artifacts, record.dispatched_producers)
                 for workflow_id in workflow_ids
                 for record in self._tasks.of_workflow(workflow_id)
-                if record.dispatched_artifacts
-                and record.status not in TERMINAL_TASK_STATUSES
+                if record.status not in TERMINAL_TASK_STATUSES
+                and (record.dispatched_artifacts or record.dispatched_producers)
             ]
-        for record in dispatched:
-            artifacts = record.dispatched_artifacts
-            try:
-                objects = await asyncio.to_thread(
-                    self.artifact_input_objects, artifacts
-                )
-            except (ResultUnavailable, ResultUnreadable) as exc:
-                self._logger.warning(
-                    "Task %s's artifact inputs' members are unreadable after a "
-                    "restart; its worker reads them from the store: %s",
-                    record.task_id,
-                    exc,
-                )
-                objects = (frozenset(b.reference.identity for b in artifacts),)
+        widened: list[tuple[TaskRecord, list[ArtifactBinding]]] = []
+        for record, named, producers in restored:
+            artifacts = [
+                *named,
+                *(
+                    binding
+                    for producer in producers
+                    for binding in self.final_artifacts(producer).values()
+                ),
+            ]
             with self._lock:
-                if record.dispatched_artifacts is artifacts:
+                record.dispatched_objects = (
+                    frozenset(binding.reference.identity for binding in artifacts),
+                )
+                record.members_pending = True
+            widened.append((record, artifacts))
+        if widened:
+            threading.Thread(
+                target=self._widen_restored_dispatches,
+                args=(widened,),
+                name="restore-dispatch-members",
+                daemon=True,
+            ).start()
+
+    def _widen_restored_dispatches(
+        self, widened: list[tuple[TaskRecord, list[ArtifactBinding]]]
+    ) -> None:
+        """Read the tree members each restored dispatch's inputs hold and lend them."""
+
+        def widen(record: TaskRecord, artifacts: list[ArtifactBinding]) -> None:
+            dispatch_id = record.dispatch_id
+            objects = self.artifact_input_objects((), artifacts)
+            whole = len(objects) - 1 == len(_trees(artifacts))
+            with self._lock:
+                if record.dispatch_id == dispatch_id and record.members_pending:
                     record.dispatched_objects = objects
+                    record.members_pending = not whole
+
+        with ThreadPoolExecutor(
+            max_workers=_RESTORE_MEMBER_READERS, thread_name_prefix="restore-members"
+        ) as pool:
+            futures = [pool.submit(widen, *item) for item in widened]
+        for future in futures:
+            if (exc := future.exception()) is not None:
+                self._logger.warning(
+                    "A restored dispatch's artifact members did not read: %s", exc
+                )
 
     async def _load_stored_workflow(self, workflow_id: str) -> (
         tuple[
@@ -3722,14 +3759,23 @@ class TaskRuntime:
         self,
         task_id: str,
         artifacts: Sequence[ArtifactBinding],
+        producers: Iterable[str],
         objects: tuple[frozenset[ObjectIdentity], ...],
     ) -> None:
-        """Record the published artifacts the dispatch being published names, and the
-        objects they hold, which its worker may then read from a peer."""
+        """Record what the dispatch being published names: the published artifacts
+        its spec names by token, the upstream tasks whose final sets it carries, and
+        the objects they hold, which its worker may then read from a peer."""
         with self._lock:
             if (record := self._tasks.get(task_id)) is not None:
-                record.dispatched_artifacts = tuple(artifacts)
+                record.dispatched_artifacts = tuple(
+                    {
+                        (*binding.reference.identity, binding.name): binding
+                        for binding in artifacts
+                    }.values()
+                )
+                record.dispatched_producers = tuple(sorted(set(producers)))
                 record.dispatched_objects = objects
+                record.members_pending = False
 
     def upstream_task_ids(self, task_id: str) -> set[str]:
         """Every task of its workflow a task depends on, directly or transitively."""
