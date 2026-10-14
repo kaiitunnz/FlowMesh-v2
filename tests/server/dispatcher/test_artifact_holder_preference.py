@@ -7,7 +7,7 @@ import logging
 import threading
 import time
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest import mock
 
 import pytest
@@ -363,14 +363,22 @@ def test_a_consumer_never_waits_twice_for_one_producer_settle() -> None:
     assert not _waits(dispatcher, 102.0)
 
 
-def test_a_settled_consumer_drops_its_wait() -> None:
+def test_a_closed_wait_is_dropped() -> None:
     dispatcher = _settling()
     assert _waits(dispatcher, 100.0)
 
-    dispatcher._runtime.records["tsk-1"].status = TaskStatus.CANCELLED
-    _waits(dispatcher, 101.0, "tsk-other")
+    _waits(dispatcher, 100.0 + HOLDER_GRACE_SEC, "tsk-other")
 
-    assert [key[0] for key in dispatcher._holder_graces] == ["tsk-other"]
+    assert dispatcher._holder_graces == {} and dispatcher._holder_waiters == {}
+
+
+def test_one_consumer_at_a_time_waits_for_a_holder() -> None:
+    dispatcher = _settling()
+    dispatcher._runtime.records["tsk-2"] = SimpleNamespace(status=TaskStatus.PENDING)
+
+    assert _waits(dispatcher, 100.0)
+    assert not _waits(dispatcher, 100.1, "tsk-2")
+    assert _waits(dispatcher, 100.5)
 
 
 def _train_then_ready(finished: str) -> tuple[Any, str, dict[str, str], Any]:
@@ -646,3 +654,85 @@ def test_a_holder_of_only_one_of_a_producer_s_artifacts_is_waited_for() -> None:
 
     assert _waits(dispatcher, 100.0)
     assert _waits(dispatcher, 100.5)
+
+
+def _fanout(width: int) -> str:
+    nodes = ["      - {name: train, spec: {taskType: echo}}"] + [
+        f"      - {{name: use{i}, dependsOn: [train], spec: {{taskType: echo}}}}"
+        for i in range(width)
+    ]
+    return (
+        "apiVersion: flowmesh/v1\nkind: Workflow\nmetadata: {name: fan}\n"
+        "spec:\n  graph:\n    nodes:\n" + "\n".join(nodes) + "\n"
+    )
+
+
+def test_a_fan_out_waits_one_consumer_for_its_busy_holder() -> None:
+    width = 50
+    runtime = _real_runtime(FakeRegistry())
+    _, ids = asyncio.run(_register(runtime, _fanout(width)))
+    train = ids["train"]
+    assert pop_ready(runtime) == train
+    record_dispatch(runtime, train, "wkr-h", "dsp-1")
+    runtime.mark_started(train, "wkr-h", {}, now_iso())
+    payload = result_payload(runtime._results, train, {"ok": True}, "org")
+    manifest = TreeManifest.of(
+        [TreeMember("w.bin", _WEIGHTS.content_digest, _WEIGHTS.size_bytes)]
+    )
+    stored = runtime._results._store.write(
+        "org", manifest.encode(), media_type=TREE_MEDIA_TYPE
+    )
+    model = _tree("model", _WEIGHTS).model_copy(update={"reference": stored})
+    payload["artifacts"] = [model.model_dump(mode="json")]
+    runtime.mark_succeeded(train, "wkr-h", payload, now_iso(), "dsp-1")
+    registry = mock.Mock()
+    registry.idle_satisfying_pool.return_value = [_worker("wkr-idle")]
+    registry.satisfying_workers.return_value = [_worker("wkr-idle"), _worker("wkr-h")]
+    registry.publish_task.return_value = 1
+    registry.get_worker.side_effect = lambda worker_id: _worker(worker_id).model_copy(
+        update={"status": WorkerStatus.BUSY}
+    )
+    registry.is_worker_stale.return_value = False
+    registry.is_cordoned.return_value = False
+    registry.reservation.return_value = None
+    dispatcher = Dispatcher(
+        runtime=runtime,
+        worker_registry=registry,
+        logger=logging.getLogger("holder-preference"),
+        enable_stage_weight_stickiness=True,
+        content_holders=cast(
+            Any, _Holders({_WEIGHTS.content_digest: [_holder("wkr-h")]})
+        ),
+        worker_selection_strategy="first_fit",
+    )
+    commits = 0
+    commit = runtime._committer.commit_locked
+
+    def counting(*task_ids: str, **kwargs: Any) -> None:
+        nonlocal commits
+        commits += 1
+        commit(*task_ids, **kwargs)
+
+    passes: list[bool] = []
+    dispatch_once = dispatcher.dispatch_once
+    stop = threading.Event()
+    window = 1.5
+
+    def attempt(task_id: str) -> bool:
+        passes.append(placed := dispatch_once(task_id))
+        return placed
+
+    timer = threading.Timer(window, stop.set)
+    with (
+        mock.patch.object(runtime._committer, "commit_locked", counting),
+        mock.patch.object(dispatcher, "dispatch_once", attempt),
+    ):
+        timer.start()
+        dispatcher.dispatch_loop(stop, poll_interval=0.01)
+
+    assert passes[:width].count(False) == 1
+    assert registry.publish_task.call_count == width - 1
+    rechecks = window / dispatcher_base._HOLDER_RECHECK_SEC + 2
+    assert len(passes) <= width + rechecks
+    assert passes.count(False) <= rechecks
+    assert commits <= 2 * width + rechecks

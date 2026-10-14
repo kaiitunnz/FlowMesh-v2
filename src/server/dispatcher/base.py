@@ -57,7 +57,6 @@ from ..task.credentials import credential_merge_key
 from ..task.metadata import extract_model_dataset_names
 from ..task.models import (
     SERVE_TASK_TYPES,
-    SETTLING_TASK_STATUSES,
     DispatchEnd,
     PublishGate,
     TaskRecord,
@@ -153,6 +152,10 @@ class Dispatcher:
         # closes, and whether it ended early, so a consumer never waits twice for one
         # settle.
         self._holder_graces: dict[tuple[str, str, str], tuple[float, bool]] = {}
+        # The one consumer waiting for each holder of a producer settle; the holder
+        # can take only one of them.
+        self._holder_waiters: dict[tuple[str, str, str], str] = {}
+        self._graces_pruned_at = 0.0
         self._worker_registry = worker_registry
         self._content_access = content_access
         self._logger = logger
@@ -1442,16 +1445,12 @@ class Dispatcher:
         A consumer waits at most ``HOLDER_GRACE_SEC`` from its first wait for one
         producer settle, and once its wait ends, when none of that producer's
         artifacts is still settling on the worker, it never waits for that settle
-        again.
+        again. Only one consumer at a time waits for one holder of one settle; the
+        others are placed at once.
         """
         if self._content_holders is None:
             return False
-        self._holder_graces = {
-            key: grace
-            for key, grace in self._holder_graces.items()
-            if (consumer := self._runtime.get_record(key[0])) is not None
-            and consumer.status not in SETTLING_TASK_STATUSES
-        }
+        self._prune_holder_graces(now)
         try:
             found = self._upstream_artifact_producers(task_id)
         except Exception:
@@ -1478,6 +1477,15 @@ class Dispatcher:
                 closes, ended = grace
                 if ended or now >= closes:
                     continue
+            slot = (producer, key[2], worker_id)
+            waiter = self._holder_waiters.get(slot)
+            if (
+                waiter is not None
+                and waiter != task_id
+                and self._waiting((waiter, producer, key[2]), now)
+            ):
+                self._holder_graces[key] = (now + HOLDER_GRACE_SEC, True)
+                continue
             if candidates is None:
                 candidates = waitable()
             settling = worker_id in candidates and any(
@@ -1498,8 +1506,31 @@ class Dispatcher:
                 continue
             if grace is None:
                 self._holder_graces[key] = (now + HOLDER_GRACE_SEC, False)
+            self._holder_waiters[slot] = task_id
             return True
         return False
+
+    def _waiting(self, key: tuple[str, str, str], now: float) -> bool:
+        """Whether the grace under ``key`` is open: neither ended nor closed."""
+        grace = self._holder_graces.get(key)
+        return grace is not None and not grace[1] and now < grace[0]
+
+    def _prune_holder_graces(self, now: float) -> None:
+        """Drop graces whose window has closed, at most once per window.
+
+        A closed grace is never reopened: its producer's own window has passed too.
+        """
+        if now - self._graces_pruned_at < HOLDER_GRACE_SEC:
+            return
+        self._graces_pruned_at = now
+        self._holder_graces = {
+            key: grace for key, grace in self._holder_graces.items() if now < grace[0]
+        }
+        self._holder_waiters = {
+            slot: waiter
+            for slot, waiter in self._holder_waiters.items()
+            if (waiter, slot[0], slot[1]) in self._holder_graces
+        }
 
     def _waitable_workers(
         self,
