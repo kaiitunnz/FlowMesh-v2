@@ -237,6 +237,20 @@ class TestResultArtifacts:
         assert '"revision": "step-2"' in result.stdout
 
     @patch("flowmesh_cli.commands.result.FlowMesh")
+    def test_a_fetch_naming_a_revision_needs_an_output(
+        self, mock_hc: MagicMock
+    ) -> None:
+        mock_hc.return_value = _mock_client()
+
+        result = runner.invoke(
+            _app(), ["result", "fetch", "t-1", "--revision", "step-2"]
+        )
+
+        assert result.exit_code == 2
+        assert "--revision" in result.stderr
+        mock_hc.assert_not_called()
+
+    @patch("flowmesh_cli.commands.result.FlowMesh")
     def test_downloads_files_at_a_revision(
         self, mock_hc: MagicMock, tmp_path: Path
     ) -> None:
