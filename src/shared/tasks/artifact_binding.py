@@ -149,6 +149,30 @@ def resolve_artifact_input(
     return binding, inner
 
 
+MODEL_ARTIFACT_NAMES = ("final_model", "final_lora")
+
+
+def model_artifact(
+    bindings: dict[tuple[str, str], ArtifactBinding], producer: str
+) -> ArtifactBinding:
+    """The model ``producer`` published: its ``final_model`` or ``final_lora`` tree.
+
+    Raises ``ValueError`` when its final set holds neither or both.
+    """
+    found = [
+        binding
+        for name in MODEL_ARTIFACT_NAMES
+        if (binding := bindings.get((FINAL_REVISION, name))) is not None
+        and binding.kind is ArtifactKind.TREE
+    ]
+    if len(found) != 1:
+        held = " and ".join(binding.name for binding in found) or "no model"
+        raise ValueError(
+            f"task {producer} published {held}; name the artifact to load by filename"
+        )
+    return found[0]
+
+
 ARTIFACT_REF_SCHEME = "flowmesh-artifact:"
 _TOKEN = re.compile(r"flowmesh-artifact:([0-9]+)")
 

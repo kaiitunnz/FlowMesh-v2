@@ -31,6 +31,7 @@ from shared.tasks import (
 from shared.tasks.artifact_binding import (
     ArtifactBinding,
     ArtifactInputs,
+    model_artifact,
     resolve_artifact_input,
 )
 from shared.tasks.placeholders import PLACEHOLDER_PATTERN
@@ -40,6 +41,7 @@ from shared.tasks.specs import (
     SSHSpecStrict,
     SSHSpecTemplate,
 )
+from shared.tasks.specs.common import ModelSpecStrict
 from shared.tasks.worker_message import WorkerTaskMessage
 from shared.telemetry.semconv import ControlPlaneStage, ControlPlaneWindow
 from shared.utils.ids import new_dispatch_id
@@ -78,6 +80,11 @@ _NO_WORKER_BACKOFF_SEC = 0.5
 _YIELD_REQUEST_INTERVAL_SEC = 2.0
 _OWNER_WAIT_LOG_SEC = 30.0
 _ERROR_BACKOFF_SEC = 1.0
+# What a rendered checkpoint load drops: the names it was given by, and a source type
+# and local path the hydrated token replaces.
+_RENDERED_LOAD_KEYS = frozenset(
+    {"task_id", "taskId", "filename", "base_url", "type", "path", "uri"}
+)
 
 
 class StageReferenceNotReady(Exception):
@@ -1511,35 +1518,74 @@ class Dispatcher:
         task: TaskEnvelopeStrict,
         artifact_inputs: ArtifactInputs,
     ) -> TaskEnvelopeStrict:
-        """The task with a checkpoint it loads by ``task_id`` and ``filename`` named
-        by the token of that task's published artifact, which its worker hydrates."""
-        checkpoint = getattr(task.spec, "checkpoint", None)
-        if not isinstance(checkpoint, dict):
-            return task
-        load = checkpoint.get("load")
-        if (
-            not isinstance(load, dict)
-            or load.get("url")
-            or not (producer := load.get("task_id"))
-            or not (filename := load.get("filename"))
+        """The task with each model it loads by task id named by the token of that
+        task's published artifact, which its worker hydrates.
+
+        A ``checkpoint.load`` naming ``task_id`` (or ``taskId``) loads its ``filename``,
+        or the producer's model when it names none; a LoRA adapter naming ``task_id``
+        loads the producer's model. A load with a ``url`` or ``base_url`` is fetched as
+        it names.
+        """
+        spec = task.spec
+        update: dict[str, Any] = {}
+        checkpoint = getattr(spec, "checkpoint", None)
+        if isinstance(checkpoint, dict) and isinstance(
+            load := checkpoint.get("load"), dict
         ):
+            if (
+                not load.get("url")
+                and not load.get("base_url")
+                and (producer := load.get("task_id") or load.get("taskId"))
+            ):
+                binding, inner = self._producer_model(
+                    record, str(producer), load.get("filename")
+                )
+                rendered = {
+                    key: value
+                    for key, value in load.items()
+                    if key not in _RENDERED_LOAD_KEYS
+                }
+                rendered["url"] = artifact_inputs.token(binding, inner)
+                update["checkpoint"] = {**checkpoint, "load": rendered}
+        if isinstance(spec, ModelSpecStrict) and spec.model and spec.model.adapters:
+            adapters = [
+                (
+                    adapter.model_copy(
+                        update={
+                            "task_id": None,
+                            "url": artifact_inputs.token(
+                                *self._producer_model(record, adapter.task_id, None)
+                            ),
+                        }
+                    )
+                    if adapter.task_id and not adapter.url and not adapter.path
+                    else adapter
+                )
+                for adapter in spec.model.adapters
+            ]
+            if adapters != spec.model.adapters:
+                update["model"] = spec.model.model_copy(update={"adapters": adapters})
+        if not update:
             return task
-        bindings = self._runtime.final_artifacts(str(producer))
-        found = resolve_artifact_input(bindings, str(filename))
-        if found is None or found[0].reference.authorization_scope != record.org_id:
-            raise ValueError(
-                f"task {producer} published no artifact named {filename!r}"
-            )
-        rendered = {
-            key: value
-            for key, value in load.items()
-            if key not in ("task_id", "filename", "base_url")
-        }
-        rendered["url"] = artifact_inputs.token(*found)
-        spec = task.spec.model_copy(
-            update={"checkpoint": {**checkpoint, "load": rendered}}
-        )
-        return task.model_copy(update={"spec": spec})
+        return task.model_copy(update={"spec": spec.model_copy(update=update)})
+
+    def _producer_model(
+        self, record: TaskRecord, producer: str, filename: Any
+    ) -> tuple[ArtifactBinding, str]:
+        """The published artifact a load by ``producer``'s task id names, in the
+        consumer's own organization."""
+        bindings = self._runtime.final_artifacts(producer)
+        if filename:
+            found = resolve_artifact_input(bindings, str(filename))
+            if found is None:
+                raise ValueError(
+                    f"task {producer} published no artifact named {filename!r}"
+                )
+        else:
+            found = model_artifact(bindings, producer), ""
+        if found[0].reference.authorization_scope != record.org_id:
+            raise ValueError(f"task {producer} published no artifact to load")
+        return found
 
     def _upstream_artifacts(
         self, bindings: Iterable[ResultBinding]

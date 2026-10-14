@@ -55,6 +55,15 @@ final publications the dispatch carries, through the worker's content cache, a p
 copy or the shared store, never the root. A ref to a path the producer did not publish
 fails the task as `input_unreadable`.
 
+A model a spec loads by another task's id renders the same way. `checkpoint.load` with
+`task_id` (or `taskId`) loads that task's published `filename`, or its model — its
+`final_model` or `final_lora` tree — when it names none; a LoRA adapter with `task_id`
+loads the producer's model. A producer that published neither or both, or nothing under
+`filename`, fails the task at dispatch. `checkpoint.load.base_url` with `task_id` and
+`filename` fetches that artifact from another deployment's download route instead. A
+checkpoint a spec names that does not resolve fails the task; vLLM never starts from the
+base model in its place.
+
 An inference producer reports every item with its `index`, `prompt` and `output`, or its
 task fails before the result is stored; stored results read through the tolerant
 `InferenceItem`.

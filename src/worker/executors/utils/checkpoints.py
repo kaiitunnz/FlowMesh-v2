@@ -5,7 +5,7 @@ import tarfile
 import zipfile
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urljoin, urlparse
 
 import requests
 
@@ -55,44 +55,40 @@ def hydrated_path(value: str) -> Path | None:
 def resolve_checkpoint_load(
     load_cfg: dict[str, Any], out_dir: Path, logger: logging.Logger | None = None
 ) -> Path:
-    source_type = str(load_cfg.get("type", "local")).lower()
-    # Local path hint (works for any source type)
-    hinted_path = load_cfg.get("path")
-    if hinted_path:
+    """The local path a ``checkpoint.load`` names, downloading it when it is a URL.
+
+    A published artifact the worker hydrated resolves whatever ``type`` declares, and
+    ``base_url`` with ``task_id`` and ``filename`` fetches that artifact from another
+    deployment's download route.
+    """
+    log = logger or load_cfg.get("_logger")
+    url = str(load_cfg.get("url") or "")
+    if (local := hydrated_path(url)) is not None:
+        if log:
+            log.info("Using hydrated checkpoint: %s", local)
+        return local
+    if not url and (base_url := load_cfg.get("base_url")):
+        producer = load_cfg.get("task_id") or load_cfg.get("taskId")
+        filename = load_cfg.get("filename")
+        if not (producer and filename):
+            raise ExecutionError(
+                "checkpoint.load.base_url needs the task_id and filename of the "
+                "artifact to fetch"
+            )
+        url = urljoin(
+            str(base_url).rstrip("/") + "/",
+            f"api/v1/results/{quote(str(producer))}/files/{quote(str(filename))}",
+        )
+        load_cfg = {**load_cfg, "url": url, "type": "http"}
+
+    if hinted_path := load_cfg.get("path"):
         resolved = Path(str(hinted_path)).expanduser()
         if resolved.exists():
-            log = logger or load_cfg.get("_logger")
             if log:
                 log.info("Resolved checkpoint from local path: %s", resolved)
             return resolved
 
-    task_hint = load_cfg.get("taskId") or load_cfg.get("task_id")
-    if task_hint:
-        task_str = str(task_hint).strip()
-        if task_str:
-            base_dir = (
-                Path(os.getenv("RESULTS_DIR", "").strip() or "./results")
-                .expanduser()
-                .resolve()
-            )
-            artifacts_base = base_dir / task_str / "artifacts"
-            guesses = [
-                artifacts_base / "final_model",
-                artifacts_base / "final_model.tar.gz",
-                artifacts_base / "final_model.bin",
-                artifacts_base / "final_model.safetensors",
-                artifacts_base / "final_model.pt",
-                artifacts_base,
-            ]
-            for candidate in guesses:
-                if candidate.exists():
-                    log = logger or load_cfg.get("_logger")
-                    if log:
-                        log.info(
-                            "Resolved checkpoint from local task cache: %s", candidate
-                        )
-                    return candidate
-
+    source_type = str(load_cfg.get("type", "local")).lower()
     if source_type == "local":
         local_path = load_cfg.get("path") or load_cfg.get("uri")
         if not local_path:
@@ -102,28 +98,18 @@ def resolve_checkpoint_load(
         resolved = Path(str(local_path)).expanduser()
         if not resolved.exists():
             raise ExecutionError(f"Checkpoint path {resolved} not found")
-        log = logger or load_cfg.get("_logger")
         if log:
             log.info("Using local checkpoint path: %s", resolved)
         return resolved
 
     if source_type == "http":
-        url = load_cfg.get("url")
-        if url and (local := hydrated_path(str(url))) is not None:
-            log = logger or load_cfg.get("_logger")
-            if log:
-                log.info("Using hydrated checkpoint: %s", local)
-            return local
         if not url:
             raise ExecutionError(
-                "checkpoint.load needs a url, or the task_id and filename of a "
-                "published artifact"
+                "checkpoint.load needs a url, or the task_id of a task that published "
+                "the checkpoint"
             )
-        log = logger or load_cfg.get("_logger")
         if log:
-            log.info(
-                "Downloading checkpoint from %s", redact_url(str(load_cfg.get("url")))
-            )
+            log.info("Downloading checkpoint from %s", redact_url(url))
         return download_and_unpack(load_cfg, out_dir)
 
     raise ExecutionError(f"Unsupported checkpoint load type '{source_type}'")

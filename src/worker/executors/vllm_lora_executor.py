@@ -202,33 +202,13 @@ class VLLMLoRAExecutor(VLLMExecutor):
             if path.exists():
                 return self._ensure_or_extract(path, out_dir, name, archive_format)
 
-        if task_id := adapter.task_id:
-            base_dir = (
-                Path(os.getenv("RESULTS_DIR", "").strip() or "./results")
-                .expanduser()
-                .resolve()
-            )
-            artifacts_base = base_dir / str(task_id) / "artifacts"
-            candidates = [
-                artifacts_base / "final_lora",
-                artifacts_base / "final_lora.tar.gz",
-                artifacts_base / "final_model",
-                artifacts_base / "final_model.tar.gz",
-                artifacts_base,
-            ]
-            for candidate in candidates:
-                if candidate.exists():
-                    return self._ensure_or_extract(
-                        candidate, out_dir, name, archive_format
-                    )
-
         if url_value and (hydrated := hydrated_path(url_value)) is not None:
             return self._ensure_or_extract(hydrated, out_dir, name, archive_format)
 
         if not url_value:
             raise ExecutionError(
-                f"LoRA adapter '{name}' must include a valid url "
-                "when path/taskId is missing"
+                f"LoRA adapter '{name}' must include a valid url when its path is "
+                "missing"
             )
 
         download_root = out_dir / "_lora_cache" / name
