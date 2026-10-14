@@ -91,6 +91,15 @@ class ArtifactCatalogStore:
             return None
         return decode_artifact_bindings(task_id, {field: raw}).get((revision, name))
 
+    async def artifact_binding_async(
+        self, task_id: str, revision: str, name: str
+    ) -> ArtifactBinding | None:
+        field = f"{revision}{_SEPARATOR}{name}"
+        (raw,) = await self._rds.asyncio.hash_mget(task_artifacts_key(task_id), [field])
+        if raw is None:
+            return None
+        return decode_artifact_bindings(task_id, {field: raw}).get((revision, name))
+
     async def artifact_bindings_async(
         self, task_id: str, revision: str | None = None
     ) -> ArtifactBindings:

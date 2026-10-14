@@ -376,7 +376,9 @@ def test_unregistering_a_workflow_removes_its_catalogs() -> None:
     assert raw_control(registry).exists(task_artifacts_key(train)) == 0
 
 
-@pytest.mark.parametrize("method", ["artifact_bindings", "artifact_bindings_many"])
+@pytest.mark.parametrize(
+    "method", ["artifact_binding", "artifact_bindings", "artifact_bindings_many"]
+)
 def test_the_catalog_reads_answer_alike_from_a_thread_or_the_loop(
     method: str,
 ) -> None:
@@ -385,9 +387,11 @@ def test_the_catalog_reads_answer_alike_from_a_thread_or_the_loop(
     _, (train, use) = _register(runtime)
     record_dispatch(runtime, train, dispatch_id="dsp-1")
     _succeed(runtime, train, [_tree()], "dsp-1")
-    args: tuple[Any, ...] = (
-        (train,) if method == "artifact_bindings" else ([train, use],)
-    )
+    args: tuple[Any, ...] = {
+        "artifact_binding": (train, "final", "final_model"),
+        "artifact_bindings": (train,),
+        "artifact_bindings_many": ([train, use],),
+    }[method]
 
     sync = getattr(registry, method)(*args)
     via_loop = asyncio.run(getattr(registry, f"{method}_async")(*args))
