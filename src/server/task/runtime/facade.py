@@ -6463,6 +6463,8 @@ class TaskRuntime:
             **{
                 name: value.copy() if isinstance(value, (list, dict)) else value
                 for name, value in record
+                # A time on this process's clock alone, which no restart restores.
+                if name != "succeeded_monotonic"
             },
             **self._derived_locked(task_id, record).info_fields(),
         }
