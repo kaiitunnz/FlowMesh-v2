@@ -240,6 +240,7 @@ if IS_ROOT_NODE:
         control=CONTROL_TRACER,
         tracer=SERVER_TRACER,
         telemetry=config.telemetry,
+        meter=SERVER_METER,
         content_scope_authority=FINALIZATION_INDEX.assign_scope,
         n8n=config.n8n,
     )

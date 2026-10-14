@@ -8,6 +8,8 @@ from typing import Any, cast
 
 import fakeredis
 import pytest
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
 from server.clients.redis import task_artifacts_key
 from server.config import OrchestrationConfig
@@ -56,7 +58,9 @@ def _registry() -> _FlakyRegistry:
     return _FlakyRegistry(fake_redis_client(fakeredis.FakeServer()))
 
 
-def _runtime(registry: WorkflowRegistry, reader: Any = None) -> TaskRuntime:
+def _runtime(
+    registry: WorkflowRegistry, reader: Any = None, meter: Any = None
+) -> TaskRuntime:
     return TaskRuntime(
         registry,
         cast(Any, _WorkerRegistryStub()),
@@ -64,6 +68,7 @@ def _runtime(registry: WorkflowRegistry, reader: Any = None) -> TaskRuntime:
         reader or make_result_reader(),
         logging.getLogger("test.artifact_catalog"),
         credential_vault=InMemoryCredentialVault(),
+        meter=meter,
         redrive=lambda fire, logger: StoreRedriveScheduler(
             fire, logger, run_thread=False
         ),
@@ -248,7 +253,9 @@ def test_a_republished_revision_or_an_archive_over_its_reported_tree_is_accepted
 
 def test_a_conflicting_publication_keeps_the_first() -> None:
     registry = _registry()
-    runtime = _runtime(registry)
+    reader = InMemoryMetricReader()
+    meter = MeterProvider(metric_readers=[reader]).get_meter("test")
+    runtime = _runtime(registry, meter=meter)
     _, (train, _use) = _register(runtime)
     record = runtime._tasks[train]
 
@@ -262,6 +269,20 @@ def test_a_conflicting_publication_keeps_the_first() -> None:
 
     assert len(first) == 1 and again == []
     assert record.artifacts[("final", "final_model")].reference == _ref(b"tree")
+    assert _conflicts(reader) == 1
+
+
+def _conflicts(reader: InMemoryMetricReader) -> int:
+    data = reader.get_metrics_data()
+    assert data is not None
+    return sum(
+        int(point.value)
+        for resource in data.resource_metrics
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+        if metric.name == "flowmesh.artifact.publication_conflicts"
+        for point in metric.data.data_points
+    )
 
 
 def test_a_held_commit_writes_its_artifacts_when_it_lands() -> None:

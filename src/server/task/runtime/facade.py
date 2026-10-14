@@ -11,6 +11,7 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from typing import Any, Final
 
+from opentelemetry.metrics import Meter
 from opentelemetry.trace import Tracer
 from pydantic import ValidationError
 
@@ -436,6 +437,7 @@ class TaskRuntime:
         control: ControlPlaneTracer | None = None,
         tracer: Tracer | None = None,
         telemetry: TelemetryConfig | None = None,
+        meter: Meter | None = None,
         content_scope_authority: Callable[[str, str], None] | None = None,
         n8n: N8nConfig | None = None,
         redrive: Callable[
@@ -529,7 +531,7 @@ class TaskRuntime:
         self._actions = AfterCommitActions()
         self._resident_tasks = ResidentServeTasks(self._tasks)
         self._content_bindings = ContentBindings(
-            self._tasks, self._engines, self._original_deps, self._logger
+            self._tasks, self._engines, self._original_deps, self._logger, meter
         )
         self._agent_inputs = AgentInputs(
             self._content_bindings,

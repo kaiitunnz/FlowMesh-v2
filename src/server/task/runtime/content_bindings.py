@@ -6,6 +6,8 @@ from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from opentelemetry.metrics import Meter, NoOpMeter
+
 from shared.content import ContentReference
 from shared.tasks.artifact_binding import ArtifactBinding, ArtifactKind
 from shared.tasks.result_binding import (
@@ -76,11 +78,18 @@ class ContentBindings:
         engines: dict[str, OrchestrationEngine],
         original_deps: dict[str, set[str]],
         logger: logging.Logger,
+        meter: Meter | None = None,
     ) -> None:
         self._tasks = tasks
         self._engines = engines
         self._original_deps = original_deps
         self._logger = logger
+        self._publication_conflicts = (meter or NoOpMeter("flowmesh")).create_counter(
+            "flowmesh.artifact.publication_conflicts",
+            unit="{publication}",
+            description="Publications refused because their revision and name "
+            "already name other bytes.",
+        )
 
     def consumes_locked(self, record: TaskRecord, reference: ContentReference) -> bool:
         """Whether a task is bound to exactly this object as one of its inputs."""
@@ -363,6 +372,7 @@ class ContentBindings:
                 continue
             if (existing := record.artifacts.get(binding.key)) is not None:
                 if not existing.same_publication(binding):
+                    self._publication_conflicts.add(1)
                     self._logger.warning(
                         "Task %s published %s at %s as %s, which already names %s; "
                         "keeping the first",

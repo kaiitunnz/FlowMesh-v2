@@ -120,6 +120,9 @@ The root server reports the resident fleet per service family — replica count,
 admission slots in use, and claim credit held — alongside the ready-queue depth.
 A deployment with resident capacity disabled reports queue depth alone.
 
+The root server also counts `flowmesh.artifact.publication_conflicts`: each publication
+it refuses because its revision and name already name other bytes.
+
 `GET /api/v1/system/metrics` is unchanged.
 
 ## Storage
