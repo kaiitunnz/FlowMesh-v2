@@ -12,6 +12,7 @@ from shared.network.peer_dial import connect_budget
 from shared.tasks.specs import ModelBindingMode
 from shared.telemetry.config import TelemetryConfig
 from shared.utils.parsing import (
+    content_hydration_enabled,
     parse_bool_env,
     parse_float_env,
     parse_int_env,
@@ -600,7 +601,7 @@ class ContentStoreConfig:
     @classmethod
     def from_env(cls) -> "ContentStoreConfig":
         return cls(
-            hydration_enabled=parse_bool_env("CONTENT_HYDRATION_ENABLED", False),
+            hydration_enabled=content_hydration_enabled(),
             grant_ttl_sec=parse_float_env("CONTENT_HYDRATION_GRANT_TTL_SEC", 60.0),
             holder_record_ttl_sec=parse_float_env("CONTENT_HOLDER_TTL_SEC", 300.0),
             access_grant_ttl_sec=max(

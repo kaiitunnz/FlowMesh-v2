@@ -885,8 +885,9 @@ STACK_ENV_SCHEMA = EnvSchema(
                 ),
                 EnvVar(
                     "CONTENT_HYDRATION_ENABLED",
-                    "false",
-                    description="Cache content on workers and hydrate it between them.",
+                    "",
+                    description="Cache content on workers and hydrate it between "
+                    "them; unset, on with the network plane.",
                     var_type=EnvVarType.BOOL,
                 ),
                 EnvVar(

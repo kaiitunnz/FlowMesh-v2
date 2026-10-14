@@ -15,6 +15,7 @@ from shared.network.peer_dial import connect_budget
 from shared.schemas.worker import SSHBackendName
 from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
 from shared.utils import (
+    content_hydration_enabled,
     parse_bool_env,
     parse_float_env,
     parse_int_env,
@@ -165,7 +166,7 @@ WORKER_RESULTS_DIR: str = (
 )
 WORKER_PRIVATE_STATE_DIR: str = os.getenv("WORKER_PRIVATE_STATE_DIR", "").strip()
 WORKER_CONTENT_DIR: str = os.getenv("WORKER_CONTENT_DIR", "").strip()
-CONTENT_HYDRATION_ENABLED: bool = parse_bool_env("CONTENT_HYDRATION_ENABLED", False)
+CONTENT_HYDRATION_ENABLED: bool = content_hydration_enabled()
 CONTENT_CACHE_TTL_SEC: float = parse_float_env("CONTENT_CACHE_TTL_SEC", 0.0)
 CONTENT_CACHE_MAX_BYTES: int = parse_int_env("CONTENT_CACHE_MAX_BYTES", 0)
 CONTENT_HOLDER_TTL_SEC: float = parse_float_env("CONTENT_HOLDER_TTL_SEC", 300.0)

@@ -24,6 +24,7 @@ from shared.schemas.worker import SSHBackendName, SSHLimits
 from shared.telemetry.config import TelemetryConfig
 from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
 from shared.utils.parsing import (
+    content_hydration_enabled,
     parse_bool_env,
     parse_float_env,
     parse_int_env,
@@ -307,9 +308,7 @@ class WorkerConfig:
             results_dir=results_dir,
             private_state_dir=private_state_dir,
             content_dir=content_dir,
-            content_hydration_enabled=parse_bool_env(
-                "CONTENT_HYDRATION_ENABLED", False
-            ),
+            content_hydration_enabled=content_hydration_enabled(),
             content_cache_ttl_sec=parse_float_env("CONTENT_CACHE_TTL_SEC", 0.0),
             content_cache_max_bytes=parse_int_env("CONTENT_CACHE_MAX_BYTES", 0),
             content_holder_ttl_sec=parse_float_env("CONTENT_HOLDER_TTL_SEC", 300.0),

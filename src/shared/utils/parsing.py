@@ -1,5 +1,6 @@
 import os
 import re
+from collections.abc import Mapping
 from typing import Any, overload
 
 from pydantic import SecretStr
@@ -192,6 +193,24 @@ def parse_bool_env(name: str, default: bool | None = None) -> bool | None: ...
 
 def parse_bool_env(name: str, default: bool | None = None) -> bool | None:
     return to_bool(os.getenv(name), default=default)
+
+
+def content_hydration_enabled(environ: Mapping[str, str] | None = None) -> bool:
+    """Whether workers keep the content cache and hydrate content between them: as
+    ``CONTENT_HYDRATION_ENABLED`` says, and when it is unset, whenever the network
+    plane that carries the transfers is on.
+
+    Raises ``ValueError`` when it is turned on with the network plane off.
+    """
+    env = os.environ if environ is None else environ
+    plane = to_bool(env.get("NETWORK_PLANE_ENABLED"), default=True)
+    explicit = to_bool(env.get("CONTENT_HYDRATION_ENABLED"))
+    if explicit and not plane:
+        raise ValueError(
+            "CONTENT_HYDRATION_ENABLED requires NETWORK_PLANE_ENABLED: a content "
+            "transfer is carried by the network plane's relay"
+        )
+    return plane if explicit is None else explicit
 
 
 def parse_secret_env(name: str) -> SecretStr | None:
