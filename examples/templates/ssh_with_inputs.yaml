@@ -15,11 +15,6 @@ spec:
           items:
             - ssh result mounting smoke test
             - inspect /mnt/flowmesh/inputs/preprocess/results.json from the SSH session
-        output:
-          artifacts:
-            - results.json
-            - logs
-            - artifacts
 
     - name: annotate
       dependsOn: [preprocess]
@@ -40,8 +35,3 @@ spec:
           maxBytes: 1073741824
         env:
           FLOWMESH_TEST_HINT: Write a file to /mnt/flowmesh/output and verify the upstream mount is read-only
-        output:
-          artifacts:
-            - results.json
-            - logs
-            - artifacts

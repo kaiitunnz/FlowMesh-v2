@@ -45,9 +45,3 @@ spec:
     items:
       - What is Qdrant?
       - How does server-side embedding work in Qdrant?
-
-  output:
-    artifacts:
-      - results.json
-      - logs
-      - artifacts

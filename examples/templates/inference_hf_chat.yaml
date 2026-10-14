@@ -64,9 +64,3 @@ spec:
       required_fields:
         - row_id
         - answer
-
-  output:
-    artifacts:
-      - results.json
-      - artifacts
-      - logs

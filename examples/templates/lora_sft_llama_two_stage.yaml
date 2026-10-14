@@ -37,11 +37,6 @@ spec:
     task_type: CAUSAL_LM
     use_rslora: false
 
-  output:
-    artifacts:
-      - results.json
-      - final_lora
-
   stages:
     - name: gsm8k-stage
       spec:

@@ -31,8 +31,3 @@ spec:
     num_inference_steps: 100
     seed: 42
     negative_prompt: Low quality.
-
-  output:
-    artifacts:
-      - results.json
-      - artifacts/

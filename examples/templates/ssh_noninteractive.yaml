@@ -16,8 +16,3 @@ spec:
     maxBytes: 1073741824
   env:
     MY_CUSTOM_VAR: hello
-  output:
-    artifacts:
-      - results.json
-      - logs
-      - artifacts

@@ -38,7 +38,3 @@ spec:
       gpu:
         type: any
         count: 0
-
-  output:
-    artifacts:
-      - results.json

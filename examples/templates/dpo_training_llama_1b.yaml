@@ -61,8 +61,3 @@ spec:
     fp16: false
     bf16: true
     
-  output:
-    artifacts:
-      - results.json
-      - logs
-      - artifacts/checkpoints

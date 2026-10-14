@@ -52,7 +52,3 @@ spec:
                 - label: Challenges insight
                   node: branch-b
                   path: "items[0].output"
-
-  output:
-    artifacts:
-      - results.json

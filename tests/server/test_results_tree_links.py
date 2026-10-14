@@ -16,7 +16,7 @@ from fastapi import HTTPException, status
 
 from server.routers.v1 import results as results_router
 from server.services.log_archiver import TaskLogArchiver
-from shared.utils.manifest import prepare_output_dir, scratch_dir, sync_manifest
+from shared.utils.manifest import prepare_output_dir, scratch_dir
 from tests.server.asgi_responses import serve
 
 _LOGGER = logging.getLogger("test.results_tree_links")
@@ -86,23 +86,6 @@ def test_a_scratch_directory_is_never_a_link(results: Path, outside: _Outside) -
     outside.assert_untouched()
 
 
-def test_a_manifest_reads_and_writes_no_link(results: Path, outside: _Outside) -> None:
-    task_dir = _task(results, "logs", "artifacts")
-    (task_dir / "artifacts" / "out.bin").symlink_to(outside.file)
-    (task_dir / "artifacts" / "nested").symlink_to(outside.dir)
-    (task_dir / "leak").symlink_to(outside.dir)
-    (task_dir / "manifest.json").symlink_to(outside.file)
-
-    manifest = sync_manifest(task_dir, "tsk-1", ["artifacts/out.bin", "nested/x"])
-
-    entries = {entry["path"]: entry for entry in manifest["entries"]}
-    assert entries["artifacts/out.bin"]["status"] == "missing"
-    assert entries["artifacts"]["file_count"] == 0
-    assert "leak" not in entries
-    assert not (task_dir / "manifest.json").is_symlink()
-    outside.assert_untouched()
-
-
 @pytest.mark.parametrize("linked", ["logs", "logs/logs.jsonl"])
 def test_the_log_archiver_appends_through_no_link(
     results: Path, outside: _Outside, linked: str
@@ -121,7 +104,7 @@ def test_the_log_archiver_appends_through_no_link(
     archiver._ensure_task("tsk-1", 0.0)
 
     archiver._flush_task("tsk-1", [("1-0", {"payload": '{"message": "hi"}'})], 0.0)
-    archiver._finalize_manifest("tsk-1", archiver._states["tsk-1"], 0.0)
+    archiver._finalize_logs("tsk-1", archiver._states["tsk-1"], 0.0)
 
     outside.assert_untouched()
     assert archiver.archived("tsk-1")

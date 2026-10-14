@@ -49,9 +49,3 @@ spec:
                 path: "items[0].output"
               - node: echo-b
                 path: "items[0].output"
-
-  output:
-    artifacts:
-      - results.json
-      - logs
-      - artifacts

@@ -66,11 +66,6 @@ spec:
           temperature: 0.5
           top_p: 0.9
 
-        output:
-          artifacts:
-            - results.json
-            - logs
-
     # ---------- Stage 2: Refine answer (strong GPU model, edits the draft) ----------
     - name: refine-gpu
       spec:
@@ -98,11 +93,6 @@ spec:
             and well-structured solution. Remove speculation and keep factual grounding.
           temperature: 0.6
           top_p: 0.95
-
-        output:
-          artifacts:
-            - results.json
-            - logs
 
     # ---------- Stage 3: Format output (produce strict JSON) ----------
     - name: format-json
@@ -136,8 +126,3 @@ spec:
             Output ONLY valid JSON with double-quoted keys/strings and no trailing commas.
           temperature: 0.2
           top_p: 0.9
-
-        output:
-          artifacts:
-            - results.json
-            - logs

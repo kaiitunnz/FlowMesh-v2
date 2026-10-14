@@ -85,7 +85,7 @@ def test_finalizing_shares_the_logs_directory_it_writes_into(
     archiver: TaskLogArchiver,
 ) -> None:
     archiver._ensure_task("tsk-1", 0.0)
-    assert archiver._finalize_manifest("tsk-1", archiver._states["tsk-1"], 0.0)
+    assert archiver._finalize_logs("tsk-1", archiver._states["tsk-1"], 0.0)
 
     logs_path = archiver._base_dir("tsk-1") / "logs" / "logs.jsonl"
     assert logs_path.is_file()
@@ -206,7 +206,6 @@ def test_a_task_whose_log_file_is_not_a_file_never_stops_another_tasks_archiving
 
     task_b = archiver._base_dir("tsk-b")
     assert (task_b / "logs" / "logs.jsonl").read_text() == '{"task": "tsk-b"}\n'
-    assert (task_b / "manifest.json").is_file()
 
 
 class _Streams:
@@ -455,7 +454,7 @@ def test_a_finalized_task_without_lines_reads_archived_after_a_restart(
     archiver, streams = _streaming_archiver(tmp_path, {"tsk-1": TaskStatus.DONE})
     with patch.object(log_archiver.time, "sleep"):
         archiver._tick()
-    assert (archiver._base_dir("tsk-1") / "manifest.json").is_file()
+    assert (archiver._base_dir("tsk-1") / "logs" / "logs.jsonl").is_file()
     assert not streams.checkpoints
 
     restarted, _ = _streaming_archiver(
@@ -463,7 +462,7 @@ def test_a_finalized_task_without_lines_reads_archived_after_a_restart(
     )
     with (
         patch.object(log_archiver.time, "sleep"),
-        patch.object(restarted, "_finalize_manifest") as finalize,
+        patch.object(restarted, "_finalize_logs") as finalize,
     ):
         restarted._tick()
 
@@ -649,10 +648,6 @@ class _Crash(BaseException):
     """A process dying mid-call: nothing the archiver catches."""
 
 
-def _manifest(archiver: TaskLogArchiver, task_id: str) -> Path:
-    return archiver._base_dir(task_id) / "manifest.json"
-
-
 def test_a_lineless_task_crashing_inside_finalize_finalizes_after_restart(
     tmp_path: Path,
 ) -> None:
@@ -663,11 +658,12 @@ def test_a_lineless_task_crashing_inside_finalize_finalizes_after_restart(
 
     with (
         patch.object(log_archiver.time, "sleep"),
-        patch.object(log_archiver, "sync_manifest", crash),
+        patch.object(streams.redis, "delete", side_effect=crash),
         pytest.raises(_Crash),
     ):
         archiver._tick()
     assert (archiver._base_dir("tsk-1") / "logs" / "logs.jsonl").exists()
+    assert streams.checkpoints
 
     restarted, _ = _streaming_archiver(
         tmp_path, {"tsk-1": TaskStatus.DONE}, streams=streams
@@ -675,35 +671,36 @@ def test_a_lineless_task_crashing_inside_finalize_finalizes_after_restart(
     with patch.object(log_archiver.time, "sleep"):
         restarted._tick()
 
-    assert _manifest(restarted, "tsk-1").is_file()
+    assert not streams.checkpoints
     assert restarted.archived("tsk-1") is True
 
 
-def test_a_failed_manifest_write_keeps_its_checkpoint_and_retries(
+def test_a_failed_log_finalize_keeps_its_checkpoint_and_retries(
     tmp_path: Path,
 ) -> None:
     archiver, streams = _streaming_archiver(tmp_path, {"tsk-1": TaskStatus.DONE})
-    real_sync = log_archiver.sync_manifest
+    real_append = log_archiver.open_append
     failures = [OSError(28, "No space left on device")]
 
-    def flaky(*args: Any, **kwargs: Any) -> None:
+    def flaky(*args: Any, **kwargs: Any) -> Any:
         if failures:
             raise failures.pop()
-        real_sync(*args, **kwargs)
+        return real_append(*args, **kwargs)
 
     clock = [1000.0]
     with (
         patch.object(log_archiver.time, "sleep"),
         patch.object(log_archiver.time, "time", lambda: clock[0]),
-        patch.object(log_archiver, "sync_manifest", flaky),
+        patch.object(log_archiver, "open_append", flaky),
     ):
         archiver._tick()
-        assert not _manifest(archiver, "tsk-1").exists()
+        assert streams.checkpoints
         assert archiver.archived("tsk-1") is False
         clock[0] += 60
         archiver._tick()
 
-    assert _manifest(archiver, "tsk-1").is_file()
+    assert (archiver._base_dir("tsk-1") / "logs" / "logs.jsonl").is_file()
+    assert not streams.checkpoints
     assert archiver.archived("tsk-1") is True
 
 

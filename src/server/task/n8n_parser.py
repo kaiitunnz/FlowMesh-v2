@@ -150,9 +150,6 @@ def translate_n8n_workflow(
                 spec["inference"] = {}
             spec["inference"]["system_prompt"] = prompt_text
 
-        spec["output"] = _default_output_spec(
-            spec["taskType"],
-        )
         node_specs[name] = spec
 
     for node in api_chain_nodes + openai_nodes:
@@ -167,7 +164,6 @@ def translate_n8n_workflow(
                 node_task_types,
                 credentials,
             ),
-            "output": _default_api_output_spec(),
         }
         node_specs[name] = spec
 
@@ -564,22 +560,3 @@ def _node_dependencies(
         else:
             parents.extend(_node_dependencies(source_name, incoming, node_names))
     return parents
-
-
-def _default_api_output_spec() -> dict[str, Any]:
-    return {"artifacts": ["results.json"]}
-
-
-def _default_output_spec(task_type: str) -> dict[str, Any]:
-    return {"artifacts": _default_artifacts(task_type)}
-
-
-def _default_artifacts(task_type: str) -> list[str]:
-    if task_type == "inference":
-        return ["results.json", "logs"]
-    elif task_type == "sft":
-        return ["results.json", "logs", "final_model"]
-    else:
-        raise ValueError(
-            f"Cannot determine default artifacts for unknown taskType '{task_type}'"
-        )

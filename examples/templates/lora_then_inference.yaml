@@ -62,11 +62,6 @@ spec:
           packing: false
           fp16: false
           bf16: true
-        output:
-          artifacts:
-            - results.json
-            - final_lora
-            - logs
 
     - name: gsm8k-inference
       spec:
@@ -89,7 +84,3 @@ spec:
           max_tokens: 256
           temperature: 0.2
           top_p: 0.9
-        output:
-          artifacts:
-            - results.json
-            - logs

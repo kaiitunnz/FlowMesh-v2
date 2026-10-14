@@ -24,11 +24,6 @@ spec:
       type: huggingface
       identifier: meta-llama/Llama-3.2-1B-Instruct
 
-  output:
-    artifacts:
-      - results.json
-      - final_model
-
   stages:
     - name: gsm8k-stage
       spec:

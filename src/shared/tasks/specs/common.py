@@ -19,8 +19,6 @@ from ..components import (
     AdapterConfigTemplate,
     ModelConfig,
     ModelConfigTemplate,
-    OutputSpec,
-    OutputSpecTemplate,
     PostprocessSpec,
     PostprocessSpecTemplate,
     ResourcesSpec,
@@ -180,11 +178,11 @@ def _merge_key_in(key: str | None, context: dict[str, Any]) -> str | None:
 
 
 class TaskSpecStrictBase(StrictBaseModel, RetiredFieldsModel):
+    retired_fields: ClassVar[tuple[str, ...]] = ("output",)
     # The fields a submission may carry an inline credential in; extended by each
     # spec that adds one.
     credential_fields: ClassVar[tuple[str, ...]] = ()
     resources: ResourcesSpec | None = None
-    output: OutputSpec | None = None
     dependsOn: list[str] | None = None
     condition: ConditionSpec | None = None
     shard: ShardSpec | None = None
@@ -208,15 +206,6 @@ class TaskSpecStrictBase(StrictBaseModel, RetiredFieldsModel):
     def _check_condition_depends_on(self) -> "TaskSpecStrictBase":
         _validate_condition_depends_on(self)
         return self
-
-    def get_artifacts(self) -> list[str]:
-        output = self.output
-        if output is None:
-            return []
-        artifacts = output.artifacts
-        if artifacts is None:
-            return []
-        return artifacts.copy()
 
     def validate_dispatchable(self) -> None:
         """Validate spec-internal invariants for a runnable task.
@@ -256,11 +245,11 @@ class TaskSpecStrictBase(StrictBaseModel, RetiredFieldsModel):
 
 
 class TaskSpecTemplateBase(TemplateBaseModel, RetiredFieldsModel):
+    retired_fields: ClassVar[tuple[str, ...]] = ("output",)
     # The fields a submission may carry an inline credential in; extended by each
     # spec that adds one.
     credential_fields: ClassVar[tuple[str, ...]] = ()
     resources: ResourcesSpec | None = None
-    output: OutputSpecTemplate | None = None
     dependsOn: list[str] | None = None
     condition: ConditionSpec | None = None
     shard: ShardSpecTemplate | None = None
@@ -273,15 +262,6 @@ class TaskSpecTemplateBase(TemplateBaseModel, RetiredFieldsModel):
     def _check_condition_depends_on(self) -> "TaskSpecTemplateBase":
         _validate_condition_depends_on(self)
         return self
-
-    def get_artifacts(self) -> list[str]:
-        output = self.output
-        if output is None:
-            return []
-        artifacts = output.artifacts
-        if artifacts is None:
-            return []
-        return artifacts.copy()
 
     def validate_dispatchable(self) -> None:
         """Validate spec-internal invariants for a runnable task.

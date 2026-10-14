@@ -53,9 +53,3 @@ spec:
     do_sample: true
     repetition_penalty: 1.0
     # stop: ["</s>"]               # optional: post-process stop strings
-
-  # Output configuration (current worker writes locally to RESULTS_DIR/<task_id>/results.json)
-  output:
-    artifacts:
-      - results.json
-      - logs

@@ -31,10 +31,6 @@ spec:
             type: list
             items:
               - https://images.unsplash.com/photo-1617298452285-ceb241df5c67?w=1920
-          output:
-            artifacts:
-              - results.json
-              - visual_embeddings.pt
 
       - name: vlm-inference
         dependsOn: ["image-embedding"]
@@ -66,7 +62,3 @@ spec:
           inference:
             max_tokens: 512
             temperature: 0.1
-
-          output:
-            artifacts:
-              - results.json

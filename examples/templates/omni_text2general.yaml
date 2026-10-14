@@ -44,8 +44,3 @@ spec:
       "2":
         devices: "0"
         gpu_memory_utilization: 0.1
-
-  output:
-    artifacts:
-      - results.json
-      - artifacts/

@@ -82,6 +82,3 @@ spec:
     items:
       - Explain quantum entanglement in exactly three sentences.
       - Write a haiku about machine learning.
-  output:
-    artifacts:
-      - results.json

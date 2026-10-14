@@ -45,10 +45,3 @@ spec:
     gradient_checkpointing: false
     fp16: false
     bf16: true
-
-  output:
-    artifacts:
-      - results.json
-      - logs
-      - artifacts/checkpoints
-      - artifacts/final_model

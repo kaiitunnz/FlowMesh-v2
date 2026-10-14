@@ -83,7 +83,3 @@ spec:
             items:
               - node: echo-upstream
                 path: "items[0].output"
-
-  output:
-    artifacts:
-      - results.json

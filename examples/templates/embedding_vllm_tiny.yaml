@@ -32,9 +32,3 @@ spec:
       - "FlowMesh runs LLM agentic workflows on distributed GPU workers."
       - "vLLM serves embedding models in pooling mode."
       - "The quick brown fox jumps over the lazy dog."
-
-  output:
-    artifacts:
-      - results.json
-      - embeddings.safetensors
-      - logs

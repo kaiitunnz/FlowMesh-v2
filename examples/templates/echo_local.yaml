@@ -17,8 +17,3 @@ spec:
     items:
       - hello echo
       - second message
-  output:
-    artifacts:
-      - results.json
-      - logs
-      - artifacts

@@ -37,8 +37,3 @@ spec:
     items:
       - A futuristic city with flying cars at night
       - A serene mountain lake reflecting the sunset
-
-  output:
-    artifacts:
-      - results.json
-      - images/

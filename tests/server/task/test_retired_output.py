@@ -1,5 +1,5 @@
-"""A task names no output destination: a submission naming one is refused, and a task
-stored naming one still loads and runs."""
+"""A task spec carries no output block: a submission naming one is refused, and a task
+stored with one, a destination included, still loads and runs."""
 
 import asyncio
 import json
@@ -23,10 +23,10 @@ metadata: {name: retired}
 spec:
   graph:
     nodes:
-      - {name: a, spec: {taskType: echo, output: {artifacts: [results.json]}}}
+      - {name: a, spec: {taskType: echo}}
       - name: b
         dependsOn: [a]
-        spec: {taskType: echo, output: {artifacts: [results.json]}}
+        spec: {taskType: echo}
 """
 
 _V2 = """
@@ -40,13 +40,11 @@ spec:
         spec:
           taskType: echo
           data: {type: list, items: [x]}
-          output: {artifacts: [results.json]}
       - name: b
         dependsOn: [a]
         spec:
           taskType: echo
           data: {type: list, items: [y]}
-          output: {artifacts: [results.json]}
 """
 
 _DESTINATION = {"type": "http", "headers": {"X-Api-Key": "msk-stored"}}
@@ -54,14 +52,21 @@ _POINTER = "/output/destination/headers/X-Api-Key"
 
 
 @pytest.mark.parametrize("text", [_V1, _V2])
-def test_a_submission_naming_an_output_destination_is_refused(text: str) -> None:
-    named = text.replace(
-        "output: {artifacts: [results.json]}",
-        "output: {destination: {type: http}, artifacts: [results.json]}",
-    )
+@pytest.mark.parametrize(
+    "output",
+    ["{artifacts: [results.json]}", "{destination: {type: http}}"],
+)
+def test_a_submission_naming_an_output_block_is_refused(text: str, output: str) -> None:
+    named = text.replace("taskType: echo", f"taskType: echo, output: {output}", 1)
+    if named == text:
+        named = text.replace(
+            "          taskType: echo\n",
+            f"          taskType: echo\n          output: {output}\n",
+            1,
+        )
     runtime = _runtime(_registry())
 
-    with pytest.raises(Exception, match="destination"):
+    with pytest.raises(Exception, match="output"):
         if "flowmesh/v1" in named:
             parse_workflow(named, "native")
         else:
@@ -73,13 +78,16 @@ def _name_a_destination(registry: Any, task_id: str) -> None:
     names one, with a vaulted credential pointing into it."""
     raw = raw_control(registry)
     stored = json.loads(raw.get(task_state_key(task_id)))
-    stored["record"]["task"]["spec"]["output"]["destination"] = _DESTINATION
+    stored["record"]["task"]["spec"]["output"] = {
+        "artifacts": ["results.json"],
+        "destination": _DESTINATION,
+    }
     stored["record"]["credential_refs"] = {_POINTER: "msk-stored"}
     raw.set(task_state_key(task_id), json.dumps(stored))
 
 
 @pytest.mark.parametrize("text", [_V1, _V2])
-def test_a_restart_loads_and_runs_tasks_stored_naming_a_destination(
+def test_a_restart_loads_and_runs_tasks_stored_with_an_output_block(
     text: str,
 ) -> None:
     registry = _registry()
@@ -107,9 +115,7 @@ def test_a_restart_loads_and_runs_tasks_stored_naming_a_destination(
     for task_id in (first, second):
         record = restored.get_record(task_id)
         assert record is not None
-        output = record.task.spec.output
-        assert output is not None and output.artifacts == ["results.json"]
-        assert "destination" not in output.model_dump()
+        assert "output" not in record.task.spec.model_dump()
         assert not record.credential_refs
     envelope = restored.read_result(first)
     assert envelope is not None and envelope.result.artifacts_ == ArtifactContext()

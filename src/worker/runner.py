@@ -64,7 +64,7 @@ from shared.tools.contract import MediatedOperationPermit
 from shared.tools.model.schema import MODEL_INTERFACE
 from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
 from shared.utils.hardware import available_devices, gpus_fit_dispatch
-from shared.utils.manifest import ARTIFACTS_DIR, prepare_output_dir, sync_manifest
+from shared.utils.manifest import ARTIFACTS_DIR, prepare_output_dir
 from shared.utils.nofollow import PathRefused, remove_below
 from shared.utils.recent import RecentSet
 from shared.utils.redact import credential_scrubber
@@ -1042,7 +1042,6 @@ class Runner:
         envelope = write_executor_result(
             out_dir / "results.json", task_id, spec, payload, checkpoints
         )
-        sync_manifest(out_dir, task_id, spec.get_artifacts())
         if not _publishes_result(payload):
             return None
         store = self._object_store(msg)

@@ -46,7 +46,3 @@ spec:
     packing: false
     fp16: false
     bf16: true
-
-  output:
-    artifacts:
-      - results.json
