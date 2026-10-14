@@ -7,7 +7,7 @@ from urllib.parse import ParseResult, urlparse
 
 import requests
 
-from shared.schemas.artifact import artifact_download_path
+from shared.schemas.artifact import ArtifactContext, artifact_download_path
 from shared.schemas.result import BaseExecutorResult
 from shared.schemas.result.binding import artifact_context
 from shared.tasks.specs import TaskSpecStrictBase
@@ -27,24 +27,33 @@ def artifact_ref_source(
 ) -> tuple[str, str] | None:
     """The producer task and artifact path a `{path: ...}` ref names, for the value at
     ``path`` inside upstream ``node``; None for any other value."""
+    if (found := _ref_context(value, context, node, path)) is None:
+        return None
+    task_id, _, rel_path = found
+    return task_id, rel_path
+
+
+def _ref_context(
+    value: Any,
+    context: Mapping[str, BaseExecutorResult] | None,
+    node: str | None,
+    path: Sequence[str | int],
+) -> tuple[str, ArtifactContext, str] | None:
     if not isinstance(value, dict) or "path" not in value:
         return None
     rel_path = value.get("path")
     if not isinstance(rel_path, str) or not rel_path:
         raise ExecutionError("Artifact ref must include a non-empty 'path' field")
-    task_id = (
-        ctx.task_id
-        if context
-        and node
-        and (node_result := context.get(node))
-        and (ctx := artifact_context(node_result, path))
+    ctx = (
+        artifact_context(node_result, path)
+        if context and node and (node_result := context.get(node))
         else None
     )
-    if task_id is None:
+    if ctx is None or ctx.task_id is None:
         raise ExecutionError(
             "Cannot resolve artifact ref: upstream _artifacts context is missing"
         )
-    return task_id, rel_path
+    return ctx.task_id, ctx, rel_path
 
 
 def hydrated_artifact_ref(
@@ -74,9 +83,10 @@ def artifact_ref_text(
 ) -> Any:
     """A `{path: ...}` ref as the text naming its published artifact; any other value
     as it is."""
-    if (named := artifact_ref_source(value, context, node, path)) is None:
+    if (found := _ref_context(value, context, node, path)) is None:
         return value
-    return artifact_download_path(*named)
+    task_id, ctx, rel_path = found
+    return artifact_download_path(task_id, rel_path, ctx.revision_of(rel_path))
 
 
 def list_items_expression(data: Mapping[str, Any]) -> str | None:

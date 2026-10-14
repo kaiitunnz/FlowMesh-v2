@@ -302,7 +302,7 @@ def binding_text(
         and (context := artifact_contexts(binding, envelope_of).get(())) is not None
         and context.task_id is not None
     ):
-        return artifact_download_path(context.task_id, ref)
+        return artifact_download_path(context.task_id, ref, context.revision_of(ref))
     if isinstance(value, BaseModel):
         value = value.model_dump(mode="json")
     return _stringify(value)

@@ -9,6 +9,7 @@ archive view of such a tree whose bytes follow from the tree alone.
 """
 
 import re
+from collections.abc import Iterable
 from enum import StrEnum
 from typing import Annotated, Self
 
@@ -18,6 +19,21 @@ from shared.content import ContentReference, is_member_path
 
 FINAL_REVISION = "final"
 _STEP = re.compile(r"step-(0|[1-9][0-9]*)")
+
+
+def revision_step(revision: str) -> int | None:
+    """The step a ``step-<n>`` revision names, or None for any other revision."""
+    return int(match.group(1)) if (match := _STEP.fullmatch(revision)) else None
+
+
+def latest_revision(bindings: "Iterable[ArtifactBinding] | None") -> str | None:
+    """The latest ``step-<n>`` revision among ``bindings``, or None."""
+    steps = [
+        step
+        for binding in bindings or ()
+        if (step := revision_step(binding.revision)) is not None
+    ]
+    return step_revision(max(steps)) if steps else None
 
 
 def step_revision(step: int) -> str:

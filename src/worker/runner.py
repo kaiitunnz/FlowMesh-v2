@@ -31,7 +31,11 @@ from shared.network.mtls import MutualTlsMaterial
 from shared.network.relay_frame import SSH_FRAME_KIND
 from shared.outcome import FabricContentStore
 from shared.schemas.result import RESULT_MEDIA_TYPE, BaseExecutorResult
-from shared.tasks.artifact_binding import ArtifactBinding, ArtifactKind
+from shared.tasks.artifact_binding import (
+    ArtifactBinding,
+    ArtifactKind,
+    latest_revision,
+)
 from shared.tasks.credentials import dispatched_credentials
 from shared.tasks.specs import (
     EmbeddingSpecStrict,
@@ -886,7 +890,7 @@ class Runner:
             else []
         )
         reference = self._write_single_result(
-            msg, msg.task_id, msg.spec, out_dir, declared
+            msg, msg.task_id, msg.spec, out_dir, declared, latest_revision(checkpoints)
         )
         if reference is None:
             return {}
@@ -968,12 +972,13 @@ class Runner:
         spec: TaskSpecStrictBase,
         out_dir: Path,
         payload: BaseExecutorResult | None,
+        checkpoints: str | None = None,
     ) -> ContentReference | None:
         if payload is None:
             return None
         out_dir.mkdir(parents=True, exist_ok=True)
         envelope = write_executor_result(
-            out_dir / "results.json", task_id, spec, payload
+            out_dir / "results.json", task_id, spec, payload, checkpoints
         )
         sync_manifest(out_dir, task_id, spec.get_artifacts())
         if not _publishes_result(payload):

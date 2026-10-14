@@ -7,10 +7,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from shared.schemas.artifact import ArtifactContext
+from shared.schemas.result import BaseExecutorResult
 from tests.worker.factories import DEFAULT_WORKER_CONFIG
 from worker.executors import vllm_executor
 from worker.executors.base_executor import ExecutionError
 from worker.executors.utils import checkpoints
+from worker.executors.utils.artifacts import artifact_ref_text
 from worker.executors.utils.checkpoints import resolve_checkpoint_load
 from worker.executors.vllm_executor import VLLMExecutor
 
@@ -91,3 +94,18 @@ def test_vllm_starts_from_a_hydrated_checkpoint(
 def test_vllm_fails_rather_than_serve_the_base_model(load: dict[str, Any]) -> None:
     with pytest.raises(ExecutionError):
         _start(load)
+
+
+def test_a_checkpoints_ref_in_data_reads_as_its_revisions_download_path() -> None:
+    upstream = BaseExecutorResult(
+        _artifacts=ArtifactContext(task_id="tsk-train", checkpoints="step-30")
+    )
+
+    assert (
+        artifact_ref_text({"path": "checkpoints"}, {"train": upstream}, "train")
+        == "/api/v1/results/tsk-train/files/checkpoints?revision=step-30"
+    )
+    assert (
+        artifact_ref_text({"path": "final_model"}, {"train": upstream}, "train")
+        == "/api/v1/results/tsk-train/files/final_model"
+    )

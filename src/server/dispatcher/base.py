@@ -33,6 +33,7 @@ from shared.tasks.artifact_binding import (
     ArtifactInputs,
     model_artifact,
     resolve_artifact_input,
+    resolve_artifact_path,
 )
 from shared.tasks.placeholders import PLACEHOLDER_PATTERN
 from shared.tasks.result_binding import ResultBinding
@@ -1497,7 +1498,8 @@ class Dispatcher:
         which the task's worker hydrates and names by its local path.
 
         A model archive renders as the tree it archives, which every loader takes as
-        a directory.
+        a directory, and a ref to a training task's checkpoints renders as the last
+        checkpoint it published.
         """
         if (
             context is None
@@ -1505,8 +1507,15 @@ class Dispatcher:
             or (path := artifact_ref_path(value)) is None
         ):
             return None
-        bindings = self._runtime.final_artifacts(context.task_id)
-        if (found := resolve_artifact_input(bindings, path)) is None:
+        if (revision := context.revision_of(path)) is not None:
+            found = resolve_artifact_path(
+                self._runtime.artifact_bindings(context.task_id) or {}, revision, path
+            )
+        else:
+            found = resolve_artifact_input(
+                self._runtime.final_artifacts(context.task_id), path
+            )
+        if found is None:
             raise ValueError(
                 f"task {context.task_id} published no artifact named {path!r}"
             )

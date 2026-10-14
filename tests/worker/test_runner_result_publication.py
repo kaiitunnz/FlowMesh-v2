@@ -14,7 +14,7 @@ from shared.content import (
     SharedFilesystemObjectStore,
 )
 from shared.harness.adapter import HarnessResult, HarnessResultKind
-from shared.schemas.result import BaseExecutorResult
+from shared.schemas.result import BaseExecutorResult, ResultEnvelope
 from shared.tasks import MergedChildTaskStrict
 from shared.tasks.task_type import TaskType
 from tests.worker.factories import (
@@ -298,6 +298,13 @@ def test_a_training_task_reports_its_checkpoints_as_it_runs_and_at_success(
 
     revisions = {(b["name"], b["revision"]) for b in _metadata(lifecycle)["artifacts"]}
     assert ("checkpoints", "step-5") in revisions
+    envelope = ResultEnvelope.model_validate_json(
+        lifecycle.content_plane.store.hydrate(
+            ContentReference.model_validate(_metadata(lifecycle)["result_reference"])
+        )
+    )
+    assert envelope.result.artifacts_ is not None
+    assert envelope.result.artifacts_.checkpoints == "step-5"
     updates = [
         call.args[1]
         for call in lifecycle.notify_task_update.call_args_list

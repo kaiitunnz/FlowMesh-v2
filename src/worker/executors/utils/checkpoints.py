@@ -273,11 +273,18 @@ def is_cleanup_enabled() -> bool:
 
 
 def write_executor_result(
-    path: Path, task_id: str, spec: TaskSpecStrictBase, result: BaseExecutorResult
+    path: Path,
+    task_id: str,
+    spec: TaskSpecStrictBase,
+    result: BaseExecutorResult,
+    checkpoints: str | None = None,
 ) -> str:
-    """Stamp ``_artifacts`` onto ``result``, persist the envelope, and return it."""
+    """Stamp ``_artifacts`` onto ``result``, persist the envelope, and return it.
+
+    ``checkpoints`` is the revision of the last checkpoint the task published.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    result.artifacts_ = ArtifactContext(task_id=task_id)
+    result.artifacts_ = ArtifactContext(task_id=task_id, checkpoints=checkpoints)
     # A model identifier may be a URL whose credential the dispatch restored.
     if isinstance(model := getattr(result, "model", None), str):
         setattr(result, "model", redact_url(model))

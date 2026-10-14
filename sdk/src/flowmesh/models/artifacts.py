@@ -12,6 +12,7 @@ class ArtifactContext(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     task_id: str | None = Field(default=None, exclude_if=lambda v: v is None)
+    checkpoints: str | None = Field(default=None, exclude_if=lambda v: v is None)
     base_dir: str | None = Field(default=None, exclude_if=lambda v: v is None)
 
 
