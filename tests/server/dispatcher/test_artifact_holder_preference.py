@@ -275,6 +275,20 @@ def _idle(d: Any) -> None:
     )
 
 
+def _starting(d: Any) -> None:
+    d._worker_registry.get_worker.return_value = _worker("wkr-2").model_copy(
+        update={"status": WorkerStatus.STARTING}
+    )
+
+
+def test_a_holder_gone_idle_outside_the_pool_is_waited_for_once() -> None:
+    dispatcher = _settling()
+    _idle(dispatcher)
+
+    assert dispatcher._holder_settling("tsk-1", 100.0)
+    assert not dispatcher._holder_settling("tsk-1", 101.0)
+
+
 def _ran_elsewhere(d: Any) -> None:
     d._runtime.records["tsk-train"].assigned_worker = "wkr-3"
 
@@ -294,7 +308,7 @@ def _not_done(d: Any) -> None:
         _cordoned,
         _stale,
         _gone,
-        _idle,
+        _starting,
         _ran_elsewhere,
         _finished_long_ago,
         _not_done,

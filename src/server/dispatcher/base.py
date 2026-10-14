@@ -1415,10 +1415,10 @@ class Dispatcher:
         of its producers, which holds a copy of what that producer published.
 
         The worker must be live, uncordoned, on the incarnation that holds the copy,
-        and still reporting the producer's dispatch, which ended under
-        ``HOLDER_GRACE_SEC`` ago. A consumer waits at most ``HOLDER_GRACE_SEC`` from
-        its first wait for one producer settle, and once its wait ends it never waits
-        for that settle again.
+        and reserved for no other dispatch, and the producer's dispatch must have
+        ended under ``HOLDER_GRACE_SEC`` ago. A consumer waits at most
+        ``HOLDER_GRACE_SEC`` from its first wait for one producer settle, and once its
+        wait ends it never waits for that settle again.
         """
         if self._content_holders is None:
             return False
@@ -1451,7 +1451,7 @@ class Dispatcher:
                 if ended or now >= closes:
                     continue
             settling = self._settling_holder(
-                reference, record.assigned_worker, record.dispatch_id
+                reference, record.assigned_worker, record.dispatch_id, grace is not None
             )
             if not settling:
                 if grace is not None:
@@ -1463,13 +1463,24 @@ class Dispatcher:
         return False
 
     def _settling_holder(
-        self, reference: ContentReference, worker_id: str, dispatch_id: str | None
+        self,
+        reference: ContentReference,
+        worker_id: str,
+        dispatch_id: str | None,
+        waited: bool,
     ) -> bool:
         """Return whether ``worker_id`` holds ``reference`` on its live, uncordoned
         incarnation and is reserved for no dispatch but ``dispatch_id``, the one that
-        just ended on it."""
+        just ended on it.
+
+        An idle holder settles only before the first wait: it went idle after this
+        pass read the idle pool, so the next pass reads it there, and one it then does
+        not take is not waited for.
+        """
         try:
-            unsettled = self._unsettled_holder(reference, worker_id, dispatch_id)
+            unsettled = self._unsettled_holder(
+                reference, worker_id, dispatch_id, waited
+            )
         except Exception:
             self._logger.debug(
                 "Holder %s of %s unreadable",
@@ -1488,7 +1499,11 @@ class Dispatcher:
         return unsettled is None
 
     def _unsettled_holder(
-        self, reference: ContentReference, worker_id: str, dispatch_id: str | None
+        self,
+        reference: ContentReference,
+        worker_id: str,
+        dispatch_id: str | None,
+        waited: bool,
     ) -> str | None:
         """Why ``worker_id`` is no settling holder of ``reference``; None if it is."""
         assert self._content_holders is not None
@@ -1505,7 +1520,9 @@ class Dispatcher:
             return "is gone"
         if all(h.generation != worker.incarnation for h in held):
             return "holds the copy on another incarnation"
-        if worker.status != WorkerStatus.BUSY:
+        if worker.status == WorkerStatus.IDLE and waited:
+            return "is idle but was not taken"
+        if worker.status not in (WorkerStatus.BUSY, WorkerStatus.IDLE):
             return f"is {worker.status}"
         if self._worker_registry.is_worker_stale(worker_id):
             return "is stale"
