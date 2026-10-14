@@ -221,8 +221,10 @@ class Runner:
         self.logger = logger
         self.default_executor = default_executor
         self._cleanup_after_publish = cleanup_after_publish
-        # The worker's alias, unique among the workers sharing its results directory,
-        # which marks the task directories whose working directories it may clear.
+        # TODO: an alias is unique only per node, not among workers sharing a results
+        # directory.
+        # The worker's alias marks the task directories whose working directories it may
+        # clear.
         self._owner = owner
         self._input_hydrator = TaskInputHydrator(
             lifecycle.content_plane, cancelled=self._task_ending
