@@ -363,6 +363,12 @@ class TaskRecord(BaseModel):
         "consumes, which its next placement passes over while another is eligible.",
         exclude=True,
     )
+    succeeded_monotonic: float | None = Field(
+        default=None,
+        description="The control plane's monotonic time when the task's success "
+        "committed.",
+        exclude=True,
+    )
     members_pending: bool = Field(
         default=False,
         description="Whether a restored dispatch's tree members are still being read, "

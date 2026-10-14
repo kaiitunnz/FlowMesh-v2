@@ -659,7 +659,11 @@ class Dispatcher:
             holder is None
             and not record.selected_worker
             and self._stage_weight_stickiness_enabled
-            and self._holder_settling(task_id, time.monotonic())
+            and self._holder_settling(
+                task_id,
+                time.monotonic(),
+                lambda: self._waitable_workers(record, owner, failed_ids, relays_only),
+            )
         ):
             self._logger.debug(
                 "Waiting for %s's upstream artifact holder to settle", task_id
@@ -1425,15 +1429,20 @@ class Dispatcher:
             objects.values(), key=lambda found: found[0].size_bytes, reverse=True
         )
 
-    def _holder_settling(self, task_id: str, now: float) -> bool:
+    def _holder_settling(
+        self, task_id: str, now: float, waitable: Callable[[], set[str]]
+    ) -> bool:
         """Return whether the task should wait for the worker that just finished one
         of its producers, which holds a copy of what that producer published.
 
-        The worker must be live, uncordoned, on the incarnation that holds the copy,
-        and reserved for no other dispatch, and the producer's dispatch must have
-        ended under ``HOLDER_GRACE_SEC`` ago. A consumer waits at most
-        ``HOLDER_GRACE_SEC`` from its first wait for one producer settle, and once its
-        wait ends it never waits for that settle again.
+        The worker must be one ``waitable`` names, a worker the task can be placed
+        on; live, uncordoned, on the incarnation that holds the copy, and reserved
+        for no other dispatch; and the producer's success must have committed under
+        ``HOLDER_GRACE_SEC`` before ``now``, both on this process's monotonic clock.
+        A consumer waits at most ``HOLDER_GRACE_SEC`` from its first wait for one
+        producer settle, and once its wait ends, when none of that producer's
+        artifacts is still settling on the worker, it never waits for that settle
+        again.
         """
         if self._content_holders is None:
             return False
@@ -1450,14 +1459,18 @@ class Dispatcher:
                 "Upstream artifacts of %s unreadable", task_id, exc_info=True
             )
             return False
+        by_producer: dict[str, list[ContentReference]] = {}
         for reference, producer in found:
+            by_producer.setdefault(producer, []).append(reference)
+        candidates: set[str] | None = None
+        for producer, references in by_producer.items():
             record = self._runtime.get_record(producer)
             if (
                 record is None
                 or record.status != TaskStatus.DONE
-                or record.assigned_worker is None
-                or record.finished_ts is None
-                or time.time() - record.finished_ts >= HOLDER_GRACE_SEC
+                or (worker_id := record.assigned_worker) is None
+                or record.succeeded_monotonic is None
+                or now - record.succeeded_monotonic >= HOLDER_GRACE_SEC
             ):
                 continue
             key = (task_id, producer, record.dispatch_id or "")
@@ -1465,9 +1478,20 @@ class Dispatcher:
                 closes, ended = grace
                 if ended or now >= closes:
                     continue
-            settling = self._settling_holder(
-                reference, record.assigned_worker, record.dispatch_id, grace is not None
+            if candidates is None:
+                candidates = waitable()
+            settling = worker_id in candidates and any(
+                self._settling_holder(
+                    reference, worker_id, record.dispatch_id, grace is not None
+                )
+                for reference in references
             )
+            if worker_id not in candidates:
+                self._logger.debug(
+                    "Not waiting for holder %s: %s cannot be placed on it",
+                    worker_id,
+                    task_id,
+                )
             if not settling:
                 if grace is not None:
                     self._holder_graces[key] = (grace[0], True)
@@ -1476,6 +1500,20 @@ class Dispatcher:
                 self._holder_graces[key] = (now + HOLDER_GRACE_SEC, False)
             return True
         return False
+
+    def _waitable_workers(
+        self,
+        record: TaskRecord,
+        owner: OwnerFence | None,
+        failed_ids: set[str],
+        relays_only: bool,
+    ) -> set[str]:
+        """The workers a task can be placed on once free: its private state's owner
+        when it has one, else every eligible worker it has not failed or avoided."""
+        if owner is not None:
+            return {owner.worker_id}
+        eligible = self.eligible_worker_ids(record, relay=relays_only) - failed_ids
+        return eligible - {record.avoided_worker} if record.avoided_worker else eligible
 
     def _settling_holder(
         self,

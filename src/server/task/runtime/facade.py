@@ -4976,6 +4976,7 @@ class TaskRuntime:
             record.status = TaskStatus.DONE
             record.error = None
             record.finished_ts = finished_ts
+            record.succeeded_monotonic = time.monotonic()
             if started_ts:
                 record.started_ts = started_ts
             record.merged_children = None

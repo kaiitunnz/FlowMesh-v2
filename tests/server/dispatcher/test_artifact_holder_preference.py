@@ -19,6 +19,7 @@ from server.registries.worker import Worker
 from server.task.models import TaskStatus
 from server.task.runtime.content_bindings import UnreadableInput
 from shared.content import TREE_MEDIA_TYPE, ContentReference, TreeManifest, TreeMember
+from shared.private_state import OwnerFence
 from shared.schemas.worker import WorkerStatus
 from shared.tasks.artifact_binding import ArtifactBinding, ArtifactKind, final_set
 from shared.utils.time import now_iso
@@ -213,7 +214,7 @@ class _SettleRuntime(_Runtime):
             "tsk-train": SimpleNamespace(
                 status=TaskStatus.DONE,
                 assigned_worker="wkr-2",
-                finished_ts=time.time(),
+                succeeded_monotonic=100.0,
                 dispatch_id="dsp-1",
             ),
             "tsk-1": SimpleNamespace(status=TaskStatus.PENDING),
@@ -240,8 +241,17 @@ def _settling(holder: ContentHolderRecord | None = None) -> Any:
     return dispatcher
 
 
+def _waits(
+    dispatcher: Any,
+    now: float,
+    consumer: str = "tsk-1",
+    waitable: tuple[str, ...] = ("wkr-2",),
+) -> bool:
+    return dispatcher._holder_settling(consumer, now, lambda: set(waitable))
+
+
 def test_a_consumer_waits_for_the_busy_holder_that_just_produced_its_input() -> None:
-    assert _settling()._holder_settling("tsk-1", 100.0)
+    assert _waits(_settling(), 100.0)
 
 
 def test_a_consumer_waits_while_its_holder_is_still_reserved_for_the_producer() -> None:
@@ -250,7 +260,7 @@ def test_a_consumer_waits_while_its_holder_is_still_reserved_for_the_producer() 
         dispatch_id="dsp-1"
     )
 
-    assert dispatcher._holder_settling("tsk-1", 100.0)
+    assert _waits(dispatcher, 100.0)
 
 
 def _busy_elsewhere(d: Any) -> None:
@@ -285,8 +295,8 @@ def test_a_holder_gone_idle_outside_the_pool_is_waited_for_once() -> None:
     dispatcher = _settling()
     _idle(dispatcher)
 
-    assert dispatcher._holder_settling("tsk-1", 100.0)
-    assert not dispatcher._holder_settling("tsk-1", 101.0)
+    assert _waits(dispatcher, 100.0)
+    assert not _waits(dispatcher, 101.0)
 
 
 def _ran_elsewhere(d: Any) -> None:
@@ -294,7 +304,7 @@ def _ran_elsewhere(d: Any) -> None:
 
 
 def _finished_long_ago(d: Any) -> None:
-    d._runtime.records["tsk-train"].finished_ts = time.time() - HOLDER_GRACE_SEC
+    d._runtime.records["tsk-train"].succeeded_monotonic = 100.0 - HOLDER_GRACE_SEC
 
 
 def _not_done(d: Any) -> None:
@@ -320,47 +330,45 @@ def test_a_holder_that_cannot_take_the_consumer_soon_is_not_waited_for(
     dispatcher = _settling()
     fall_through(dispatcher)
 
-    assert not dispatcher._holder_settling("tsk-1", 100.0)
+    assert not _waits(dispatcher, 100.0)
 
 
 def test_a_holder_on_another_incarnation_is_not_waited_for() -> None:
-    assert not _settling(_holder("wkr-2", generation=7))._holder_settling(
-        "tsk-1", 100.0
-    )
+    assert not _waits(_settling(_holder("wkr-2", generation=7)), 100.0)
 
 
 def test_without_a_holder_directory_no_consumer_waits() -> None:
     dispatcher = _settling()
     dispatcher._content_holders = None
 
-    assert not dispatcher._holder_settling("tsk-1", 100.0)
+    assert not _waits(dispatcher, 100.0)
 
 
 def test_a_wait_ends_when_its_window_closes() -> None:
     dispatcher = _settling()
 
-    assert dispatcher._holder_settling("tsk-1", 100.0)
-    assert dispatcher._holder_settling("tsk-1", 100.0 + HOLDER_GRACE_SEC - 0.01)
-    assert not dispatcher._holder_settling("tsk-1", 100.0 + HOLDER_GRACE_SEC)
-    assert not dispatcher._holder_settling("tsk-1", 100.0 + 3 * HOLDER_GRACE_SEC)
+    assert _waits(dispatcher, 100.0)
+    assert _waits(dispatcher, 100.0 + HOLDER_GRACE_SEC - 0.01)
+    assert not _waits(dispatcher, 100.0 + HOLDER_GRACE_SEC)
+    assert not _waits(dispatcher, 100.0 + 3 * HOLDER_GRACE_SEC)
 
 
 def test_a_consumer_never_waits_twice_for_one_producer_settle() -> None:
     dispatcher = _settling()
 
-    assert dispatcher._holder_settling("tsk-1", 100.0)
+    assert _waits(dispatcher, 100.0)
     _busy_elsewhere(dispatcher)
-    assert not dispatcher._holder_settling("tsk-1", 101.0)
+    assert not _waits(dispatcher, 101.0)
     dispatcher._worker_registry.reservation.return_value = None
-    assert not dispatcher._holder_settling("tsk-1", 102.0)
+    assert not _waits(dispatcher, 102.0)
 
 
 def test_a_settled_consumer_drops_its_wait() -> None:
     dispatcher = _settling()
-    assert dispatcher._holder_settling("tsk-1", 100.0)
+    assert _waits(dispatcher, 100.0)
 
     dispatcher._runtime.records["tsk-1"].status = TaskStatus.CANCELLED
-    dispatcher._holder_settling("tsk-other", 101.0)
+    _waits(dispatcher, 101.0, "tsk-other")
 
     assert [key[0] for key in dispatcher._holder_graces] == ["tsk-other"]
 
@@ -407,10 +415,13 @@ def _dispatch_use(enabled: bool, holders: Any) -> tuple[Any, mock.Mock, dict, An
     return runtime, registry, ids, model
 
 
-def _graced_dispatcher() -> tuple[Any, str, dict[str, str], Dispatcher, mock.Mock]:
+def _graced_dispatcher(
+    finished: str | None = None,
+) -> tuple[Any, str, dict[str, str], Dispatcher, mock.Mock]:
     """A real dispatcher for use while train's worker wkr-1, holding train's model,
-    still reports itself busy and only wkr-2 is idle."""
-    runtime, workflow_id, ids, _ = _train_then_ready(now_iso())
+    still reports itself busy and only wkr-2 is idle; train's worker reported it
+    finished at ``finished``, now by default."""
+    runtime, workflow_id, ids, _ = _train_then_ready(finished or now_iso())
     registry = mock.Mock()
     registry.idle_satisfying_pool.return_value = [_worker("wkr-2")]
     registry.satisfying_workers.return_value = [_worker("wkr-1"), _worker("wkr-2")]
@@ -574,3 +585,64 @@ def test_graced_consumers_never_hold_up_a_placeable_task() -> None:
     assert registry.publish_task.call_args[0][0].id == "wkr-idle"
     assert sleeps == []
     assert time.monotonic() - started < dispatcher_base._HOLDER_RECHECK_SEC
+
+
+def test_a_producer_whose_worker_clock_lags_still_graces_its_consumer() -> None:
+    runtime, _, ids, dispatcher, registry = _graced_dispatcher(finished=_TS)
+    use = ids["use"]
+    assert pop_ready(runtime) == use
+
+    assert dispatcher.dispatch_once(use) is False
+
+    registry.publish_task.assert_not_called()
+
+
+def _exclude_failed(record: Any, registry: mock.Mock) -> None:
+    record.failed_workers = ["wkr-1"]
+
+
+def _exclude_avoided(record: Any, registry: mock.Mock) -> None:
+    record.avoided_worker = "wkr-1"
+
+
+def _exclude_unfit(record: Any, registry: mock.Mock) -> None:
+    registry.satisfying_workers.return_value = [_worker("wkr-2")]
+
+
+@pytest.mark.parametrize("exclude", [_exclude_failed, _exclude_avoided, _exclude_unfit])
+@pytest.mark.parametrize("holder_status", [WorkerStatus.BUSY, WorkerStatus.IDLE])
+def test_a_holder_the_consumer_cannot_be_placed_on_is_not_waited_for(
+    exclude: Any, holder_status: WorkerStatus
+) -> None:
+    runtime, _, ids, dispatcher, registry = _graced_dispatcher()
+    use = ids["use"]
+    assert pop_ready(runtime) == use
+    registry.get_worker.return_value = _worker("wkr-1").model_copy(
+        update={"status": holder_status}
+    )
+    record = runtime.get_record(use)
+    assert record is not None
+    exclude(record, registry)
+
+    assert dispatcher.dispatch_once(use) is True
+
+    assert registry.publish_task.call_args[0][0].id == "wkr-2"
+
+
+def test_an_owner_bound_consumer_waits_only_for_its_owner() -> None:
+    dispatcher = _settling()
+    record: Any = SimpleNamespace(avoided_worker=None)
+    owner = OwnerFence(worker_id="wkr-3", incarnation=1)
+
+    assert dispatcher._waitable_workers(record, owner, set(), False) == {"wkr-3"}
+    assert not _waits(dispatcher, 100.0, waitable=("wkr-3",))
+
+
+def test_a_holder_of_only_one_of_a_producer_s_artifacts_is_waited_for() -> None:
+    dispatcher = _settling()
+    dispatcher._content_holders = _Holders(
+        {_TOKENIZER.content_digest: [_holder("wkr-2")]}
+    )
+
+    assert _waits(dispatcher, 100.0)
+    assert _waits(dispatcher, 100.5)

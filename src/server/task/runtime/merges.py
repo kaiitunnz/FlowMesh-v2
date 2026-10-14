@@ -1,6 +1,7 @@
 """Task merging: coalescing ready tasks into one dispatch and returning them."""
 
 import threading
+import time
 from collections import defaultdict
 
 from shared.content import ContentReference
@@ -269,6 +270,7 @@ class TaskMerges:
         self._content_bindings.bind_result_locked(child_record, reference, None)
         child_record.error = None
         child_record.finished_ts = finished_ts
+        child_record.succeeded_monotonic = time.monotonic()
         if started_ts is not None and child_record.started_ts is None:
             child_record.started_ts = started_ts
         if worker_id:
