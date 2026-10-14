@@ -193,13 +193,12 @@ async def list_result_artifacts(
     )
     if revision is not None:
         _check_revision(revision)
-    bindings = await _artifact_bindings(runtime, task_id)
+    bindings = await _artifact_bindings(runtime, task_id, revision)
     return PublishedArtifactList(
         task_id=task_id,
         artifacts=[
             _published(binding)
-            for (rev, _), binding in sorted(bindings.items(), key=_listing_order)
-            if revision is None or rev == revision
+            for _, binding in sorted(bindings.items(), key=_listing_order)
         ],
     )
 
@@ -235,7 +234,7 @@ async def download_result_file(
         return Response(
             await _read_result_bytes(runtime, task_id), media_type=RESULT_MEDIA_TYPE
         )
-    bindings = await _artifact_bindings(runtime, task_id)
+    bindings = await _artifact_bindings(runtime, task_id, revision)
     try:
         download = await asyncio.to_thread(
             resolve_download, runtime.result_reader, bindings, revision, filename
@@ -523,8 +522,10 @@ def _check_revision(revision: str) -> None:
         )
 
 
-async def _artifact_bindings(runtime: TaskRuntime, task_id: str) -> ArtifactBindings:
-    bindings = await asyncio.to_thread(runtime.artifact_bindings, task_id)
+async def _artifact_bindings(
+    runtime: TaskRuntime, task_id: str, revision: str | None = None
+) -> ArtifactBindings:
+    bindings = await asyncio.to_thread(runtime.artifact_bindings, task_id, revision)
     if bindings is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="result not found"

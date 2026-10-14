@@ -50,9 +50,15 @@ class _Runtime:
         self.results: dict[str, bytes] = {}
 
     def artifact_bindings(
-        self, task_id: str
+        self, task_id: str, revision: str | None = None
     ) -> dict[tuple[str, str], ArtifactBinding] | None:
-        return self.bindings.get(task_id)
+        if (bindings := self.bindings.get(task_id)) is None:
+            return None
+        return {
+            key: binding
+            for key, binding in bindings.items()
+            if revision is None or key[0] == revision
+        }
 
     def read_result_bytes(self, task_id: str) -> bytes | None:
         return self.results.get(task_id)

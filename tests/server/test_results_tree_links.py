@@ -153,7 +153,7 @@ async def test_a_bundle_holds_no_log_read_through_a_link(
     stub = SimpleNamespace(
         get_record=lambda _task_id: None,
         read_result_bytes=lambda _task_id: b"{}",
-        artifact_bindings=lambda _task_id: {},
+        artifact_bindings=lambda _task_id, _revision=None: {},
         result_reader=None,
     )
 

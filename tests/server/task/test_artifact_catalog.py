@@ -506,6 +506,29 @@ def test_a_settled_task_keeps_only_its_final_set_in_memory() -> None:
     assert set(runtime.final_artifacts(train)) == {("final", "final_model")}
 
 
+def test_a_settled_task_reads_one_revision_and_its_final_set_from_memory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = _registry()
+    runtime = _runtime(registry)
+    _, (train, _use) = _register(runtime)
+    record_dispatch(runtime, train, dispatch_id="dsp-1")
+    _publish(runtime, train, _step(10), "dsp-1")
+    _succeed(runtime, train, [_tree()], "dsp-1")
+
+    assert set(runtime.artifact_bindings(train, "step-10") or {}) == {
+        ("step-10", "checkpoints")
+    }
+
+    def unread(*_args: Any) -> None:
+        raise AssertionError("read the stored catalog")
+
+    monkeypatch.setattr(registry, "artifact_bindings", unread)
+    assert set(runtime.artifact_bindings(train, "final") or {}) == {
+        ("final", "final_model")
+    }
+
+
 def test_a_held_success_still_lists_every_revision() -> None:
     registry = _registry()
     runtime = _runtime(registry)

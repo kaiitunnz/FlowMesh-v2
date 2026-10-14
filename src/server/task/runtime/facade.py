@@ -3559,26 +3559,34 @@ class TaskRuntime:
                 self._committer.close_locked(record.workflow_id)
             return bool(accepted)
 
-    def artifact_bindings(self, task_id: str) -> ArtifactBindings | None:
-        """A task's published artifacts by revision and name, or None for a task this
-        runtime neither holds nor has stored. A settled task holds only its final set,
-        so the rest is read from its stored catalog."""
+    def artifact_bindings(
+        self, task_id: str, revision: str | None = None
+    ) -> ArtifactBindings | None:
+        """A task's published artifacts by revision and name, or only ``revision`` of
+        them; None for a task this runtime neither holds nor has stored. A settled task
+        holds only its final set, so the rest is read from its stored catalog."""
         held: ArtifactBindings | None = None
         with self._lock:
             if (record := self._tasks.get(task_id)) is not None:
-                held = dict(record.artifacts)
+                held = {
+                    key: binding
+                    for key, binding in record.artifacts.items()
+                    if revision is None or key[0] == revision
+                }
                 if (
                     record.status not in TERMINAL_TASK_STATUSES
                     or not record.has_artifacts
+                    or revision == FINAL_REVISION
                 ):
                     return held
         if held is not None:
-            return {**self._workflow_registry.artifact_bindings(task_id), **held}
-        if (stored := self._stored_task(task_id)) is None:
+            stored = self._workflow_registry.artifact_bindings(task_id, revision)
+            return {**stored, **held}
+        if (persisted := self._stored_task(task_id)) is None:
             return None
-        if not stored.persisted.record.has_artifacts:
+        if not persisted.persisted.record.has_artifacts:
             return {}
-        return self._workflow_registry.artifact_bindings(task_id)
+        return self._workflow_registry.artifact_bindings(task_id, revision)
 
     def final_artifacts(self, task_id: str) -> ArtifactBindings:
         """A task's final set by revision and name, empty for a task that has none."""

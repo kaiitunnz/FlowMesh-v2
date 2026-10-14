@@ -73,14 +73,21 @@ class ArtifactCatalogStore:
 
     _rds: RedisClient
 
-    def artifact_bindings(self, task_id: str) -> ArtifactBindings:
+    def artifact_bindings(
+        self, task_id: str, revision: str | None = None
+    ) -> ArtifactBindings:
+        """A task's catalog, or only ``revision`` of it."""
         return decode_artifact_bindings(
-            task_id, self._rds.sync.hash_getall(task_artifacts_key(task_id))
+            task_id, self._rds.sync.hash_getall(task_artifacts_key(task_id)), revision
         )
 
-    async def artifact_bindings_async(self, task_id: str) -> ArtifactBindings:
+    async def artifact_bindings_async(
+        self, task_id: str, revision: str | None = None
+    ) -> ArtifactBindings:
         return decode_artifact_bindings(
-            task_id, await self._rds.asyncio.hash_getall(task_artifacts_key(task_id))
+            task_id,
+            await self._rds.asyncio.hash_getall(task_artifacts_key(task_id)),
+            revision,
         )
 
     def artifact_bindings_many(
