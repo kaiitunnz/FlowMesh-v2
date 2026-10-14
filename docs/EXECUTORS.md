@@ -76,11 +76,14 @@ done: each top-level file as one object and each top-level directory as a tree w
 manifest names its files. A result field ending in `_archive` whose ref names a
 directory with `.tar.gz` appended (`final_model_archive`, `final_lora_archive`) declares
 an archive view of that tree: a deterministic stored-block `.tar.gz` framing of the
-tree's verified members, which the server builds as it streams a download. A training executor's checkpoints publish while it runs: each one the trainer
+tree's verified members, which the server builds as it streams a download. An artifact
+named `results.json` fails the task, since that name downloads its result. A training executor's checkpoints publish while it runs: each one the trainer
 saves becomes the `checkpoints` artifact at revision `step-<n>`, which a client
 downloads with `revision=step-<n>`. A training result's `checkpoints_dir` names the
 last checkpoint the run published: a consumer hydrates it as `checkpoint-<n>/`, and it
-reads as the download path at that revision. A save waits while two checkpoints are still
+reads as the download path at that revision. Its `checkpoints/checkpoint-<n>`
+directories stay out of the `final` set; any other task's `checkpoints` directory
+publishes like any other. A save waits while two checkpoints are still
 publishing, so the run's disk stays bounded. A checkpoint whose publication still fails
 after retries stops training at the next save and fails the task.
 

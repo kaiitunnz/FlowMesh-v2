@@ -11,6 +11,8 @@ from typing import Self
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from shared.content import is_member_path
+from shared.schemas.artifact import CHECKPOINTS_ARTIFACT
+from shared.utils.manifest import RESULTS_NAME
 
 # Paths, relative to the workspace, that are never exported, nor anything under them.
 EXCLUDED_EXPORT_PATHS: tuple[str, ...] = (
@@ -35,6 +37,17 @@ def excluded_export_path(path: str) -> str | None:
         if path == excluded or path.startswith(f"{excluded}/"):
             return excluded
     return None
+
+
+# Published names an export may not take or lie under: a task's checkpoints and the
+# name its result downloads as.
+RESERVED_EXPORT_NAMES: tuple[str, ...] = (CHECKPOINTS_ARTIFACT, RESULTS_NAME)
+
+
+def reserved_export_name(name: str) -> str | None:
+    """The reserved name ``name`` is or lies under, or None."""
+    top = name.split("/", 1)[0]
+    return top if top in RESERVED_EXPORT_NAMES else None
 
 
 def _member_path(value: str) -> str:

@@ -73,6 +73,7 @@ from .content.artifact_inputs import artifact_inputs_dir
 from .content.artifacts import (
     ArtifactChanged,
     ArtifactPublisher,
+    ReservedArtifactName,
     checkpoint_spool_dir,
     declared_archives,
 )
@@ -974,10 +975,19 @@ class Runner:
         )
         started = time.monotonic()
         try:
-            bindings = publisher.publish_final(artifacts_dir, declared_archives(result))
+            bindings = publisher.publish_final(
+                artifacts_dir,
+                declared_archives(result),
+                step_revisions=msg.task_type in _TRAINING_TASK_TYPES,
+            )
         except WriteCancelled as exc:
             raise TaskCancelledError(
                 f"Task {task_id} ended while publishing its artifacts"
+            ) from exc
+        except ReservedArtifactName as exc:
+            raise ExecutionError(
+                f"task {task_id} could not publish its artifacts: {exc}",
+                retryable=False,
             ) from exc
         except (ContentStoreError, ArtifactChanged, OSError) as exc:
             raise ExecutionError(

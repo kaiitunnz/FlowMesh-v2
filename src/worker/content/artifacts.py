@@ -25,7 +25,7 @@ from shared.content import (
     TreeMember,
 )
 from shared.content.archive import TreeArchive, digest_archive
-from shared.schemas.artifact import ArtifactRef
+from shared.schemas.artifact import CHECKPOINTS_ARTIFACT, ArtifactRef
 from shared.tasks.artifact_binding import (
     FINAL_REVISION,
     ArchiveFacts,
@@ -33,9 +33,10 @@ from shared.tasks.artifact_binding import (
     ArtifactKind,
 )
 from shared.utils.atomic import is_atomic_temp
+from shared.utils.manifest import RESULTS_NAME
 from shared.utils.nofollow import regular_files
 
-CHECKPOINTS_DIR = "checkpoints"
+CHECKPOINTS_DIR = CHECKPOINTS_ARTIFACT
 _CHECKPOINT = re.compile(r"checkpoint-(0|[1-9][0-9]*)")
 _READ_BYTES = 1 << 20
 _ARCHIVE_SUFFIX = ".tar.gz"
@@ -45,6 +46,10 @@ CHECKPOINT_SPOOL_DIR = ".checkpoint-spool"
 
 class ArtifactChanged(RuntimeError):
     """A file changed while it was being published."""
+
+
+class ReservedArtifactName(ValueError):
+    """A task left an artifact under a name its result owns."""
 
 
 def checkpoint_spool_dir(out_dir: Path) -> Path:
@@ -142,13 +147,27 @@ class ArtifactPublisher:
         self._cancelled = cancelled
 
     def publish_final(
-        self, artifacts_dir: Path, archives: Mapping[str, str]
+        self,
+        artifacts_dir: Path,
+        archives: Mapping[str, str],
+        step_revisions: bool = False,
     ) -> list[ArtifactBinding]:
         """Publish the ``final`` set: every top-level artifact, and an archive view
-        for each ``archives`` name over the tree it maps to."""
+        for each ``archives`` name over the tree it maps to.
+
+        A task whose checkpoints publish as ``step-<n>`` revisions (``step_revisions``)
+        leaves its ``checkpoints/checkpoint-<n>`` directories out. Raises
+        ``ReservedArtifactName`` for a top-level ``results.json``, which names the
+        task's result.
+        """
         bindings: list[ArtifactBinding] = []
         trees: dict[str, TreeManifest] = {}
-        for name, path, is_dir in _final_entries(artifacts_dir):
+        for name, path, is_dir in _final_entries(artifacts_dir, step_revisions):
+            if name == RESULTS_NAME:
+                raise ReservedArtifactName(
+                    f"an artifact may not be named {RESULTS_NAME}, which names the "
+                    "task's result"
+                )
             if is_dir:
                 binding, manifest = self.publish_tree(name, path, FINAL_REVISION)
                 trees[name] = manifest
@@ -284,10 +303,12 @@ def _verified_reader(top: Path) -> Callable[[TreeMember, int, int], Iterator[byt
     return read
 
 
-def _final_entries(artifacts_dir: Path) -> Iterator[tuple[str, Path, bool]]:
+def _final_entries(
+    artifacts_dir: Path, step_revisions: bool
+) -> Iterator[tuple[str, Path, bool]]:
     """Each artifact of the ``final`` set: its name, path, and whether it is a tree."""
     for name, path, is_dir in _entries(artifacts_dir, ""):
-        if name != CHECKPOINTS_DIR or not is_dir:
+        if not step_revisions or name != CHECKPOINTS_DIR or not is_dir:
             yield name, path, is_dir
             continue
         for child, child_path, child_is_dir in _entries(path, f"{CHECKPOINTS_DIR}/"):
@@ -319,6 +340,7 @@ __all__ = [
     "spool_is_open",
     "spooled_steps",
     "ArtifactChanged",
+    "ReservedArtifactName",
     "ArtifactPublisher",
     "archive_top",
     "checkpoint_step",

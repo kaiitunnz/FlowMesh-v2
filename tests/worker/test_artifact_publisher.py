@@ -23,6 +23,7 @@ from shared.tasks.artifact_binding import ArtifactKind
 from worker.content.artifacts import (
     ArtifactChanged,
     ArtifactPublisher,
+    ReservedArtifactName,
     declared_archives,
 )
 
@@ -60,7 +61,7 @@ def test_the_final_set_publishes_each_top_level_artifact(tmp_path: Path) -> None
     bindings = {
         b.name: b
         for b in ArtifactPublisher(store, "org").publish_final(
-            root, {"final_model.tar.gz": "final_model"}
+            root, {"final_model.tar.gz": "final_model"}, step_revisions=True
         )
     }
 
@@ -83,6 +84,31 @@ def test_the_final_set_publishes_each_top_level_artifact(tmp_path: Path) -> None
             store.hydrate(member.reference("org"))
             == (root / "final_model" / member.path).read_bytes()
         )
+
+
+def test_a_task_without_step_revisions_publishes_its_checkpoints_whole(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    bindings = {
+        b.name: b
+        for b in ArtifactPublisher(store, "org").publish_final(_artifacts(tmp_path), {})
+    }
+
+    assert set(bindings) == {"final_model", "metrics.json", "checkpoints"}
+    manifest = TreeManifest.decode(store.hydrate(bindings["checkpoints"].reference))
+    assert [m.path for m in manifest.members] == [
+        "checkpoint-10/optimizer.pt",
+        "final_model/model.bin",
+    ]
+
+
+def test_an_artifact_named_as_the_result_is_refused(tmp_path: Path) -> None:
+    root = _artifacts(tmp_path)
+    (root / "results.json").write_bytes(b"{}")
+
+    with pytest.raises(ReservedArtifactName):
+        ArtifactPublisher(_store(tmp_path), "org").publish_final(root, {})
 
 
 def test_an_archive_view_hashes_the_bytes_a_reader_rebuilds(tmp_path: Path) -> None:

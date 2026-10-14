@@ -1,7 +1,7 @@
 from collections import defaultdict
 
 from shared.sandbox import SANDBOX_EGRESS_INTERFACE, SANDBOX_EXECUTE_INTERFACE
-from shared.tasks.components.exports import excluded_export_path
+from shared.tasks.components.exports import excluded_export_path, reserved_export_name
 from shared.tasks.specs import ModelBindingMode
 
 from ..representations.operators import (
@@ -906,6 +906,17 @@ def _check_agent_exports(
                 )
             )
         name = export.published_name
+        if (reserved := reserved_export_name(name)) is not None:
+            diags.append(
+                Diagnostic(
+                    code="agent.exports.reserved",
+                    message=(
+                        f"export name {name!r} lies under {reserved!r}, a name the "
+                        "fabric reserves"
+                    ),
+                    location=location,
+                )
+            )
         if clash := next(
             (
                 other

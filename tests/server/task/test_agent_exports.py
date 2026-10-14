@@ -82,11 +82,14 @@ def test_compilation_pins_the_exports_on_the_agent() -> None:
     ("exports", "code"),
     [
         ("[{path: .aws/credentials}]", "agent.exports.excluded"),
+        ("[{path: runs, name: checkpoints}]", "agent.exports.reserved"),
+        ("[{path: x, name: checkpoints/notes.md}]", "agent.exports.reserved"),
+        ("[{path: results.json}]", "agent.exports.reserved"),
         ("[{path: a}, {path: b, name: a}]", "agent.exports.name_conflict"),
         ("[{path: out}, {path: x, name: out/x}]", "agent.exports.name_conflict"),
     ],
 )
-def test_compilation_refuses_credential_paths_and_colliding_names(
+def test_compilation_refuses_credential_paths_and_reserved_or_colliding_names(
     exports: str, code: str
 ) -> None:
     with pytest.raises(CompileError) as raised:
