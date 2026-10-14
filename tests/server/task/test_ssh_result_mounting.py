@@ -9,7 +9,6 @@ from typing import Any, cast
 import pytest
 
 from server.dispatcher.base import Dispatcher, StageReferenceNotReady
-from server.registries.artifacts import final_set
 from server.registries.worker import WorkerRegistry
 from server.task.models import TaskRecord, TaskStatus
 from server.task.parser import parse_workflow
@@ -22,6 +21,7 @@ from shared.tasks.artifact_binding import (
     ArtifactBinding,
     ArtifactInputs,
     ArtifactKind,
+    final_set,
 )
 from shared.tasks.result_binding import ResultBinding
 from shared.tasks.specs import SSHSpecStrict

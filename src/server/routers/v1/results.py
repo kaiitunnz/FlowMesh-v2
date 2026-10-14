@@ -31,6 +31,7 @@ from shared.tasks.artifact_binding import (
     FINAL_REVISION,
     REVISION_PATTERN,
     ArtifactBinding,
+    ArtifactBindings,
     ArtifactKind,
     is_revision,
     revision_step,
@@ -62,7 +63,6 @@ from ...auth.security import (
     require_permission,
 )
 from ...hooks import ResourceAction, ResourceKind
-from ...registries.artifacts import ArtifactBindings
 from ...schemas.artifacts import PublishedArtifact, PublishedArtifactList
 from ...task.artifact_reads import (
     ArtifactDownload,
@@ -547,7 +547,7 @@ def _published(binding: ArtifactBinding) -> PublishedArtifact:
     return PublishedArtifact(
         name=binding.name,
         revision=binding.revision,
-        kind=binding.kind.value,
+        kind=binding.kind,
         size_bytes=binding.size_bytes,
         files=binding.files,
         sha256=sha256,

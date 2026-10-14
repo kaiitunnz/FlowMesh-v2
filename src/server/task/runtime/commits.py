@@ -17,10 +17,10 @@ from redis.exceptions import (
 )
 
 from server.telemetry.tracing import ControlPlaneTracer
+from shared.tasks.artifact_binding import final_set
 
 from ...clients.redis import REDIS_CONN_ERRORS
 from ...orchestration import OrchestrationEngine
-from ...registries.artifacts import final_set
 from ...registries.workflow import (
     PersistedTask,
     WorkflowControl,

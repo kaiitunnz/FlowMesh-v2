@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import typer
 from flowmesh.exceptions import FlowMeshError
 from flowmesh.models import (
+    ArtifactKind,
     PublishedArtifact,
     PublishedArtifactList,
     WorkflowSubmitResponse,
@@ -219,7 +220,7 @@ class TestResultArtifacts:
                 PublishedArtifact(
                     name="checkpoints",
                     revision="step-2",
-                    kind="tree",
+                    kind=ArtifactKind.TREE,
                     size_bytes=10,
                     files=2,
                 )

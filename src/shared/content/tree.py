@@ -10,6 +10,7 @@ one way — so the same files always name the same tree.
 import json
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
+from typing import Self
 
 from shared.utils.nofollow import is_plain_segment
 
@@ -55,7 +56,7 @@ class TreeManifest:
     members: tuple[TreeMember, ...]
 
     @classmethod
-    def of(cls, members: Iterable[TreeMember]) -> "TreeManifest":
+    def of(cls, members: Iterable[TreeMember]) -> Self:
         """The canonical manifest of ``members``, refusing a bad or repeated path."""
         ordered = tuple(sorted(members, key=lambda member: member.path))
         for index, member in enumerate(ordered):
@@ -108,7 +109,7 @@ class TreeManifest:
         ).encode()
 
     @classmethod
-    def decode(cls, data: bytes) -> "TreeManifest":
+    def decode(cls, data: bytes) -> Self:
         try:
             document = json.loads(data)
         except ValueError as exc:

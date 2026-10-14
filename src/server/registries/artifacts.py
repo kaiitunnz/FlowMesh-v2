@@ -14,12 +14,12 @@ from pydantic import ValidationError
 from redis.asyncio.client import Pipeline as AsyncPipeline
 from redis.client import Pipeline
 
-from shared.tasks.artifact_binding import FINAL_REVISION, ArtifactBinding
+from shared.tasks.artifact_binding import (
+    ArtifactBinding,
+    ArtifactBindings,
+)
 
 from ..clients.redis import RedisClient, task_artifacts_key
-
-type ArtifactKey = tuple[str, str]
-type ArtifactBindings = dict[ArtifactKey, ArtifactBinding]
 
 _SEPARATOR = "\0"
 _logger = logging.getLogger(__name__)
@@ -27,11 +27,6 @@ _logger = logging.getLogger(__name__)
 
 def _text(value: Any) -> str:
     return value.decode() if isinstance(value, bytes) else str(value)
-
-
-def final_set(bindings: ArtifactBindings) -> ArtifactBindings:
-    """The ``final`` revision of a catalog."""
-    return {key: b for key, b in bindings.items() if key[0] == FINAL_REVISION}
 
 
 def artifact_field(binding: ArtifactBinding) -> str:
@@ -119,9 +114,7 @@ class ArtifactCatalogStore:
 
 
 __all__ = [
-    "ArtifactBindings",
     "ArtifactCatalogStore",
-    "ArtifactKey",
     "artifact_field",
     "decode_artifact_bindings",
     "queue_artifact_bindings",

@@ -1,10 +1,14 @@
 from pydantic import BaseModel, Field
 
+from shared.tasks.artifact_binding import ArtifactKind
+
 
 class PublishedArtifact(BaseModel):
     name: str = Field(description="Name the artifact is published and downloaded by.")
     revision: str = Field(description="final, or step-<n> for a training checkpoint.")
-    kind: str = Field(description="file, tree (a directory of files) or archive.")
+    kind: ArtifactKind = Field(
+        description="file, tree (a directory of files) or archive."
+    )
     size_bytes: int = Field(description="Size of the file, the tree or the archive.")
     files: int = Field(description="Files the artifact holds.")
     sha256: str | None = Field(

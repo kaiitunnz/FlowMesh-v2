@@ -161,8 +161,17 @@ class ArtifactBinding(BaseModel):
         )
 
 
+type ArtifactKey = tuple[str, str]
+type ArtifactBindings = dict[ArtifactKey, ArtifactBinding]
+
+
+def final_set(bindings: ArtifactBindings) -> ArtifactBindings:
+    """The ``final`` revision of a catalog."""
+    return {key: b for key, b in bindings.items() if key[0] == FINAL_REVISION}
+
+
 def resolve_artifact_path(
-    bindings: dict[tuple[str, str], ArtifactBinding], revision: str, path: str
+    bindings: ArtifactBindings, revision: str, path: str
 ) -> tuple[ArtifactBinding, str] | None:
     """The binding a path at a revision falls under, with the path inside it.
 
@@ -181,7 +190,7 @@ def resolve_artifact_path(
 
 
 def resolve_artifact_input(
-    bindings: dict[tuple[str, str], ArtifactBinding], path: str
+    bindings: ArtifactBindings, path: str
 ) -> tuple[ArtifactBinding, str] | None:
     """The final artifact a consumer loads for a ref to ``path``, with the path inside
     it. A model archive loads as the tree it archives, which every loader takes as a
@@ -197,9 +206,7 @@ def resolve_artifact_input(
 MODEL_ARTIFACT_NAMES = ("final_model", "final_lora")
 
 
-def model_artifact(
-    bindings: dict[tuple[str, str], ArtifactBinding], producer: str
-) -> ArtifactBinding:
+def model_artifact(bindings: ArtifactBindings, producer: str) -> ArtifactBinding:
     """The model ``producer`` published: its ``final_model`` or ``final_lora`` tree.
 
     Raises ``ValueError`` when its final set holds neither or both.
@@ -285,6 +292,9 @@ __all__ = [
     "FINAL_REVISION",
     "ArchiveFacts",
     "ArtifactBinding",
+    "ArtifactBindings",
+    "ArtifactKey",
+    "final_set",
     "ArtifactKind",
     "ArtifactName",
     "Revision",

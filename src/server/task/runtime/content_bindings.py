@@ -9,7 +9,11 @@ from typing import Any
 from opentelemetry.metrics import Meter, NoOpMeter
 
 from shared.content import ContentReference
-from shared.tasks.artifact_binding import ArtifactBinding, ArtifactKind
+from shared.tasks.artifact_binding import (
+    ArtifactBinding,
+    ArtifactBindings,
+    ArtifactKind,
+)
 from shared.tasks.result_binding import (
     BindingKind,
     ResultBinding,
@@ -425,7 +429,7 @@ class ContentBindings:
         self,
         record: TaskRecord,
         binding: ArtifactBinding,
-        reported_trees: dict[tuple[str, str], ArtifactBinding],
+        reported_trees: ArtifactBindings,
     ) -> str | None:
         scopes = {binding.reference.authorization_scope}
         if binding.largest is not None:

@@ -54,7 +54,9 @@ from shared.tasks import TaskEnvelopeTemplate
 from shared.tasks.artifact_binding import (
     FINAL_REVISION,
     ArtifactBinding,
+    ArtifactBindings,
     ArtifactKind,
+    final_set,
     revision_step,
 )
 from shared.tasks.credentials import set_spec_values
@@ -94,7 +96,6 @@ from ...orchestration.tool_dispatch import (
     ToolOutcome,
     ToolOutcomeStatus,
 )
-from ...registries.artifacts import ArtifactBindings, final_set
 from ...registries.history import HistoryPublication, StoredTask
 from ...registries.worker import Worker, WorkerRegistry
 from ...registries.workflow import (

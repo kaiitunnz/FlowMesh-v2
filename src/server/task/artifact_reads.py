@@ -25,11 +25,11 @@ from shared.content import ContentReference, TreeManifest, TreeMember
 from shared.content.archive import ARCHIVE_MEDIA_TYPE, TreeArchive
 from shared.tasks.artifact_binding import (
     ArtifactBinding,
+    ArtifactBindings,
     ArtifactKind,
     resolve_artifact_path,
 )
 
-from ..registries.artifacts import ArtifactBindings
 from .results import ResultReader
 
 # What a bundle's writer may run ahead of the response sending it.
@@ -237,7 +237,7 @@ class _Cancelled(Exception):
 class _WindowWriter(io.RawIOBase):
     """Hands what a writer writes to a bounded queue, in chunks."""
 
-    def __init__(self, window: "queue.Queue[bytes | BaseException | None]") -> None:
+    def __init__(self, window: queue.Queue[bytes | BaseException | None]) -> None:
         self._window = window
         self._pending = bytearray()
         self.cancelled = threading.Event()

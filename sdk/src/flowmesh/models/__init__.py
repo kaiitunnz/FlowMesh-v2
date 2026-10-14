@@ -2,6 +2,7 @@
 
 from .artifacts import (
     ArtifactContext,
+    ArtifactKind,
     ArtifactRef,
     PublishedArtifact,
     PublishedArtifactList,
@@ -143,6 +144,7 @@ __all__ = [
     "AnyExecutorResult",
     "ArtifactContext",
     "ArtifactRef",
+    "ArtifactKind",
     "PublishedArtifact",
     "PublishedArtifactList",
     "AssetSummary",

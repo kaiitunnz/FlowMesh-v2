@@ -11,11 +11,10 @@ from unittest import mock
 import pytest
 
 from server.content.directory import ContentHolderRecord
-from server.registries.artifacts import final_set
 from server.registries.worker import Worker
 from server.task.runtime.content_bindings import UnreadableInput
 from shared.content import TREE_MEDIA_TYPE, ContentReference, TreeManifest, TreeMember
-from shared.tasks.artifact_binding import ArtifactBinding, ArtifactKind
+from shared.tasks.artifact_binding import ArtifactBinding, ArtifactKind, final_set
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.dispatcher.helpers import (
     CapturingDispatcher,

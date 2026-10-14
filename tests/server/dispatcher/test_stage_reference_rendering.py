@@ -12,7 +12,6 @@ from typing import Any
 import pytest
 
 from server.dispatcher.base import Dispatcher
-from server.registries.artifacts import final_set
 from shared.content import ContentReference
 from shared.schemas.artifact import (
     ArtifactContext,
@@ -25,6 +24,7 @@ from shared.tasks.artifact_binding import (
     ArtifactBinding,
     ArtifactInputs,
     ArtifactKind,
+    final_set,
 )
 
 
