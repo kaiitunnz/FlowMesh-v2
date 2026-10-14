@@ -18,6 +18,7 @@ class ArtifactContext(BaseModel):
     )
     checkpoints: str | None = Field(
         default=None,
+        exclude_if=lambda value: value is None,
         description="The revision of the last checkpoint the task published, which "
         "a ref to its checkpoints names.",
     )
