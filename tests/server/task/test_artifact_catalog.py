@@ -20,7 +20,7 @@ from server.registries.workflow import WorkflowRegistry
 from server.task.models import EventEffect, TaskRecord, TaskStatus
 from server.task.redrive import StoreRedriveScheduler
 from server.task.results import ResultUnavailable
-from server.task.runtime import TaskRuntime, TransitionNotDurable
+from server.task.runtime import TaskRuntime, TransitionNotDurable, facade
 from shared.content import ContentReference
 from shared.schemas.event import TaskEvent
 from shared.tasks.artifact_binding import ArchiveFacts, ArtifactBinding, ArtifactKind
@@ -419,6 +419,33 @@ def test_a_restart_never_waits_on_the_store_for_members(
             unknown,
         )
     released.set()
+
+
+def test_members_unread_at_restart_are_lent_once_the_store_returns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = _registry()
+    reader = make_result_reader()
+    runtime = _runtime(registry, reader)
+    _, use, _ = _dispatched_use(runtime, False)
+    member = _ref(b"weights")
+    reads: list[ContentReference] = []
+
+    def store_returns(reference: ContentReference) -> frozenset[Any]:
+        reads.append(reference)
+        if len(reads) == 1:
+            raise ResultUnavailable("store unreachable")
+        return frozenset({member.identity})
+
+    restored = _runtime(registry, make_result_reader(reader.store))
+    monkeypatch.setattr(restored._results, "tree_members", store_returns)
+    monkeypatch.setattr(facade, "_RESTORE_MEMBER_RETRY_SEC", 0.05)
+    asyncio.run(restored.rehydrate())
+    _widened(restored, use)
+
+    assert not restored._tasks[use].members_pending
+    assert restored.content_binding_authorizes(use, "wkr-1", member)
+    assert len(reads) == 2
 
 
 def test_a_dispatch_s_record_holds_no_upstream_final_set() -> None:

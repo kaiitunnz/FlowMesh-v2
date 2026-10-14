@@ -430,6 +430,8 @@ _HISTORY_BUILD_CHUNK = 256
 
 # How many threads read a restored dispatch's tree members after a restart.
 _RESTORE_MEMBER_READERS = 4
+# How long a restored dispatch whose members did not all read waits to read them again.
+_RESTORE_MEMBER_RETRY_SEC = 30.0
 
 
 def _trees(
@@ -1160,8 +1162,10 @@ class TaskRuntime:
         and their tree members once those read, off the startup path.
 
         A restart never waits on the store: members are read on at most
-        ``_RESTORE_MEMBER_READERS`` threads. Until all of a dispatch's are, an input
-        its worker reports unreadable is checked rather than charged to the worker.
+        ``_RESTORE_MEMBER_READERS`` threads, and those of a dispatch that did not all
+        read are read again every ``_RESTORE_MEMBER_RETRY_SEC`` while it holds its
+        task. Until all of a dispatch's are, an input its worker reports unreadable is
+        checked rather than charged to the worker.
         """
         with self._lock:
             restored = [
@@ -1198,7 +1202,9 @@ class TaskRuntime:
     def _widen_restored_dispatches(
         self, widened: list[tuple[TaskRecord, list[ArtifactBinding]]]
     ) -> None:
-        """Read the tree members each restored dispatch's inputs hold and lend them."""
+        """Read the tree members each restored dispatch's inputs hold and lend them,
+        again for each dispatch whose members did not all read, until they do or the
+        dispatch ends."""
 
         def widen(record: TaskRecord, artifacts: list[ArtifactBinding]) -> None:
             dispatch_id = record.dispatch_id
@@ -1209,15 +1215,32 @@ class TaskRuntime:
                     record.dispatched_objects = objects
                     record.members_pending = not whole
 
-        with ThreadPoolExecutor(
-            max_workers=_RESTORE_MEMBER_READERS, thread_name_prefix="restore-members"
-        ) as pool:
-            futures = [pool.submit(widen, *item) for item in widened]
-        for future in futures:
-            if (exc := future.exception()) is not None:
-                self._logger.warning(
-                    "A restored dispatch's artifact members did not read: %s", exc
-                )
+        pending = [
+            (record, record.dispatch_id, artifacts) for record, artifacts in widened
+        ]
+        while True:
+            with ThreadPoolExecutor(
+                max_workers=_RESTORE_MEMBER_READERS,
+                thread_name_prefix="restore-members",
+            ) as pool:
+                futures = [
+                    pool.submit(widen, record, artifacts)
+                    for record, _, artifacts in pending
+                ]
+            for future in futures:
+                if (exc := future.exception()) is not None:
+                    self._logger.warning(
+                        "A restored dispatch's artifact members did not read: %s", exc
+                    )
+            with self._lock:
+                pending = [
+                    (record, dispatch_id, artifacts)
+                    for record, dispatch_id, artifacts in pending
+                    if record.members_pending and record.dispatch_id == dispatch_id
+                ]
+            if not pending:
+                return
+            time.sleep(_RESTORE_MEMBER_RETRY_SEC)
 
     async def _load_stored_workflow(self, workflow_id: str) -> (
         tuple[
