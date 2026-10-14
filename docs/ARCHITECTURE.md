@@ -526,9 +526,11 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   copy, a holder that is gone, or a transfer that breaks costs a read from the shared
   store, not a failure. A transfer holds a window of the object, never the whole, and a
   copy that turns out not to be the object ends the transfer refused and is dropped. A
-  worker keeps a copy of whatever it reads from a peer or the store. Enable the cache
-  and its transfers with `CONTENT_HYDRATION_ENABLED=true` (which requires the network
-  plane). See [`NETWORK_PLANE.md`](NETWORK_PLANE.md).
+  worker keeps a copy of whatever it reads from a peer or the store. The cache and its
+  transfers run wherever the network plane does; `CONTENT_HYDRATION_ENABLED=false` turns
+  them off, and turning them on requires the network plane. Each worker reports every
+  copy it holds once a minute, at a cost that grows with the number of copies. See
+  [`NETWORK_PLANE.md`](NETWORK_PLANE.md).
 - **Task results.** A task's result lives in the shared content store: its worker writes
   the result envelope there under the task's store access before it reports success, and
   the success binds that reference once, at the commit that settles the task, so a retry,
@@ -552,9 +554,14 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   published keeps those bytes. The catalog lives with the task's record, so a freed
   workflow still lists and serves it. A consumer's worker hydrates each upstream
   artifact the task reads through its content plane before the task runs, as it does
-  any consumed value, and a model archive loads as the directory it archives; a dispatch
-  waits out a store control cannot read an input tree's manifest from. An agent's input
-  names an artifact by its download path.
+  any consumed value, and a model archive loads as the directory it archives. A dispatch
+  waits out a store control cannot read the manifest of a tree its spec loads from, and
+  fails on one that is missing; a tree reached only through an upstream value never
+  holds or fails it. An agent's input names an artifact by its download path. A
+  training run's save waits while two checkpoints are still publishing, outside any
+  collective of a distributed run, and a run whose checkpoint cannot be published stops
+  at its next save on every rank. A starting worker clears only the working directories
+  its own crashed runs left, never those of a worker sharing its results directory.
 - **Agent exports.** An agent declares workspace paths to publish as `exports`. On the
   completion that ends it, its worker copies them out of the quiesced workspace into the
   task's artifacts and publishes them like any other artifact. A missing path, a link, a
@@ -564,9 +571,11 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   consumes by reference, and the task's worker hydrates each through its content cache
   before anything validates or runs the task. A worker that cannot reach the store names
   the inputs it could not read. Control re-reads each named input the task consumes with
-  its own store access: it holds the task while it cannot reach the store either, fails
-  it when the content is missing or corrupt, and otherwise queues it again, in every case
-  without spending an attempt or blaming the worker.
+  its own store access, checking an artifact member only for its presence and size: it
+  holds the task while it cannot reach the store either, fails it when the content is
+  missing or corrupt, and otherwise queues it again, in every case without spending an
+  attempt or blaming the worker. The task's next placement passes over that worker while
+  another is eligible.
 - **Published outputs.** A leaf declares `result: {visibility: published}` to publish its
   value, and a spawn region declares it to publish its children's results as a collection
   keyed by child index within each spawning scope. A spawn whose input failed publishes

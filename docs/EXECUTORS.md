@@ -81,9 +81,11 @@ becomes the `checkpoints` artifact at revision `step-<n>`, and its
 `checkpoints` directory publishes like any other. A training result's `checkpoints_dir`
 names the last checkpoint the run published: a consumer hydrates it as
 `checkpoint-<n>/`, and it reads as the download path at that revision. A save waits
-while two checkpoints are still publishing, so the run's disk stays bounded, and a
-checkpoint whose publication still fails after retries stops training at the next save
-and fails the task.
+while two checkpoints are still publishing, so the run's disk stays bounded; every rank
+of a distributed run waits before the save's first barrier. A checkpoint whose
+publication still fails after retries stops training on every rank at the next save,
+or a PPO run at its next logged step, and fails the task. A cancelled task's trainer
+runs on without spooling and is never left waiting on its uploader.
 
 ## Agent-episode harness backends
 
