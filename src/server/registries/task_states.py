@@ -87,6 +87,12 @@ class PersistedTask(BaseModel):
         data["record"][
             "latest_update_dispatch_id"
         ] = self.record.latest_update_dispatch_id
+        # And the published artifacts its dispatch names, which its worker may read
+        # from a peer.
+        data["record"]["dispatched_artifacts"] = [
+            binding.model_dump(mode="json")
+            for binding in self.record.dispatched_artifacts
+        ]
         # And where its vaulted credentials go back into its spec at dispatch.
         data["record"]["credential_refs"] = self.record.credential_refs
         # And when its first run started, which a serve task's TTL counts from.

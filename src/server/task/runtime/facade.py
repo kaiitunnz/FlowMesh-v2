@@ -1,5 +1,6 @@
 """The task runtime: every workflow's task records, scheduling and dispatch."""
 
+import asyncio
 import itertools
 import logging
 import threading
@@ -165,6 +166,7 @@ from ..redrive import StoreRedriveScheduler, manual_redrive
 from ..results import (
     ObjectIdentity,
     ResultReader,
+    ResultUnavailable,
     ResultUnreadable,
 )
 from ..v2 import (
@@ -1095,6 +1097,7 @@ class TaskRuntime:
                 self._cv.notify_all()
             restored.append(workflow_id)
         await self._restore_artifacts([*restored, *unrestorable])
+        await self._restore_dispatched_objects(restored)
         with self._transition():
             self._merges.restore_merges_locked()
             self._resident_tasks.seed_dispatched_resident_locked()
@@ -1137,6 +1140,36 @@ class TaskRuntime:
             for task_id, bindings in catalogs.items():
                 if (record := self._tasks.get(task_id)) is not None:
                     record.artifacts = bindings
+
+    async def _restore_dispatched_objects(self, workflow_ids: Sequence[str]) -> None:
+        """Read again which objects each restored dispatch's artifact inputs hold, so
+        its worker may still read them from a peer; an input whose tree cannot be read
+        lends only its own object."""
+        with self._lock:
+            dispatched = [
+                record
+                for workflow_id in workflow_ids
+                for record in self._tasks.of_workflow(workflow_id)
+                if record.dispatched_artifacts
+                and record.status not in TERMINAL_TASK_STATUSES
+            ]
+        for record in dispatched:
+            artifacts = record.dispatched_artifacts
+            try:
+                objects = await asyncio.to_thread(
+                    self.artifact_input_objects, artifacts
+                )
+            except (ResultUnavailable, ResultUnreadable) as exc:
+                self._logger.warning(
+                    "Task %s's artifact inputs' members are unreadable after a "
+                    "restart; its worker reads them from the store: %s",
+                    record.task_id,
+                    exc,
+                )
+                objects = (frozenset(b.reference.identity for b in artifacts),)
+            with self._lock:
+                if record.dispatched_artifacts is artifacts:
+                    record.dispatched_objects = objects
 
     async def _load_stored_workflow(self, workflow_id: str) -> (
         tuple[

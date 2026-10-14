@@ -339,6 +339,30 @@ def test_a_workflow_failed_at_restore_keeps_its_catalog(
     assert restored._tasks[train].artifacts == _stored(registry, train)
 
 
+def test_a_restart_keeps_what_a_dispatch_s_artifact_inputs_hold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = _registry()
+    reader = make_result_reader()
+    runtime = _runtime(registry, reader)
+    _, (train, use) = _register(runtime)
+    record_dispatch(runtime, train, dispatch_id="dsp-1")
+    _succeed(runtime, train, [_tree()], "dsp-1")
+    tree = runtime._tasks[train].artifacts[("final", "final_model")]
+    member = _ref(b"weights")
+    runtime.note_artifact_inputs(use, [tree], (frozenset({tree.reference.identity}),))
+    record_dispatch(runtime, use, dispatch_id="dsp-2")
+
+    restored = _runtime(registry, make_result_reader(reader.store))
+    monkeypatch.setattr(
+        restored._results, "tree_members", lambda _ref: frozenset({member.identity})
+    )
+    asyncio.run(restored.rehydrate())
+
+    assert restored._tasks[use].dispatched_artifacts == (tree,)
+    assert restored.content_binding_authorizes(use, "wkr-1", member)
+
+
 def test_unregistering_a_workflow_removes_its_catalogs() -> None:
     registry = _registry()
     runtime = _runtime(registry)
