@@ -160,7 +160,12 @@ class CheckpointUploader:
             ):
                 return
             self._published[step] = binding
-            shutil.rmtree(snapshot, ignore_errors=True)
+            # The snapshot is reached through the spool's descriptor, which a cleared
+            # uploader has closed and the process may have reused.
+            with self._held_lock:
+                if self._cleared:
+                    return
+                shutil.rmtree(snapshot, ignore_errors=True)
             try:
                 self._report(binding)
             except Exception:
@@ -187,7 +192,9 @@ class CheckpointUploader:
                 )
                 if attempt == _ATTEMPTS:
                     self._error = exc
-                    fail_spool(self._spool, str(exc))
+                    with self._held_lock:
+                        if not self._cleared:
+                            fail_spool(self._spool, str(exc))
                     return None
             if self._interrupted_within(delay):
                 return None

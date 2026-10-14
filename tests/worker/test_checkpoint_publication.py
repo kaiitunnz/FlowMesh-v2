@@ -20,7 +20,7 @@ from shared.content import (
 )
 from shared.tasks.artifact_binding import ArtifactBinding
 from shared.utils.nofollow import PathRefused
-from worker.content import artifacts
+from worker.content import artifacts, checkpoints
 from worker.content.artifacts import (
     close_spool,
     open_spool,
@@ -378,3 +378,48 @@ def test_a_failed_or_closed_spool_takes_no_snapshot(tmp_path: Path) -> None:
     _save(spool, root, 2)
 
     assert spooled_steps(spool) == []
+
+
+class _Stubborn(SharedFilesystemObjectStore):
+    """A store whose writes ignore cancellation until released."""
+
+    def __init__(self, root: Path) -> None:
+        super().__init__(root)
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def write_file(self, scope: str, path: Path, **kwargs: Any) -> Any:
+        self.entered.set()
+        self.release.wait(10)
+        kwargs.pop("cancelled", None)
+        return super().write_file(scope, path, **kwargs)
+
+
+def test_an_upload_outliving_its_abort_leaves_a_reused_descriptor_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(checkpoints, "_ABORT_WAIT_SEC", 0.1)
+    store = _Stubborn(tmp_path / "cas")
+    uploader = _uploader(tmp_path, store, [])
+    spool_checkpoint(_checkpoint(tmp_path / "checkpoints", 1), tmp_path / "spool", 1)
+    uploader.start()
+    assert store.entered.wait(10)
+    descriptor = int(uploader._spool.name)
+
+    uploader.abort()
+    other = tmp_path / "other"
+    _checkpoint(other / "step-1", 1)
+    opened: list[int] = []
+    try:
+        while (fd := os.open(other, os.O_RDONLY)) < descriptor:
+            opened.append(fd)
+        opened.append(fd)
+        if fd != descriptor:
+            pytest.skip("the closed descriptor was not reused")
+        store.release.set()
+        uploader._thread.join(10)
+    finally:
+        for fd in opened:
+            os.close(fd)
+
+    assert (other / "step-1" / "checkpoint-1" / "model.bin").exists()
