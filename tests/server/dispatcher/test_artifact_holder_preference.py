@@ -1,9 +1,11 @@
 """A task prefers an idle worker already holding a copy of what its upstream tasks
-published, and never waits for one."""
+published, and waits briefly for the worker that has just finished producing it."""
 
 import asyncio
 import hashlib
 import logging
+import threading
+import time
 from types import SimpleNamespace
 from typing import Any
 from unittest import mock
@@ -11,10 +13,15 @@ from unittest import mock
 import pytest
 
 from server.content.directory import ContentHolderRecord
+from server.dispatcher import base as dispatcher_base
+from server.dispatcher.base import HOLDER_GRACE_SEC, Dispatcher
 from server.registries.worker import Worker
+from server.task.models import TaskStatus
 from server.task.runtime.content_bindings import UnreadableInput
 from shared.content import TREE_MEDIA_TYPE, ContentReference, TreeManifest, TreeMember
+from shared.schemas.worker import WorkerStatus
 from shared.tasks.artifact_binding import ArtifactBinding, ArtifactKind, final_set
+from shared.utils.time import now_iso
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.dispatcher.helpers import (
     CapturingDispatcher,
@@ -173,41 +180,6 @@ def _worker(worker_id: str) -> Worker:
     )
 
 
-def _dispatch_use(enabled: bool, holders: Any) -> tuple[Any, mock.Mock, dict, Any]:
-    runtime = _real_runtime(FakeRegistry())
-    _, ids = asyncio.run(_register(runtime, _CHAIN))
-    train = ids["train"]
-    assert pop_ready(runtime) == train
-    record_dispatch(runtime, train, "wkr-1", "dsp-1")
-    runtime.mark_started(train, "wkr-1", {}, _TS)
-    payload = result_payload(runtime._results, train, {"ok": True}, "org")
-    manifest = TreeManifest.of(
-        [TreeMember("w.bin", _WEIGHTS.content_digest, _WEIGHTS.size_bytes)]
-    )
-    stored = runtime._results._store.write(
-        "org", manifest.encode(), media_type=TREE_MEDIA_TYPE
-    )
-    model = _tree("model", _WEIGHTS).model_copy(update={"reference": stored})
-    payload["artifacts"] = [model.model_dump(mode="json")]
-    runtime.mark_succeeded(train, "wkr-1", payload, _TS, "dsp-1")
-    use = ids["use"]
-    assert pop_ready(runtime) == use
-    registry = mock.Mock()
-    registry.idle_satisfying_pool.return_value = [_worker("wkr-1"), _worker("wkr-2")]
-    registry.satisfying_workers.return_value = [_worker("wkr-1"), _worker("wkr-2")]
-    registry.publish_task.return_value = 1
-    dispatcher = CapturingDispatcher(
-        runtime=runtime,
-        worker_registry=registry,
-        logger=logging.getLogger("holder-preference"),
-        enable_stage_weight_stickiness=enabled,
-        content_holders=holders,
-        worker_selection_strategy="first_fit",
-    )
-    dispatcher.dispatch_once(use)
-    return runtime, registry, ids, model
-
-
 @pytest.mark.parametrize("enabled", [True, False])
 def test_a_dispatch_goes_to_the_holder_only_with_stickiness_on(enabled: bool) -> None:
     holders = _Holders({_WEIGHTS.content_digest: [_holder("wkr-2")]})
@@ -232,3 +204,273 @@ def test_a_dispatch_carries_its_upstream_artifacts_and_its_worker_may_read_them(
     assert not runtime.content_binding_authorizes(
         ids["use"], worker.id, _ref(b"elsewhere", 3)
     )
+
+
+class _SettleRuntime(_Runtime):
+    def __init__(self) -> None:
+        super().__init__(None, ["tsk-train"])
+        self.records = {
+            "tsk-train": SimpleNamespace(
+                status=TaskStatus.DONE,
+                assigned_worker="wkr-2",
+                finished_ts=time.time(),
+                dispatch_id="dsp-1",
+            ),
+            "tsk-1": SimpleNamespace(status=TaskStatus.PENDING),
+        }
+
+    def get_record(self, task_id: str) -> Any:
+        return self.records.get(task_id)
+
+
+def _settling(holder: ContentHolderRecord | None = None) -> Any:
+    """A dispatcher whose consumer tsk-1's producer just finished on wkr-2, which
+    holds the producer's largest object and still reports itself busy on it."""
+    holders = _Holders({_WEIGHTS.content_digest: [holder or _holder("wkr-2")]})
+    dispatcher = make_capturing_dispatcher(
+        runtime=_SettleRuntime(), content_holders=holders
+    )
+    registry: Any = dispatcher._worker_registry
+    registry.get_worker.return_value = _worker("wkr-2").model_copy(
+        update={"status": WorkerStatus.BUSY}
+    )
+    registry.is_worker_stale.return_value = False
+    registry.is_cordoned.return_value = False
+    registry.reservation.return_value = None
+    return dispatcher
+
+
+def test_a_consumer_waits_for_the_busy_holder_that_just_produced_its_input() -> None:
+    assert _settling()._holder_settling("tsk-1", 100.0)
+
+
+def _busy_elsewhere(d: Any) -> None:
+    d._worker_registry.reservation.return_value = SimpleNamespace(dispatch_id="dsp-9")
+
+
+def _cordoned(d: Any) -> None:
+    d._worker_registry.is_cordoned.return_value = True
+
+
+def _stale(d: Any) -> None:
+    d._worker_registry.is_worker_stale.return_value = True
+
+
+def _gone(d: Any) -> None:
+    d._worker_registry.get_worker.return_value = None
+
+
+def _idle(d: Any) -> None:
+    d._worker_registry.get_worker.return_value = _worker("wkr-2").model_copy(
+        update={"status": WorkerStatus.IDLE}
+    )
+
+
+def _ran_elsewhere(d: Any) -> None:
+    d._runtime.records["tsk-train"].assigned_worker = "wkr-3"
+
+
+def _finished_long_ago(d: Any) -> None:
+    d._runtime.records["tsk-train"].finished_ts = time.time() - HOLDER_GRACE_SEC
+
+
+def _not_done(d: Any) -> None:
+    d._runtime.records["tsk-train"].status = TaskStatus.DISPATCHED
+
+
+@pytest.mark.parametrize(
+    "fall_through",
+    [
+        _busy_elsewhere,
+        _cordoned,
+        _stale,
+        _gone,
+        _idle,
+        _ran_elsewhere,
+        _finished_long_ago,
+        _not_done,
+    ],
+)
+def test_a_holder_that_cannot_take_the_consumer_soon_is_not_waited_for(
+    fall_through: Any,
+) -> None:
+    dispatcher = _settling()
+    fall_through(dispatcher)
+
+    assert not dispatcher._holder_settling("tsk-1", 100.0)
+
+
+def test_a_holder_on_another_incarnation_is_not_waited_for() -> None:
+    assert not _settling(_holder("wkr-2", generation=7))._holder_settling(
+        "tsk-1", 100.0
+    )
+
+
+def test_without_a_holder_directory_no_consumer_waits() -> None:
+    dispatcher = _settling()
+    dispatcher._content_holders = None
+
+    assert not dispatcher._holder_settling("tsk-1", 100.0)
+
+
+def test_a_wait_ends_when_its_window_closes() -> None:
+    dispatcher = _settling()
+
+    assert dispatcher._holder_settling("tsk-1", 100.0)
+    assert dispatcher._holder_settling("tsk-1", 100.0 + HOLDER_GRACE_SEC - 0.01)
+    assert not dispatcher._holder_settling("tsk-1", 100.0 + HOLDER_GRACE_SEC)
+    assert not dispatcher._holder_settling("tsk-1", 100.0 + 3 * HOLDER_GRACE_SEC)
+
+
+def test_a_consumer_never_waits_twice_for_one_producer_settle() -> None:
+    dispatcher = _settling()
+
+    assert dispatcher._holder_settling("tsk-1", 100.0)
+    _busy_elsewhere(dispatcher)
+    assert not dispatcher._holder_settling("tsk-1", 101.0)
+    dispatcher._worker_registry.reservation.return_value = None
+    assert not dispatcher._holder_settling("tsk-1", 102.0)
+
+
+def test_a_settled_consumer_drops_its_wait() -> None:
+    dispatcher = _settling()
+    assert dispatcher._holder_settling("tsk-1", 100.0)
+
+    dispatcher._runtime.records["tsk-1"].status = TaskStatus.CANCELLED
+    dispatcher._holder_settling("tsk-other", 101.0)
+
+    assert [key[0] for key in dispatcher._holder_graces] == ["tsk-other"]
+
+
+def _train_then_ready(finished: str) -> tuple[Any, str, dict[str, str], Any]:
+    """Run the chain's train on wkr-1 to success at ``finished``, publishing a model
+    tree, and leave use ready."""
+    runtime = _real_runtime(FakeRegistry())
+    workflow_id, ids = asyncio.run(_register(runtime, _CHAIN))
+    train = ids["train"]
+    assert pop_ready(runtime) == train
+    record_dispatch(runtime, train, "wkr-1", "dsp-1")
+    runtime.mark_started(train, "wkr-1", {}, _TS)
+    payload = result_payload(runtime._results, train, {"ok": True}, "org")
+    manifest = TreeManifest.of(
+        [TreeMember("w.bin", _WEIGHTS.content_digest, _WEIGHTS.size_bytes)]
+    )
+    stored = runtime._results._store.write(
+        "org", manifest.encode(), media_type=TREE_MEDIA_TYPE
+    )
+    model = _tree("model", _WEIGHTS).model_copy(update={"reference": stored})
+    payload["artifacts"] = [model.model_dump(mode="json")]
+    runtime.mark_succeeded(train, "wkr-1", payload, finished, "dsp-1")
+    return runtime, workflow_id, ids, model
+
+
+def _dispatch_use(enabled: bool, holders: Any) -> tuple[Any, mock.Mock, dict, Any]:
+    runtime, _, ids, model = _train_then_ready(_TS)
+    use = ids["use"]
+    assert pop_ready(runtime) == use
+    registry = mock.Mock()
+    registry.idle_satisfying_pool.return_value = [_worker("wkr-1"), _worker("wkr-2")]
+    registry.satisfying_workers.return_value = [_worker("wkr-1"), _worker("wkr-2")]
+    registry.publish_task.return_value = 1
+    dispatcher = CapturingDispatcher(
+        runtime=runtime,
+        worker_registry=registry,
+        logger=logging.getLogger("holder-preference"),
+        enable_stage_weight_stickiness=enabled,
+        content_holders=holders,
+        worker_selection_strategy="first_fit",
+    )
+    dispatcher.dispatch_once(use)
+    return runtime, registry, ids, model
+
+
+def _graced_dispatcher() -> tuple[Any, str, dict[str, str], Dispatcher, mock.Mock]:
+    """A real dispatcher for use while train's worker wkr-1, holding train's model,
+    still reports itself busy and only wkr-2 is idle."""
+    runtime, workflow_id, ids, _ = _train_then_ready(now_iso())
+    registry = mock.Mock()
+    registry.idle_satisfying_pool.return_value = [_worker("wkr-2")]
+    registry.satisfying_workers.return_value = [_worker("wkr-1"), _worker("wkr-2")]
+    registry.publish_task.return_value = 1
+    registry.get_worker.return_value = _worker("wkr-1").model_copy(
+        update={"status": WorkerStatus.BUSY}
+    )
+    registry.is_worker_stale.return_value = False
+    registry.is_cordoned.return_value = False
+    registry.reservation.return_value = None
+    holders: Any = _Holders({_WEIGHTS.content_digest: [_holder("wkr-1")]})
+    dispatcher = Dispatcher(
+        runtime=runtime,
+        worker_registry=registry,
+        logger=logging.getLogger("holder-preference"),
+        enable_stage_weight_stickiness=True,
+        content_holders=holders,
+        worker_selection_strategy="first_fit",
+    )
+    return runtime, workflow_id, ids, dispatcher, registry
+
+
+def test_a_graced_consumer_returns_to_the_queue_without_spending_an_attempt() -> None:
+    runtime, _, ids, dispatcher, registry = _graced_dispatcher()
+    use = ids["use"]
+    assert pop_ready(runtime) == use
+
+    assert dispatcher.dispatch_once(use) is False
+
+    record = runtime.get_record(use)
+    assert record is not None
+    assert record.status == TaskStatus.PENDING and record.attempts == 0
+    registry.publish_task.assert_not_called()
+    assert pop_ready(runtime) == use
+
+
+def test_a_pinned_consumer_is_not_graced() -> None:
+    runtime, _, ids, dispatcher, registry = _graced_dispatcher()
+    use = ids["use"]
+    assert pop_ready(runtime) == use
+    record = runtime.get_record(use)
+    assert record is not None
+    record.selected_worker = ["wkr-2"]
+
+    assert dispatcher.dispatch_once(use) is True
+
+    assert registry.publish_task.call_args[0][0].id == "wkr-2"
+    assert dispatcher._holder_graces == {}
+
+
+def test_a_consumer_cancelled_while_graced_settles_cancelled() -> None:
+    runtime, workflow_id, ids, dispatcher, registry = _graced_dispatcher()
+    use = ids["use"]
+    assert pop_ready(runtime) == use
+    assert dispatcher.dispatch_once(use) is False
+
+    runtime.cancel_workflow(workflow_id)
+
+    record = runtime.get_record(use)
+    assert record is not None and record.status == TaskStatus.CANCELLED
+    registry.publish_task.assert_not_called()
+
+
+def test_a_graced_consumer_is_retried_at_the_no_worker_backoff() -> None:
+    runtime, _, ids, dispatcher, registry = _graced_dispatcher()
+    stop = threading.Event()
+    sleeps: list[float] = []
+    attempts: list[str] = []
+    dispatch_once = dispatcher.dispatch_once
+
+    def attempt(task_id: str) -> bool:
+        attempts.append(task_id)
+        placed = dispatch_once(task_id)
+        if placed or len(attempts) == 3:
+            stop.set()
+        return placed
+
+    with (
+        mock.patch.object(dispatcher_base.time, "sleep", sleeps.append),
+        mock.patch.object(dispatcher, "dispatch_once", attempt),
+    ):
+        dispatcher.dispatch_loop(stop, poll_interval=0.01)
+
+    assert attempts == [ids["use"]] * 3
+    assert sleeps == [dispatcher_base._NO_WORKER_BACKOFF_SEC] * 3
+    registry.publish_task.assert_not_called()

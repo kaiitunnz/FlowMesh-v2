@@ -595,9 +595,14 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   returns its children still mergeable.
   Disable with `ENABLE_TASK_MERGE=false`.
 - **Upstream artifact placement** (`ENABLE_STAGE_WEIGHT_STICKINESS`, on by default) —
-  the dispatcher prefers an idle worker that holds a copy of the largest object each of
-  the task's direct upstream tasks published, as the holder's current incarnation
-  announced it. It never waits for one: with no idle holder, the task places as usual.
+  the dispatcher prefers an idle worker holding a copy of the upstream artifacts — the
+  largest object each of the task's direct upstream tasks published, as the holder's
+  current incarnation announced it — and waits up to 5 s for that worker when it has
+  just finished the producing task. A task waits once per producer finish, only for a
+  live, uncordoned holder reserved for no other dispatch, and spends no attempt and no
+  part of `TASK_NO_WORKER_GRACE_SEC` waiting; otherwise it places as usual. A task
+  pinned to workers is placed among them alone. Holders are known only with the
+  worker content cache on (`CONTENT_HYDRATION_ENABLED`).
 - **Context reuse.** Workers report cached models/datasets in their
   `WorkerHardware`. The dispatcher's `_cached_worker_candidates` filters
   to workers whose cache covers the task's references; entries older

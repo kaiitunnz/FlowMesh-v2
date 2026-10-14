@@ -22,6 +22,7 @@ from shared.schemas.result.binding import (
     upstream_value,
 )
 from shared.schemas.result.routed import routed_root
+from shared.schemas.worker import WorkerStatus
 from shared.tasks import (
     MergedChildTaskStrict,
     TaskEnvelopeStrict,
@@ -56,6 +57,7 @@ from ..task.credentials import credential_merge_key
 from ..task.metadata import extract_model_dataset_names
 from ..task.models import (
     SERVE_TASK_TYPES,
+    SETTLING_TASK_STATUSES,
     DispatchEnd,
     PublishGate,
     TaskRecord,
@@ -81,6 +83,9 @@ _NO_WORKER_BACKOFF_SEC = 0.5
 _YIELD_REQUEST_INTERVAL_SEC = 2.0
 _OWNER_WAIT_LOG_SEC = 30.0
 _ERROR_BACKOFF_SEC = 1.0
+# How long a consumer waits for the worker that just finished its producer, holding a
+# copy of what the producer published, to report itself idle.
+HOLDER_GRACE_SEC = 5.0
 # What a rendered checkpoint load drops: the names it was given by, and a source type
 # and local path the hydrated token replaces.
 _RENDERED_LOAD_KEYS = frozenset(
@@ -123,6 +128,10 @@ class Dispatcher:
     ) -> None:
         self._runtime = runtime
         self._content_holders = content_holders
+        # Each unsettled consumer's holder grace by producer settle: when its window
+        # closes, and whether it ended early, so a consumer never waits twice for one
+        # settle.
+        self._holder_graces: dict[tuple[str, str, str], tuple[float, bool]] = {}
         self._worker_registry = worker_registry
         self._content_access = content_access
         self._logger = logger
@@ -614,11 +623,23 @@ class Dispatcher:
         selection_info: dict[str, Any] = {}
         worker: Worker | None = None
 
+        holder = (
+            self._preferred_holder(task_id, pool)
+            if not record.selected_worker and self._stage_weight_stickiness_enabled
+            else None
+        )
         if (
-            not record.selected_worker
+            holder is None
+            and not record.selected_worker
             and self._stage_weight_stickiness_enabled
-            and (holder := self._preferred_holder(task_id, pool)) is not None
+            and self._holder_settling(task_id, time.monotonic())
         ):
+            self._logger.debug(
+                "Waiting for %s's upstream artifact holder to settle", task_id
+            )
+            self.requeue_task(task_id, reason="holder_settling", count_retry=False)
+            return False
+        if holder is not None:
             worker = holder
             selection_info = {
                 "strategy": "artifact_holder",
@@ -1318,6 +1339,15 @@ class Dispatcher:
     def _upstream_artifact_objects(self, task_id: str) -> list[ContentReference]:
         """Return the largest object of each final artifact the task's direct upstream
         tasks published, largest first."""
+        return [
+            reference for reference, _ in self._upstream_artifact_producers(task_id)
+        ]
+
+    def _upstream_artifact_producers(
+        self, task_id: str
+    ) -> list[tuple[ContentReference, str]]:
+        """Return the largest object of each final artifact the task's direct upstream
+        tasks published, with the task that published it, largest first."""
         scoped = self._runtime.scoped_inputs(task_id)
         if scoped is not None:
             producers = {
@@ -1328,13 +1358,94 @@ class Dispatcher:
         else:
             info = self._runtime.describe_task(task_id)
             producers = set(info.depends_on) if info is not None else set()
-        objects: dict[tuple[str, str, str], ContentReference] = {}
-        for producer in producers:
+        objects: dict[tuple[str, str, str], tuple[ContentReference, str]] = {}
+        for producer in sorted(producers):
             for binding in self._runtime.final_artifacts(producer).values():
                 if binding.largest is None:
                     continue
-                objects.setdefault(binding.largest.identity, binding.largest)
-        return sorted(objects.values(), key=lambda ref: ref.size_bytes, reverse=True)
+                objects.setdefault(
+                    binding.largest.identity, (binding.largest, producer)
+                )
+        return sorted(
+            objects.values(), key=lambda found: found[0].size_bytes, reverse=True
+        )
+
+    def _holder_settling(self, task_id: str, now: float) -> bool:
+        """Return whether the task should wait for the worker that just finished one
+        of its producers, which holds a copy of what that producer published.
+
+        The worker must be live, uncordoned, on the incarnation that holds the copy,
+        and still reporting the producer's dispatch, which ended under
+        ``HOLDER_GRACE_SEC`` ago. A consumer waits at most ``HOLDER_GRACE_SEC`` from
+        its first wait for one producer settle, and once its wait ends it never waits
+        for that settle again.
+        """
+        if self._content_holders is None:
+            return False
+        self._holder_graces = {
+            key: grace
+            for key, grace in self._holder_graces.items()
+            if (consumer := self._runtime.get_record(key[0])) is not None
+            and consumer.status not in SETTLING_TASK_STATUSES
+        }
+        try:
+            found = self._upstream_artifact_producers(task_id)
+        except Exception:
+            self._logger.debug(
+                "Upstream artifacts of %s unreadable", task_id, exc_info=True
+            )
+            return False
+        for reference, producer in found:
+            record = self._runtime.get_record(producer)
+            if (
+                record is None
+                or record.status != TaskStatus.DONE
+                or record.assigned_worker is None
+                or record.finished_ts is None
+                or time.time() - record.finished_ts >= HOLDER_GRACE_SEC
+            ):
+                continue
+            key = (task_id, producer, record.dispatch_id or "")
+            if (grace := self._holder_graces.get(key)) is not None:
+                closes, ended = grace
+                if ended or now >= closes:
+                    continue
+            settling = self._settling_holder(reference, record.assigned_worker)
+            if not settling:
+                if grace is not None:
+                    self._holder_graces[key] = (grace[0], True)
+                continue
+            if grace is None:
+                self._holder_graces[key] = (now + HOLDER_GRACE_SEC, False)
+            return True
+        return False
+
+    def _settling_holder(self, reference: ContentReference, worker_id: str) -> bool:
+        """Return whether ``worker_id`` holds ``reference`` on its live, uncordoned
+        incarnation and is not yet reserved for another dispatch."""
+        assert self._content_holders is not None
+        try:
+            holders = self._content_holders.holders(
+                reference.authorization_scope, reference.content_digest
+            )
+            held = [h for h in holders if h.worker_id == worker_id]
+            worker = self._worker_registry.get_worker(worker_id) if held else None
+            return (
+                worker is not None
+                and any(h.generation == worker.incarnation for h in held)
+                and worker.status == WorkerStatus.BUSY
+                and not self._worker_registry.is_worker_stale(worker_id)
+                and not self._worker_registry.is_cordoned(worker)
+                and self._worker_registry.reservation(worker_id) is None
+            )
+        except Exception:
+            self._logger.debug(
+                "Holder %s of %s unreadable",
+                worker_id,
+                reference.content_digest,
+                exc_info=True,
+            )
+            return False
 
     def _resolve_stage_references(
         self,
