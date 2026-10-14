@@ -474,15 +474,15 @@ def test_a_consumer_cancelled_while_graced_settles_cancelled() -> None:
     registry.publish_task.assert_not_called()
 
 
-def test_a_graced_consumer_is_retried_at_the_no_worker_backoff() -> None:
+def test_a_graced_consumer_is_retried_at_its_own_pace_without_a_loop_backoff() -> None:
     runtime, _, ids, dispatcher, registry = _graced_dispatcher()
     stop = threading.Event()
     sleeps: list[float] = []
-    attempts: list[str] = []
+    attempts: list[float] = []
     dispatch_once = dispatcher.dispatch_once
 
     def attempt(task_id: str) -> bool:
-        attempts.append(task_id)
+        attempts.append(time.monotonic())
         placed = dispatch_once(task_id)
         if placed or len(attempts) == 3:
             stop.set()
@@ -494,6 +494,83 @@ def test_a_graced_consumer_is_retried_at_the_no_worker_backoff() -> None:
     ):
         dispatcher.dispatch_loop(stop, poll_interval=0.01)
 
-    assert attempts == [ids["use"]] * 3
-    assert sleeps == [dispatcher_base._NO_WORKER_BACKOFF_SEC] * 3
+    assert len(attempts) == 3 and sleeps == []
+    gaps = [later - earlier for earlier, later in zip(attempts, attempts[1:])]
+    assert all(gap >= dispatcher_base._HOLDER_RECHECK_SEC * 0.9 for gap in gaps)
     registry.publish_task.assert_not_called()
+
+
+_SOLO = """
+apiVersion: flowmesh/v1
+kind: Workflow
+metadata: {name: solo}
+spec:
+  graph:
+    nodes:
+      - {name: other, spec: {taskType: echo}}
+"""
+
+
+def test_graced_consumers_never_hold_up_a_placeable_task() -> None:
+    runtime = _real_runtime(FakeRegistry())
+    chains = [asyncio.run(_register(runtime, _CHAIN))[1] for _ in range(8)]
+    assert {pop_ready(runtime) for _ in chains} == {ids["train"] for ids in chains}
+    for i, ids in enumerate(chains):
+        train = ids["train"]
+        record_dispatch(runtime, train, f"wkr-h{i}", f"dsp-{i}")
+        runtime.mark_started(train, f"wkr-h{i}", {}, now_iso())
+        payload = result_payload(runtime._results, train, {"ok": True}, "org")
+        manifest = TreeManifest.of(
+            [TreeMember("w.bin", _WEIGHTS.content_digest, _WEIGHTS.size_bytes)]
+        )
+        stored = runtime._results._store.write(
+            "org", manifest.encode(), media_type=TREE_MEDIA_TYPE
+        )
+        model = _tree("model", _WEIGHTS).model_copy(update={"reference": stored})
+        payload["artifacts"] = [model.model_dump(mode="json")]
+        runtime.mark_succeeded(train, f"wkr-h{i}", payload, now_iso(), f"dsp-{i}")
+    other = asyncio.run(_register(runtime, _SOLO))[1]["other"]
+    registry = mock.Mock()
+    registry.idle_satisfying_pool.return_value = [_worker("wkr-idle")]
+    registry.satisfying_workers.return_value = [_worker("wkr-idle")] + [
+        _worker(f"wkr-h{i}") for i in range(8)
+    ]
+    registry.publish_task.return_value = 1
+    registry.get_worker.side_effect = lambda worker_id: _worker(worker_id).model_copy(
+        update={"status": WorkerStatus.BUSY}
+    )
+    registry.is_worker_stale.return_value = False
+    registry.is_cordoned.return_value = False
+    registry.reservation.return_value = None
+    holders: Any = _Holders(
+        {_WEIGHTS.content_digest: [_holder(f"wkr-h{i}") for i in range(8)]}
+    )
+    dispatcher = Dispatcher(
+        runtime=runtime,
+        worker_registry=registry,
+        logger=logging.getLogger("holder-preference"),
+        enable_stage_weight_stickiness=True,
+        content_holders=holders,
+        worker_selection_strategy="first_fit",
+    )
+    stop = threading.Event()
+    sleeps: list[float] = []
+    dispatch_once = dispatcher.dispatch_once
+    started = time.monotonic()
+
+    def attempt(task_id: str) -> bool:
+        placed = dispatch_once(task_id)
+        if task_id == other:
+            stop.set()
+        return placed
+
+    with (
+        mock.patch.object(dispatcher_base.time, "sleep", sleeps.append),
+        mock.patch.object(dispatcher, "dispatch_once", attempt),
+    ):
+        dispatcher.dispatch_loop(stop, poll_interval=0.01)
+
+    assert registry.publish_task.call_count == 1
+    assert registry.publish_task.call_args[0][0].id == "wkr-idle"
+    assert sleeps == []
+    assert time.monotonic() - started < dispatcher_base._HOLDER_RECHECK_SEC

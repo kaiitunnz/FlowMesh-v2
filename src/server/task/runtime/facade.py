@@ -2298,8 +2298,16 @@ class TaskRuntime:
                 task_id = self._ready.pop_ready_locked()
                 if task_id:
                     return task_id
-                self._cv.wait(timeout)
+                wait = timeout
+                if (due := self._ready.next_due()) is not None:
+                    wait = min(timeout, max(0.0, due - time.monotonic()))
+                self._cv.wait(wait)
             return None
+
+    def held_back(self, task_id: str) -> bool:
+        """Whether a queued task is held back until a time of its own."""
+        with self._cv:
+            return task_id in self._ready.not_before
 
     # ------------------------------------------------------------------ #
     # v2 orchestration ledger (`DS`)
@@ -5258,8 +5266,10 @@ class TaskRuntime:
         *,
         increment_retry: bool,
         front: bool,
+        not_before: float | None = None,
     ) -> DispatchEnd:
-        """Return a task whose dispatch ended without a result to the ready queue.
+        """Return a task whose dispatch ended without a result to the ready queue,
+        not to be handed out before ``not_before``, a monotonic time, when given.
 
         ``holder`` names the worker whose dispatch ended, when the caller knows it;
         only a task that worker holds is returned. A settled task stays as it is. A
@@ -5290,11 +5300,19 @@ class TaskRuntime:
             ):
                 return DispatchEnd.MERGE_RETURNED
             return self._return_dispatch_locked(
-                record, increment_retry=increment_retry, front=front
+                record,
+                increment_retry=increment_retry,
+                front=front,
+                not_before=not_before,
             )
 
     def _return_dispatch_locked(
-        self, record: TaskRecord, *, increment_retry: bool, front: bool
+        self,
+        record: TaskRecord,
+        *,
+        increment_retry: bool,
+        front: bool,
+        not_before: float | None = None,
     ) -> DispatchEnd:
         """Return a task to the ready queue, its merged children still mergeable."""
         task_id = record.task_id
@@ -5322,13 +5340,18 @@ class TaskRuntime:
                 changed = True
             else:
                 changed = engine.on_returned(task_id)
-        self._release_dispatch_locked(record, moved, front=front)
+        self._release_dispatch_locked(record, moved, front=front, not_before=not_before)
         if engine is not None and changed:
             self._committer.save_ledger_locked(record.workflow_id)
         return DispatchEnd.RETURNED
 
     def _release_dispatch_locked(
-        self, record: TaskRecord, moved: list[str], *, front: bool
+        self,
+        record: TaskRecord,
+        moved: list[str],
+        *,
+        front: bool,
+        not_before: float | None = None,
     ) -> None:
         """Return a task whose dispatch ended to the ready queue and commit what moved.
 
@@ -5341,7 +5364,9 @@ class TaskRuntime:
                 task_id, (record.assigned_worker, record.dispatch_id, moved)
             )
         reset_to_pending(record)
-        if self._ready.enqueue_ready_locked(task_id, front=front):
+        if self._ready.enqueue_ready_locked(
+            task_id, front=front, not_before=not_before
+        ):
             self._cv.notify_all()
         self._committer.commit_locked(*moved)
 
@@ -6390,11 +6415,11 @@ class TaskRuntime:
 
     def ready_queue_length(self) -> int:
         with self._cv:
-            return len(self._ready.ready_queue)
+            return self._ready.queued_count()
 
     def task_status_counts(self) -> tuple[int, int, int, int, int]:
         with self._cv:
-            queueing = len(self._ready.ready_queue)
+            queueing = self._ready.queued_count()
             dispatched = 0
             pending = 0
             done = 0

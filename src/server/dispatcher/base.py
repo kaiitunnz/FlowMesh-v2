@@ -86,6 +86,8 @@ _ERROR_BACKOFF_SEC = 1.0
 # How long a consumer waits for the worker that just finished its producer, holding a
 # copy of what the producer published, to report itself idle.
 HOLDER_GRACE_SEC = 5.0
+# How often a consumer waiting for its holder is placed again.
+_HOLDER_RECHECK_SEC = 0.5
 # What a rendered checkpoint load drops: the names it was given by, and a source type
 # and local path the hydrated token replaces.
 _RENDERED_LOAD_KEYS = frozenset(
@@ -662,7 +664,12 @@ class Dispatcher:
             self._logger.debug(
                 "Waiting for %s's upstream artifact holder to settle", task_id
             )
-            self.requeue_task(task_id, reason="holder_settling", count_retry=False)
+            self.requeue_task(
+                task_id,
+                reason="holder_settling",
+                count_retry=False,
+                not_before=time.monotonic() + _HOLDER_RECHECK_SEC,
+            )
             return False
         if holder is not None:
             worker = holder
@@ -1044,7 +1051,9 @@ class Dispatcher:
                 continue
             try:
                 success = self.dispatch_once(task_id)
-                if not success:
+                # A task held back until a time of its own paces itself; the rest
+                # of the queue goes on.
+                if not success and not self._runtime.held_back(task_id):
                     time.sleep(_NO_WORKER_BACKOFF_SEC)
             except REDIS_CONN_ERRORS as exc:
                 # Control Redis dropped. The connection pool reconnects on the next
@@ -1187,15 +1196,21 @@ class Dispatcher:
         holder: str | None = None,
         count_retry: bool = True,
         extra_payload: dict[str, Any] | None = None,
+        not_before: float | None = None,
     ) -> DispatchEnd:
-        """Return a task to the ready queue, spending an attempt when ``count_retry``.
+        """Return a task to the ready queue, spending an attempt when ``count_retry``,
+        not to be handed out before ``not_before``, a monotonic time, when given.
 
         Only a task ``holder`` holds is returned, and a settled one stays as it is. A
         task being cancelled settles CANCELLED, and one whose last attempt this spends
         fails. Returns what the return did to the task.
         """
         end = self._runtime.return_dispatch(
-            task_id, holder, increment_retry=count_retry, front=front
+            task_id,
+            holder,
+            increment_retry=count_retry,
+            front=front,
+            not_before=not_before,
         )
         if end is DispatchEnd.EXHAUSTED:
             record = self._runtime.get_record(task_id)
