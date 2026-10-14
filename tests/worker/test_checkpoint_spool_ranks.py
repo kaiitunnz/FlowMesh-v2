@@ -40,6 +40,8 @@ def _save(rank: int, port: int, root: str, diverging: bool, out: Any) -> None:
     state.is_world_process_zero = rank == 0
     control = TrainerControl()
     spool_type = _ReadsFailedOnRankZero if diverging else CheckpointSpool
+    dist.barrier()
+    (base / f"saving-{rank}").touch()
     try:
         spool_type(base / "spool", poll_sec=0.05).on_save(
             TrainingArguments(output_dir=(base / "out").as_posix(), report_to=[]),
@@ -94,6 +96,8 @@ def test_a_slow_upload_holds_no_rank_in_a_collective(tmp_path: Path) -> None:
     spool = _spool_with_backlog(tmp_path, 3)
 
     def upload_slowly() -> None:
+        while not all((tmp_path / f"saving-{rank}").exists() for rank in (0, 1)):
+            time.sleep(0.05)
         time.sleep(_COLLECTIVE_TIMEOUT_SEC * 2)
         for step in (1, 2):
             shutil.rmtree(spool / f"step-{step}")
