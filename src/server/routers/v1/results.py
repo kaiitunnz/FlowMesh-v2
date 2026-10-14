@@ -33,6 +33,7 @@ from shared.tasks.artifact_binding import (
     ArtifactBinding,
     ArtifactKind,
     is_revision,
+    revision_step,
 )
 from shared.utils.atomic import is_atomic_temp
 from shared.utils.manifest import (
@@ -451,7 +452,13 @@ def _names_several_ranges(value: bytes) -> bool:
     counts, including one ``FileResponse`` would ignore, so such a request is answered
     whole rather than as a single range."""
     _, _, ranges = value.decode("latin-1").partition("=")
-    return sum(1 for part in ranges.split(",") if part.strip() not in {"", "-"}) > 1
+    return len(_range_parts(ranges)) > 1
+
+
+def _range_parts(ranges: str) -> list[str]:
+    """The non-empty ranges of a ``Range`` header's value after its unit."""
+    parts = (part.strip() for part in ranges.split(","))
+    return [part for part in parts if part not in {"", "-"}]
 
 
 def _has_dir(base_dir: Path) -> bool:
@@ -527,7 +534,7 @@ async def _artifact_bindings(runtime: TaskRuntime, task_id: str) -> ArtifactBind
 
 def _listing_order(item: tuple[tuple[str, str], ArtifactBinding]) -> tuple[Any, ...]:
     (revision, name), _ = item
-    step = None if revision == FINAL_REVISION else int(revision.removeprefix("step-"))
+    step = revision_step(revision)
     return (step is None, step or 0, name)
 
 
@@ -779,8 +786,7 @@ def _single_range(header: str, size: int) -> tuple[int, int] | None:
     units, sep, ranges = header.partition("=")
     if units.strip().lower() != "bytes" or not sep:
         raise _MalformedRange("Only support bytes range")
-    parts = [part.strip() for part in ranges.split(",")]
-    parts = [part for part in parts if part not in {"", "-"}]
+    parts = _range_parts(ranges)
     if len(parts) > 1:
         return None
     if not parts or "-" not in parts[0]:

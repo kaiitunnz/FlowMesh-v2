@@ -102,13 +102,12 @@ class ArtifactMaterializer:
             return self._root / rel
         if (self._dir / digest).is_dir():
             return self._root / digest
-        manifest = self._manifest(binding)
-        scope = binding.reference.authorization_scope
+        members = self._members(binding)
         staging = self._dir / f".{digest}.partial"
         shutil.rmtree(staging, ignore_errors=True)
         staging.mkdir()
-        for member in manifest.members:
-            self._fetch(member.reference(scope), staging / member.path)
+        for reference, path in members:
+            self._fetch(reference, staging / path)
         staging.rename(self._dir / digest)
         return self._root / digest
 
@@ -118,20 +117,22 @@ class ArtifactMaterializer:
         if binding.kind is not ArtifactKind.TREE:
             self._copy(binding.reference, self._dir / rel)
             return self._root / rel
-        manifest = self._manifest(binding)
-        scope = binding.reference.authorization_scope
+        members = self._members(binding)
         (self._dir / rel).mkdir(parents=True, exist_ok=True)
-        for member in manifest.members:
-            self._copy(member.reference(scope), self._dir / rel / member.path)
+        for reference, path in members:
+            self._copy(reference, self._dir / rel / path)
         return self._root / rel
 
-    def _manifest(self, binding: ArtifactBinding) -> TreeManifest:
+    def _members(self, binding: ArtifactBinding) -> list[tuple[ContentReference, str]]:
+        """Each member of the tree ``binding`` names, by reference and path."""
         try:
-            return TreeManifest.decode(self._manifest_bytes(binding.reference))
+            manifest = TreeManifest.decode(self._manifest_bytes(binding.reference))
         except TreeManifestError as exc:
             raise ArtifactInputUnreadable(
                 f"artifact {binding.name} names no tree: {exc}"
             ) from exc
+        scope = binding.reference.authorization_scope
+        return [(member.reference(scope), member.path) for member in manifest.members]
 
     def _copy(self, reference: ContentReference, dest: Path) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)

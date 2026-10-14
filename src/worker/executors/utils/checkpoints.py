@@ -230,15 +230,6 @@ def archive_path_for(model_dir: Path) -> Path:
     return model_dir.with_name(f"{model_dir.name}.tar.gz")
 
 
-def clear_directory(directory: Path) -> None:
-    """Remove everything under ``directory``, leaving it empty."""
-    for entry in directory.iterdir():
-        if entry.is_dir() and not entry.is_symlink():
-            shutil.rmtree(entry, ignore_errors=True)
-        else:
-            entry.unlink(missing_ok=True)
-
-
 def write_executor_result(
     path: Path,
     task_id: str,

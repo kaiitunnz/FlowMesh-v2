@@ -10,7 +10,6 @@ are its exports alone, so each copy owns the task's artifacts directory.
 """
 
 import os
-import shutil
 import stat
 from collections.abc import Sequence
 from pathlib import Path
@@ -22,6 +21,7 @@ from shared.tasks.components.exports import (
     excluded_export_path,
 )
 from shared.utils.atomic import is_atomic_temp
+from shared.utils.manifest import clear_directory
 from shared.utils.nofollow import (
     PathRefused,
     join_relative,
@@ -71,11 +71,7 @@ def spool_exports(
                     ExportFailureKind.MISSING, f"the workspace is unreadable: {exc}"
                 )
             with private_dir(artifacts_dir) as artifacts:
-                for entry in artifacts.iterdir():
-                    if entry.is_dir() and not entry.is_symlink():
-                        shutil.rmtree(entry)
-                    else:
-                        entry.unlink()
+                clear_directory(artifacts)
                 for export in exports:
                     dest = artifacts / export.published_name
                     dest.parent.mkdir(parents=True, exist_ok=True)

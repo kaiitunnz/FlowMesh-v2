@@ -63,7 +63,7 @@ from shared.tools.contract import MediatedOperationPermit
 from shared.tools.model.schema import MODEL_INTERFACE
 from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
 from shared.utils.hardware import available_devices, gpus_fit_dispatch
-from shared.utils.manifest import ARTIFACTS_DIR, prepare_output_dir
+from shared.utils.manifest import ARTIFACTS_DIR, clear_directory, prepare_output_dir
 from shared.utils.nofollow import PathRefused, remove_below
 from shared.utils.recent import RecentSet
 from shared.utils.redact import credential_scrubber
@@ -85,10 +85,7 @@ from .executors.base_executor import ExecutionError, Executor, TaskCancelledErro
 from .executors.episode_support import EpisodeStepResult, discard_step_captures
 from .executors.inference.projection import generated_outputs
 from .executors.inference.resolution import resolve_task_contract
-from .executors.utils.checkpoints import (
-    clear_directory,
-    write_executor_result,
-)
+from .executors.utils.checkpoints import write_executor_result
 from .gpu_binding import FreeGpus, pick_devices
 from .lifecycle import Lifecycle
 from .model_turn import HeldModelEgress, ModelTurnRendezvous, ResponsesFacade

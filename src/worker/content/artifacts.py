@@ -32,6 +32,7 @@ from shared.tasks.artifact_binding import (
     ArchiveFacts,
     ArtifactBinding,
     ArtifactKind,
+    revision_step,
 )
 from shared.utils.atomic import is_atomic_temp
 from shared.utils.manifest import RESULTS_NAME
@@ -49,7 +50,6 @@ CHECKPOINTS_DIR = CHECKPOINTS_ARTIFACT
 _CHECKPOINT = re.compile(r"checkpoint-(0|[1-9][0-9]*)")
 _READ_BYTES = 1 << 20
 _ARCHIVE_SUFFIX = ".tar.gz"
-_SPOOLED = re.compile(r"step-(0|[1-9][0-9]*)")
 CHECKPOINT_SPOOL_DIR = ".checkpoint-spool"
 
 
@@ -131,9 +131,9 @@ def spooled_steps(spool_dir: Path) -> list[tuple[int, Path]]:
     except FileNotFoundError:
         return []
     steps = [
-        (int(match.group(1)), Path(entry.path))
+        (step, Path(entry.path))
         for entry in entries
-        if (match := _SPOOLED.fullmatch(entry.name)) and entry.is_dir()
+        if (step := revision_step(entry.name)) is not None and entry.is_dir()
     ]
     return sorted(steps)
 

@@ -1,5 +1,6 @@
 """The layout of a task's output directory."""
 
+import shutil
 from pathlib import Path
 
 from .nofollow import open_dir
@@ -25,3 +26,12 @@ def scratch_dir(base_dir: Path) -> Path:
     with open_dir(base_dir, SCRATCH_DIR, create=True, mode=_SHARED_DIR_MODE):
         pass
     return base_dir / SCRATCH_DIR
+
+
+def clear_directory(directory: Path) -> None:
+    """Remove everything under ``directory``, leaving it empty."""
+    for entry in directory.iterdir():
+        if entry.is_dir() and not entry.is_symlink():
+            shutil.rmtree(entry, ignore_errors=True)
+        else:
+            entry.unlink(missing_ok=True)
