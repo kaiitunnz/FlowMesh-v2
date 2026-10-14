@@ -429,6 +429,16 @@ def _stored_task_info(stored: StoredTask) -> TaskInfo:
 _HISTORY_BUILD_CHUNK = 256
 
 
+def _trees(
+    artifacts: Sequence[ArtifactBinding],
+) -> dict[ObjectIdentity, ContentReference]:
+    return {
+        binding.reference.identity: binding.reference
+        for binding in artifacts
+        if binding.kind is ArtifactKind.TREE
+    }
+
+
 class TaskRuntime:
     """In-memory task registry with FIFO-ready queue and dependency tracking."""
 
@@ -3678,23 +3688,31 @@ class TaskRuntime:
             return any(identity in objects for objects in record.dispatched_objects)
 
     def artifact_input_objects(
-        self, artifacts: Sequence[ArtifactBinding]
+        self,
+        named: Sequence[ArtifactBinding],
+        lent: Sequence[ArtifactBinding] = (),
     ) -> tuple[frozenset[ObjectIdentity], ...]:
         """Every object a dispatch's artifact inputs name, a tree's members included.
 
-        Raises ``ResultUnavailable`` while a tree's manifest cannot be read from the
-        store and ``ResultUnreadable`` for one that is missing or corrupt.
+        A ``named`` tree is one the task's spec loads, so its members must be known:
+        raises ``ResultUnavailable`` while its manifest cannot be read from the store
+        and ``ResultUnreadable`` for one that is missing or corrupt. A ``lent`` tree is
+        one an upstream value reaches, which lends its members only when its manifest
+        reads now, and otherwise only its own object.
         """
-        named = frozenset(binding.reference.identity for binding in artifacts)
-        trees = {
-            binding.reference.identity: binding.reference
-            for binding in artifacts
-            if binding.kind is ArtifactKind.TREE
-        }
-        return (
-            named,
-            *(self._results.tree_members(tree) for tree in trees.values()),
-        )
+        objects = frozenset(binding.reference.identity for binding in (*named, *lent))
+        required = _trees(named)
+        members = [self._results.tree_members(tree) for tree in required.values()]
+        for identity, tree in _trees(lent).items():
+            if identity in required:
+                continue
+            try:
+                members.append(self._results.tree_members(tree))
+            except (ResultUnavailable, ResultUnreadable) as exc:
+                self._logger.debug(
+                    "Lending only tree %s itself: %s", tree.content_digest, exc
+                )
+        return (objects, *members)
 
     def note_artifact_inputs(
         self,

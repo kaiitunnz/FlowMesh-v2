@@ -11,6 +11,8 @@ import logging
 from typing import Any, cast
 from unittest import mock
 
+import pytest
+
 from server.config import OrchestrationConfig
 from server.registries.worker import Worker
 from server.task.runtime import TaskRuntime
@@ -48,6 +50,8 @@ spec:
             type: list
             items: ["${a.items.0.output}"]
 """
+# b loads a's published model, which its reference renders as a token.
+_NAMED_DAG = _DAG.replace("${a.items.0.output}", "load ${a.items.0.model}")
 
 
 class _FlakyStore(FabricObjectStore):
@@ -81,7 +85,7 @@ def _worker() -> Worker:
 
 
 def _dispatch_downstream(
-    error: Exception, *, tree_only: bool = False
+    error: Exception, *, tree_only: bool = False, named: bool = False
 ) -> CapturingDispatcher:
     reader = make_result_reader()
     runtime = TaskRuntime(
@@ -92,7 +96,9 @@ def _dispatch_downstream(
         logging.getLogger("result-availability"),
         credential_vault=InMemoryCredentialVault(),
     )
-    _wf, results = asyncio.run(runtime.register("owner", "org", _DAG, format="native"))
+    _wf, results = asyncio.run(
+        runtime.register("owner", "org", _NAMED_DAG if named else _DAG, format="native")
+    )
     a, b = (r.task_id for r in results)
     record_dispatch(runtime, a, cast(Any, _worker()))
     member = reader._store.write("org", b"weights")
@@ -100,7 +106,15 @@ def _dispatch_downstream(
         [TreeMember("w.bin", member.content_digest, member.size_bytes)]
     )
     tree = reader._store.write("org", manifest.encode(), media_type=TREE_MEDIA_TYPE)
-    payload = result_payload(reader, a, {"items": [{"output": "alpha"}]}, "org")
+    payload = result_payload(
+        reader,
+        a,
+        {
+            "items": [{"output": "alpha", "model": {"path": "final_model"}}],
+            "_artifacts": {"task_id": a},
+        },
+        "org",
+    )
     payload["artifacts"] = [
         ArtifactBinding(
             name="final_model", kind=ArtifactKind.TREE, reference=tree, size_bytes=7
@@ -137,16 +151,30 @@ def test_a_missing_or_corrupt_result_fails_the_task_at_once() -> None:
     assert len(dispatcher.failed) == 1
 
 
-def test_an_unreachable_upstream_tree_holds_the_task() -> None:
-    dispatcher = _dispatch_downstream(ContentUnavailable("store down"), tree_only=True)
+def test_an_unreachable_tree_the_task_loads_holds_it() -> None:
+    dispatcher = _dispatch_downstream(
+        ContentUnavailable("store down"), tree_only=True, named=True
+    )
     assert dispatcher.failed == []
     ((_task, kwargs),) = dispatcher.requeued
     assert kwargs == {"reason": "artifact_input_unavailable", "count_retry": False}
 
 
-def test_a_missing_upstream_tree_fails_the_task() -> None:
+def test_a_missing_tree_the_task_loads_fails_it() -> None:
     dispatcher = _dispatch_downstream(
-        ContentHydrationError("no such object"), tree_only=True
+        ContentHydrationError("no such object"), tree_only=True, named=True
     )
     assert dispatcher.requeued == []
     assert len(dispatcher.failed) == 1
+
+
+@pytest.mark.parametrize(
+    "error", [ContentUnavailable("store down"), ContentHydrationError("no such object")]
+)
+def test_a_tree_only_an_upstream_value_reaches_never_holds_or_fails_the_task(
+    error: Exception,
+) -> None:
+    dispatcher = _dispatch_downstream(error, tree_only=True)
+    assert dispatcher.requeued == []
+    assert dispatcher.failed == []
+    cast(Any, dispatcher._worker_registry).publish_task.assert_called_once()

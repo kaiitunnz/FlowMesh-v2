@@ -101,6 +101,25 @@ class StageResultMissing(ValueError):
     """Raised when a settled stage a task references has no result to read."""
 
 
+def _ssh_input_producers(
+    spec: TaskSpecStrict,
+    upstream_results: dict[str, ResultBinding] | None,
+    context: dict[str, TaskRecord],
+) -> set[str]:
+    """Return the tasks whose published artifacts an SSH task's inputs stage."""
+    if not isinstance(spec, SSHSpecStrict) or not spec.inputs:
+        return set()
+    producers: set[str] = set()
+    for entry in spec.inputs:
+        stage = entry.stage.strip()
+        if (binding := (upstream_results or {}).get(stage)) is not None:
+            if binding.task_id is not None:
+                producers.add(binding.task_id)
+        elif (upstream := context.get(stage)) is not None:
+            producers.add(upstream.task_id)
+    return producers
+
+
 class Dispatcher:
     """Handles FCFS task dispatching via Redis pub/sub."""
 
@@ -815,18 +834,24 @@ class Dispatcher:
             ]
         )
 
-        dispatched_artifacts = [
+        staged = _ssh_input_producers(rendered_task.spec, upstream_results, context)
+        named = [
             *artifact_inputs.bindings.values(),
             *(
                 binding
-                for published in upstream_artifacts.values()
-                for binding in published
+                for producer in sorted(staged)
+                for binding in upstream_artifacts.get(producer, ())
             ),
         ]
+        lent = [
+            binding
+            for producer, published in upstream_artifacts.items()
+            if producer not in staged
+            for binding in published
+        ]
+        dispatched_artifacts = [*named, *lent]
         try:
-            artifact_objects = self._runtime.artifact_input_objects(
-                dispatched_artifacts
-            )
+            artifact_objects = self._runtime.artifact_input_objects(named, lent)
         except ResultUnavailable as exc:
             # Its worker may read a tree's members from a peer only once control knows
             # them, so the task waits out the store like any input it consumes.
