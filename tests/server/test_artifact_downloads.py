@@ -14,7 +14,7 @@ from typing import Any, cast
 
 import anyio
 import pytest
-from fastapi import HTTPException, status
+from fastapi import FastAPI, HTTPException, status
 
 from server.routers.v1 import results as results_router
 from server.task import artifact_reads
@@ -570,3 +570,26 @@ async def test_an_archive_stops_when_its_client_goes_away(
 
     assert served.sends_after_disconnect <= 2
     assert results_router._STREAMS._held == 0
+
+
+def test_the_download_routes_declare_their_binary_responses() -> None:
+    app = FastAPI()
+    app.include_router(results_router.router)
+    paths = app.openapi()["paths"]
+    files = paths["/results/{task_id}/files/{filename}"]["get"]
+    bundle = paths["/results/{task_id}/bundle"]["get"]
+
+    binary = {"type": "string", "format": "binary"}
+    assert files["responses"]["200"]["content"] == {
+        "application/octet-stream": {"schema": binary}
+    }
+    assert set(files["responses"]) >= {"200", "206", "416", "503"}
+    assert "Repr-Digest" in files["responses"]["200"]["headers"]
+    assert "Content-Range" in files["responses"]["206"]["headers"]
+    assert "Retry-After" in files["responses"]["503"]["headers"]
+    assert bundle["responses"]["200"]["content"] == {
+        "application/gzip": {"schema": binary}
+    }
+    for operation in (files, bundle):
+        (revision,) = (p for p in operation["parameters"] if p["name"] == "revision")
+        assert revision["schema"]["pattern"] == "^(final|step-(0|[1-9][0-9]*))$"

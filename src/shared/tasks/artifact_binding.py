@@ -19,6 +19,7 @@ from shared.content import ContentReference, is_member_path
 from shared.utils.nofollow import is_plain_segment
 
 FINAL_REVISION = "final"
+REVISION_PATTERN = r"^(final|step-(0|[1-9][0-9]*))$"
 _STEP = re.compile(r"step-(0|[1-9][0-9]*)")
 
 

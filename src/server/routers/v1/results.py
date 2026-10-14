@@ -29,6 +29,7 @@ from starlette.types import Message, Receive, Scope, Send
 from shared.schemas.result import RESULT_MEDIA_TYPE, AnyExecutorResult, result_file_path
 from shared.tasks.artifact_binding import (
     FINAL_REVISION,
+    REVISION_PATTERN,
     ArtifactBinding,
     ArtifactKind,
     is_revision,
@@ -120,6 +121,53 @@ async def get_result(
     return envelope.result
 
 
+def _header(description: str) -> dict[str, Any]:
+    return {"description": description, "schema": {"type": "string"}}
+
+
+_BINARY = {"schema": {"type": "string", "format": "binary"}}
+_RETRY_AFTER = {"Retry-After": _header("Seconds to wait before retrying.")}
+_OBJECT_HEADERS = {
+    "ETag": _header("The object's content digest."),
+    "Repr-Digest": _header("The SHA-256 digest of the whole object."),
+    "Last-Modified": _header("When the artifact was published."),
+    "Accept-Ranges": _header("Always bytes."),
+}
+_DOWNLOAD_RESPONSES: dict[int | str, dict[str, Any]] = {
+    200: {
+        "description": "The whole object.",
+        "content": {"application/octet-stream": _BINARY},
+        "headers": _OBJECT_HEADERS,
+    },
+    206: {
+        "description": "The one range the request named.",
+        "content": {"application/octet-stream": _BINARY},
+        "headers": {
+            **_OBJECT_HEADERS,
+            "Content-Range": _header("The slice served, of the whole object."),
+        },
+    },
+    416: {
+        "description": "The range lies outside the object.",
+        "headers": {"Content-Range": _header("The whole object's size.")},
+    },
+    503: {
+        "description": "The content store is unreachable.",
+        "headers": _RETRY_AFTER,
+    },
+}
+_BUNDLE_RESPONSES: dict[int | str, dict[str, Any]] = {
+    200: {
+        "description": "A gzip-compressed tar of the bundled sections.",
+        "content": {"application/gzip": _BINARY},
+    },
+    503: {
+        "description": "The content store is unreachable, or too many bundles stream.",
+        "headers": _RETRY_AFTER,
+    },
+}
+
+
 @router.get(
     "/{task_id}/artifacts",
     summary="List a result's artifacts",
@@ -129,7 +177,9 @@ async def get_result(
 async def list_result_artifacts(
     task_id: str,
     revision: str | None = Query(
-        default=None, description="Only this revision: final or step-<n>."
+        default=None,
+        description="Only this revision: final or step-<n>.",
+        json_schema_extra={"pattern": REVISION_PATTERN},
     ),
     principal: PrincipalContext = Depends(authenticate_connection),
     runtime: TaskRuntime = Depends(get_runtime),
@@ -158,13 +208,16 @@ async def list_result_artifacts(
         "Download a published artifact, a file inside a published directory, or the "
         "task's results.json."
     ),
-    response_description="Result file",
+    response_class=Response,
+    responses=_DOWNLOAD_RESPONSES,
 )
 async def download_result_file(
     task_id: str,
     filename: str,
     revision: str = Query(
-        default=FINAL_REVISION, description="Revision: final or step-<n>."
+        default=FINAL_REVISION,
+        description="Revision: final or step-<n>.",
+        json_schema_extra={"pattern": REVISION_PATTERN},
     ),
     principal: PrincipalContext = Depends(authenticate_connection),
     runtime: TaskRuntime = Depends(get_runtime),
@@ -205,13 +258,16 @@ async def download_result_file(
         "Download a gzip-compressed tar of a settled task's result, its published "
         "artifacts at one revision, and its logs."
     ),
-    response_description="Result bundle archive",
+    response_class=Response,
+    responses=_BUNDLE_RESPONSES,
 )
 async def download_result_bundle(
     task_id: str,
     include: list[str] = Query(default_factory=list),
     revision: str = Query(
-        default=FINAL_REVISION, description="Revision of the artifacts bundled."
+        default=FINAL_REVISION,
+        description="Revision of the artifacts bundled.",
+        json_schema_extra={"pattern": REVISION_PATTERN},
     ),
     principal: PrincipalContext = Depends(authenticate_connection),
     runtime: TaskRuntime = Depends(get_runtime),
