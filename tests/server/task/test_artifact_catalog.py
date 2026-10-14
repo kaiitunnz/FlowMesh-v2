@@ -375,6 +375,16 @@ def test_a_running_task_binds_each_checkpoint_it_publishes() -> None:
     assert stored[("step-10", "checkpoints")].reference == _ref(b"ckpt")
 
 
+def test_a_running_task_binds_no_final_revision() -> None:
+    registry = _registry()
+    runtime = _runtime(registry)
+    _, (train, _use) = _register(runtime)
+    record_dispatch(runtime, train, dispatch_id="dsp-1")
+
+    assert _publish(runtime, train, _tree(), "dsp-1") is False
+    assert runtime._tasks[train].artifacts == {}
+
+
 def test_a_stale_or_settled_dispatch_binds_no_checkpoint() -> None:
     registry = _registry()
     runtime = _runtime(registry)

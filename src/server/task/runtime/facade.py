@@ -50,7 +50,12 @@ from shared.schemas.event import TaskEvent, TaskFailureKind
 from shared.schemas.result import BaseExecutorResult, ResultEnvelope
 from shared.schemas.result.binding import upstream_value
 from shared.tasks import TaskEnvelopeTemplate
-from shared.tasks.artifact_binding import FINAL_REVISION, ArtifactBinding, ArtifactKind
+from shared.tasks.artifact_binding import (
+    FINAL_REVISION,
+    ArtifactBinding,
+    ArtifactKind,
+    revision_step,
+)
 from shared.tasks.credentials import set_spec_values
 from shared.tasks.result_binding import ResultBinding, ResultElementRef
 from shared.tasks.specs import ModelBindingMode, TaskSpecBase
@@ -3473,16 +3478,26 @@ class TaskRuntime:
     ) -> bool:
         """Bind the checkpoints a running task reports it published, and save them.
 
-        Only the dispatch holding a task that is still running binds: a stale or
-        cancelled one, or a task already settled, binds nothing. A publication already
-        bound stands. Returns whether anything new was bound.
+        Only the dispatch holding a task that is still running binds, and only
+        ``step-<n>`` revisions: a stale or cancelled one, or a task already settled,
+        binds nothing, and the final set binds at success. A publication already bound
+        stands. Returns whether anything new was bound.
         """
         bindings = reported_artifacts(payload)
+        if bindings is None:
+            self._logger.warning(
+                "Task %s reported a publication that does not parse", task_id
+            )
+            return False
+        if early := [b for b in bindings if revision_step(b.revision) is None]:
+            self._logger.warning(
+                "Task %s reported %s at %s while running; only checkpoints bind then",
+                task_id,
+                early[0].name,
+                early[0].revision,
+            )
+            bindings = [b for b in bindings if revision_step(b.revision) is not None]
         if not bindings:
-            if bindings is None:
-                self._logger.warning(
-                    "Task %s reported a publication that does not parse", task_id
-                )
             return False
         with self._transition():
             record = self._reported_record_locked(task_id)
