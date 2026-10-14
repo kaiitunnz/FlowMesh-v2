@@ -195,9 +195,9 @@ workspace path and an optional artifact `name` (the path by default):
       authority: { invoke: ["sandbox.execute"], delegate: [] }
 ```
 
-When the agent completes, its worker copies each path out of the workspace under its
-name among the task's artifacts, which publish by their top-level entries: `dist` as a
-tree, and `out/report.md` inside the `out` tree, read at `out/report.md`.
+When the agent completes, its worker copies each path into the task's artifacts under
+its name: `dist` publishes as a tree, and `out/report.md` downloads at `out/report.md`
+from the `out` tree.
 
 Submission refuses an export of a credential path such as `.ssh/`, two exports whose
 names overlap, and an export named under `checkpoints` or `results.json`. At

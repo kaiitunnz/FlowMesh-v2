@@ -51,15 +51,14 @@ to the producer's published artifacts, which the `_artifacts` context names. The
 hydrates each artifact a task reads before the task runs, through its content cache, a
 peer's copy or the shared store, and a placeholder or a ref in the spec's data (a
 visual-embedding model's image items, an `image_embedding`) arrives as its local path.
-A ref to a path the producer did not publish fails the task as `input_unreadable`.
+A ref to a path the producer did not publish fails the task.
 
 A model a spec loads by another task's id arrives the same way. `checkpoint.load` with
 `task_id` (or `taskId`) loads that task's published `filename`, or its model — its
 `final_model` or `final_lora` tree — when it names none; a LoRA adapter with `task_id`
 loads the producer's model. A producer that published neither or both, or nothing under
 `filename`, fails the task at dispatch. `checkpoint.load.base_url` with `task_id` and
-`filename` fetches that artifact from another deployment's download route instead. A
-checkpoint a spec names that does not resolve fails the task.
+`filename` fetches that artifact from another deployment's download route.
 
 An inference producer reports every item with its `index`, `prompt` and `output`, or its
 task fails before the result is stored; stored results read through the tolerant
@@ -75,17 +74,14 @@ directory with `.tar.gz` appended (`final_model_archive`, `final_lora_archive`)
 declares a `.tar.gz` archive view of that tree. An artifact named `results.json` fails
 the task, since that name downloads its result.
 
-A training executor's checkpoints publish while it runs: each one the trainer saves
-becomes the `checkpoints` artifact at revision `step-<n>`, and its
-`checkpoints/checkpoint-<n>` directories stay out of the `final` set; any other task's
-`checkpoints` directory publishes like any other. A training result's `checkpoints_dir`
-names the last checkpoint the run published: a consumer hydrates it as
-`checkpoint-<n>/`, and it reads as the download path at that revision. A save waits
-while two checkpoints are still publishing, so the run's disk stays bounded; every rank
-of a distributed run waits before the save's first barrier. A checkpoint whose
-publication still fails after retries stops training on every rank at the next save,
-or a PPO run at its next logged step, and fails the task. A cancelled task's trainer
-runs on without spooling and is never left waiting on its uploader.
+A training executor publishes each checkpoint its trainer saves as the `checkpoints`
+artifact at revision `step-<n>` while it runs, and leaves its
+`checkpoints/checkpoint-<n>` directories out of the `final` set; another task's
+`checkpoints` directory publishes as an ordinary artifact. A training result's
+`checkpoints_dir` names the last checkpoint the run published, which a consumer hydrates
+as `checkpoint-<n>/`. A save waits while two checkpoints are publishing, which bounds the
+run's disk. A checkpoint that cannot be published after retries stops training at the
+next save (a PPO run at the first logged step after it) and fails the task.
 
 ## Agent-episode harness backends
 

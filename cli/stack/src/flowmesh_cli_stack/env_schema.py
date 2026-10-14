@@ -886,8 +886,8 @@ STACK_ENV_SCHEMA = EnvSchema(
                 EnvVar(
                     "CONTENT_HYDRATION_ENABLED",
                     "",
-                    description="Cache content on workers and hydrate it between "
-                    "them; unset, on with the network plane.",
+                    description="Cache and hydrate content between workers; defaults "
+                    "to the network plane's setting.",
                     var_type=EnvVarType.BOOL,
                 ),
                 EnvVar(
@@ -1571,7 +1571,7 @@ STACK_ENV_SCHEMA = EnvSchema(
                     var_type=EnvVarType.DIR_PATH,
                     description=[
                         "Directory/Docker volume the server keeps task logs and "
-                        "artifacts in.",
+                        "traces in.",
                         "Defaults to the stack-scoped results volume when empty.",
                     ],
                 ),

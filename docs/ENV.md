@@ -21,7 +21,7 @@ directory `flowmesh stack` runs in.
 | `COMPOSE_PROFILES` | – | Extra compose profiles to deploy (e.g. `telemetry`); a root node adds the `content` profile unless an endpoint names another store |
 | `DATABASE_URL` | – | Postgres connection string |
 | `RESULTS_DIR` | `./results` | Server-side results directory |
-| `SERVER_RESULTS_DIR` | `flowmesh_results` | Host-side directory/docker volume to mount at `RESULTS_DIR` in the server container |
+| `SERVER_RESULTS_DIR` | `flowmesh_results` | Directory/Docker volume the server keeps task logs and traces in |
 | `WORKER_RESULTS_DIR` | `flowmesh_results` | Server-side directory/docker volume to mount to worker containers |
 | `SERVER_HTTP_PORT` | `8000` | Public HTTP port |
 | `SERVER_GRPC_PORT` | `50051` | Supervisor gRPC port |
@@ -35,7 +35,7 @@ directory `flowmesh stack` runs in.
 | `TASK_MERGE_MAX_BATCH_SIZE` | `4` | Max merged tasks per dispatch |
 | `ENABLE_CONTEXT_REUSE` | `true` | Bias toward workers with cached models |
 | `WORKER_CACHE_TTL_SEC` | `3600` | Cache metadata TTL |
-| `ENABLE_STAGE_WEIGHT_STICKINESS` | `true` | Prefer an idle worker holding a copy of a task's upstream artifacts, waiting up to 5 s for the worker that just produced them; acts with `CONTENT_HYDRATION_ENABLED` |
+| `ENABLE_STAGE_WEIGHT_STICKINESS` | `true` | Prefer workers holding a task's upstream artifacts (requires `CONTENT_HYDRATION_ENABLED`) |
 | `TASK_NO_WORKER_GRACE_SEC` | `60` | Grace before failing a task no worker can satisfy |
 | `ORCHESTRATOR_MAX_SCOPE_DEPTH` | `64` | Max nested call/spawn/recursion depth for v2 dynamic regions |
 | `ORCHESTRATOR_MAX_LOOP_ITERATIONS` | `1000` | Max iterations one v2 loop instance may run |
@@ -78,7 +78,7 @@ directory `flowmesh stack` runs in.
 | `CONTENT_STORE_CONSOLE_PORT` | `9801` | Co-located content store console port |
 | `CONTENT_STORE_CONSOLE_BIND_HOST` | `127.0.0.1` | Co-located content store console bind address |
 | `CONTENT_ACCESS_TTL_SEC` | `900` | Store-access grant lifetime (seconds, at least 60) |
-| `CONTENT_HYDRATION_ENABLED` | – | Cache content on workers and hydrate it between them; unset, on with the network plane (`true` requires `NETWORK_PLANE_ENABLED`) |
+| `CONTENT_HYDRATION_ENABLED` | – | Cache and hydrate content between workers; defaults to the network plane's setting |
 | `CONTENT_HYDRATION_GRANT_TTL_SEC` | `60` | Hydration grant lifetime (seconds) |
 | `CONTENT_HOLDER_TTL_SEC` | `300` | Holder report lifetime (seconds) |
 | `CONTENT_CACHE_TTL_SEC` | `0` | How long a worker keeps an unused cached copy (seconds, 0 = indefinitely) |
