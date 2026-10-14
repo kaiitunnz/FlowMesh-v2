@@ -1106,6 +1106,10 @@ class Dispatcher:
                 self._runtime.release_merged_child(task_id, child_id, None)
                 continue
             child_task, scrub = credentialed
+            # A child that leaves the merge takes the tokens its rendering made with
+            # it, so the dispatch neither hydrates nor lends what only it named.
+            mark = artifact_inputs.mark()
+            kept = len(rendered)
             try:
                 resolved, child_upstream = self._resolve_stage_references(
                     child_id,
@@ -1169,6 +1173,9 @@ class Dispatcher:
                     scrub(str(exc)),
                 )
                 self._runtime.release_merged_child(task_id, child_id, None)
+            finally:
+                if len(rendered) == kept:
+                    artifact_inputs.rollback(mark)
         return rendered or None
 
     def requeue_task(

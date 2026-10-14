@@ -1056,3 +1056,41 @@ async def test_a_childs_unaccepted_publication_runs_it_alone_not_its_parent() ->
     assert runtime._tasks[a].status == TaskStatus.DONE
     assert runtime._tasks[b].status == TaskStatus.DONE
     _assert_returned(runtime, registry, c)
+
+
+@pytest.mark.anyio
+async def test_a_child_leaving_the_merge_takes_its_tokens_with_it() -> None:
+    runtime = _runtime(_Registry())
+    ids = await _dispatch_merged(runtime)
+    a, b, c = ids["a"], ids["b"], ids["c"]
+    model = ArtifactBinding(
+        name="final_model",
+        kind=ArtifactKind.TREE,
+        reference=reference_for("org", b"model", media_type=TREE_MEDIA_TYPE),
+        size_bytes=5,
+    )
+    inputs = ArtifactInputs("dsp-1")
+
+    def resolve(task_id: str, task: Any, *rest: Any) -> Any:
+        if task_id == b:
+            inputs.token(model)
+            raise ValueError("b's own input is at fault")
+        return task
+
+    namespace = SimpleNamespace(
+        _runtime=runtime,
+        _logger=logging.getLogger("task-merge"),
+        _resolve_stage_references=lambda *args: (resolve(*args), None),
+        _build_stage_context=lambda record: record,
+        _condition_actual=None,
+    )
+    dispatcher = cast(Dispatcher, namespace)
+    namespace._render_checkpoint_load = lambda record, task, inputs: task
+    record = runtime._tasks[a]
+
+    rendered = Dispatcher._render_merged_children(
+        dispatcher, a, record, cast(Any, record.task.spec), inputs
+    )
+
+    assert [child.task_id for child in rendered or []] == [c]
+    assert inputs.bindings == {}

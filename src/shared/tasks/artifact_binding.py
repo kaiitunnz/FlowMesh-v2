@@ -257,6 +257,16 @@ class ArtifactInputs:
         self.bindings: dict[str, ArtifactBinding] = {}
         self._keys: dict[tuple[str, ...], str] = {}
 
+    def mark(self) -> int:
+        """Return a mark ``rollback`` forgets every later token back to."""
+        return len(self._keys)
+
+    def rollback(self, mark: int) -> None:
+        """Forget every token made since ``mark``, as for a spec that does not ship."""
+        for identity, key in list(self._keys.items())[mark:]:
+            del self._keys[identity]
+            del self.bindings[key]
+
     def token(self, binding: ArtifactBinding, inner: str = "") -> str:
         """Return the token naming ``binding``, and ``inner`` inside it when a tree."""
         # A file lands under its own name, so identical bytes under two names are two
