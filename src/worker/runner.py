@@ -64,7 +64,7 @@ from shared.tools.model.schema import MODEL_INTERFACE
 from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
 from shared.utils.hardware import available_devices, gpus_fit_dispatch
 from shared.utils.manifest import ARTIFACTS_DIR, clear_directory, prepare_output_dir
-from shared.utils.nofollow import PathRefused, remove_below
+from shared.utils.nofollow import PathRefused, open_dir, open_regular, remove_below
 from shared.utils.recent import RecentSet
 from shared.utils.redact import credential_scrubber
 from shared.utils.time import now_iso
@@ -158,6 +158,36 @@ def _declared_result(
     return None if outputs is None else canonical_result(request, outputs)
 
 
+_WORKING_OWNER = ".working-owner"
+_OWNER_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+def _mark_working_owner(out_dir: Path, owner: str) -> None:
+    """Record ``owner`` as the worker running in ``out_dir``, replacing any earlier
+    record without following a link."""
+    with open_dir(out_dir) as fd:
+        try:
+            os.unlink(_WORKING_OWNER, dir_fd=fd)
+        except FileNotFoundError:
+            pass
+        written = os.open(_WORKING_OWNER, _OWNER_FLAGS, 0o600, dir_fd=fd)
+        with os.fdopen(written, "w", encoding="utf-8") as record:
+            record.write(owner)
+
+
+def _working_owner(out_dir: Path) -> str | None:
+    """Return the worker recorded as running in ``out_dir``, or None when none is."""
+    try:
+        with open_dir(out_dir) as fd:
+            opened = open_regular(fd, _WORKING_OWNER)
+            if opened is None:
+                return None
+            with opened:
+                return opened.read(256).decode("utf-8", errors="replace")
+    except OSError:
+        return None
+
+
 class Runner:
     def __init__(
         self,
@@ -180,6 +210,7 @@ class Runner:
         telemetry: TelemetryConfig | None = None,
         gpu_binding_task_types: frozenset[TaskType] = frozenset(),
         cleanup_after_publish: bool = False,
+        owner: str = "",
     ):
         otel.configure(telemetry or DISABLED_TELEMETRY_CONFIG)
         self.lifecycle = lifecycle
@@ -190,6 +221,9 @@ class Runner:
         self.logger = logger
         self.default_executor = default_executor
         self._cleanup_after_publish = cleanup_after_publish
+        # The worker's alias, unique among the workers sharing its results directory,
+        # which marks the task directories whose working directories it may clear.
+        self._owner = owner
         self._input_hydrator = TaskInputHydrator(
             lifecycle.content_plane, cancelled=self._task_ending
         )
@@ -840,7 +874,11 @@ class Runner:
 
     def _clear_working_dirs(self) -> None:
         """Remove the working directories a task run leaves only while it runs, which
-        a worker that crashed mid-task left behind."""
+        this worker left behind when it crashed mid-task. A task directory another
+        worker sharing the results directory last ran in, or one no worker marked,
+        keeps them."""
+        if not self._owner:
+            return
         try:
             task_dirs = list(os.scandir(self.results_dir))
         except FileNotFoundError:
@@ -849,6 +887,8 @@ class Runner:
             if not entry.is_dir(follow_symlinks=False):
                 continue
             out_dir = Path(entry.path)
+            if _working_owner(out_dir) != self._owner:
+                continue
             for working in (
                 artifact_inputs_dir(out_dir),
                 ssh_inputs_dir(out_dir),
@@ -858,9 +898,17 @@ class Runner:
                 remove_below(working)
 
     def _resolve_output_dir(self, task_id: str) -> Path:
-        """Prepare and return the canonical output directory for a task's results."""
+        """Prepare and return the canonical output directory for a task's results,
+        marked as the one this worker runs the task in."""
         out_dir = self.results_dir / task_id
         prepare_output_dir(out_dir)
+        if self._owner:
+            try:
+                _mark_working_owner(out_dir, self._owner)
+            except OSError as exc:
+                self.logger.warning(
+                    "Could not mark %s as this worker's: %s", task_id, exc
+                )
         return out_dir
 
     def _checkpoint_uploader(

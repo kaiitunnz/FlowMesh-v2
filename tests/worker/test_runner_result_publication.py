@@ -87,6 +87,7 @@ def _run(
         executors={"echo": executor, "default": executor},
         default_executor=executor,
         logger=MagicMock(),
+        owner="w1",
     ).start()
     return lifecycle, plane
 
@@ -325,8 +326,9 @@ def test_a_starting_worker_clears_the_working_dirs_a_crash_left(
         (left / name / "x").mkdir(parents=True)
     (left / ".export-staging").symlink_to(outside)
     (left / "artifacts").mkdir()
+    (left / ".working-owner").write_text("w1")
 
     _run(tmp_path, BaseExecutorResult(), SharedFilesystemObjectStore(tmp_path / "cas"))
 
-    assert sorted(p.name for p in left.iterdir()) == ["artifacts"]
+    assert sorted(p.name for p in left.iterdir()) == [".working-owner", "artifacts"]
     assert (outside / "kept").read_bytes() == b"not the worker's"
