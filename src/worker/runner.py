@@ -43,7 +43,6 @@ from shared.tasks.specs import (
     InferenceBackend,
     InferenceSpecStrict,
     SSHSpecStrict,
-    TaskSpecStrictBase,
 )
 from shared.tasks.task_type import TaskType
 from shared.tasks.worker_message import HardwareUsage, WorkerHardware, WorkerTaskMessage
@@ -937,7 +936,7 @@ class Runner:
             else []
         )
         reference = self._write_single_result(
-            msg, msg.task_id, msg.spec, out_dir, declared, latest_revision(checkpoints)
+            msg, msg.task_id, out_dir, declared, latest_revision(checkpoints)
         )
         if reference is None:
             return {}
@@ -957,7 +956,7 @@ class Runner:
             child_dir = self._resolve_output_dir(child_id)
             published = self._publish_artifacts(msg, child_id, child_dir, child_result)
             child_reference = self._write_single_result(
-                msg, child_id, child_info.spec, child_dir, child_result
+                msg, child_id, child_dir, child_result
             )
             if child_reference is not None:
                 children[child_id] = child_reference.model_dump(mode="json")
@@ -1031,7 +1030,6 @@ class Runner:
         self,
         msg: WorkerTaskMessage,
         task_id: str,
-        spec: TaskSpecStrictBase,
         out_dir: Path,
         payload: BaseExecutorResult | None,
         checkpoints: str | None = None,
@@ -1040,7 +1038,7 @@ class Runner:
             return None
         out_dir.mkdir(parents=True, exist_ok=True)
         envelope = write_executor_result(
-            out_dir / "results.json", task_id, spec, payload, checkpoints
+            out_dir / "results.json", task_id, payload, checkpoints
         )
         if not _publishes_result(payload):
             return None

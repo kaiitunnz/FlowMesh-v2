@@ -27,7 +27,6 @@ from shared.tasks.task_type import TaskType
 from ..content.artifacts import checkpoint_spool_dir
 from ..utils.logging import configure_hf_library_logging
 from .base_executor import ExecutionError, Executor, ExecutorTask
-from .mixins.training import TrainingMixin
 from .sft_executor import SFT_LAUNCHER_FLAG, SFTExecutor
 from .utils.checkpoint_spool import CheckpointSpool
 from .utils.checkpoints import (
@@ -56,7 +55,7 @@ except ImportError:
 logger = logging.getLogger("worker.sft.lora")
 
 
-class LoRASFTExecutor(TrainingMixin, Executor):
+class LoRASFTExecutor(Executor):
     """Execute LoRA-based supervised fine-tuning using TRL's SFTTrainer."""
 
     name = "lora_sft_executor"
@@ -327,7 +326,7 @@ class LoRASFTExecutor(TrainingMixin, Executor):
         if ok:
             return result
 
-        write_executor_result(out_dir / "results.json", task.task_id, task.spec, result)
+        write_executor_result(out_dir / "results.json", task.task_id, result)
         message = error_msg or "LoRA SFT training failed"
         raise ExecutionError(message)
 

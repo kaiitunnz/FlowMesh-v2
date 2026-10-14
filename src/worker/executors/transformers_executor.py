@@ -470,7 +470,7 @@ class HFTransformersExecutor(InferenceMixin, Executor):
             task_id, task.workflow_id, out_dir, owner_id=task.owner_id
         ):
             result = self._run_inner(spec, task_id, out_dir, task.merged_children or [])
-        self._upload_outputs(task, result, out_dir)
+        self._upload_traces(task, result, out_dir)
         return result
 
     def _run_inner(

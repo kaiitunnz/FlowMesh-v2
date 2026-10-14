@@ -946,7 +946,7 @@ Summary:"""
             task_id, task.workflow_id, out_dir, owner_id=task.owner_id
         ):
             result = self._run_inner(task, out_dir)
-        self._upload_outputs(task, result, out_dir)
+        self._upload_traces(task, result, out_dir)
         return result
 
     @staticmethod

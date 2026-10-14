@@ -134,11 +134,10 @@ def test_connector_errors_quote_no_connection_credential():
 
 
 def test_a_result_records_its_model_identifier_without_a_credential(tmp_path: Path):
-    spec = make_worker_task_message({"taskType": "echo"}).spec
     result = InferenceResult(model=_URL)
 
     envelope = checkpoints.write_executor_result(
-        tmp_path / "results.json", "tsk-1", spec, result
+        tmp_path / "results.json", "tsk-1", result
     )
 
     assert _TOKEN not in envelope

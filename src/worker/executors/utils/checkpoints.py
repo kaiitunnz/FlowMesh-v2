@@ -230,30 +230,6 @@ def archive_path_for(model_dir: Path) -> Path:
     return model_dir.with_name(f"{model_dir.name}.tar.gz")
 
 
-def cleanup_artifact_path(
-    path: Path | None, logger: logging.Logger | None = None
-) -> None:
-    """Remove a local file or directory if it exists, ignoring missing paths."""
-    if not path:
-        return
-    try:
-        target = Path(path)
-    except TypeError:
-        return
-    try:
-        if not target.exists():
-            return
-        if target.is_dir():
-            shutil.rmtree(target)
-        else:
-            target.unlink()
-    except FileNotFoundError:
-        return
-    except Exception as exc:
-        if logger:
-            logger.warning("Failed to remove artifact at %s: %s", target, exc)
-
-
 def clear_directory(directory: Path) -> None:
     """Remove everything under ``directory``, leaving it empty."""
     for entry in directory.iterdir():
@@ -266,7 +242,6 @@ def clear_directory(directory: Path) -> None:
 def write_executor_result(
     path: Path,
     task_id: str,
-    spec: TaskSpecStrictBase,
     result: BaseExecutorResult,
     checkpoints: str | None = None,
 ) -> str:

@@ -33,7 +33,6 @@ from shared.tasks.task_type import TaskType
 from ..content.artifacts import checkpoint_spool_dir
 from ..utils.logging import configure_hf_library_logging
 from .base_executor import ExecutionError, Executor, ExecutorTask
-from .mixins.training import TrainingMixin
 from .utils.checkpoint_spool import CheckpointSpool
 from .utils.checkpoints import (
     archive_path_for,
@@ -46,7 +45,7 @@ from .utils.huggingface import build_hf_load_kwargs, pick_torch_dtype
 logger = logging.getLogger("worker.dpo")
 
 
-class DPOExecutor(TrainingMixin, Executor):
+class DPOExecutor(Executor):
     """DPO training executor using TRL library."""
 
     name = "dpo_executor"
@@ -454,9 +453,7 @@ class DPOExecutor(TrainingMixin, Executor):
                 dataset_size=len(dataset) if dataset is not None else 0,
                 output_dir=out_dir.as_posix(),
             )
-            write_executor_result(
-                out_dir / "results.json", task.task_id, task.spec, result
-            )
+            write_executor_result(out_dir / "results.json", task.task_id, result)
             logger.exception("DPO training failed: %s", exc)
             raise ExecutionError(result.error_message or "DPO training failed") from exc
 

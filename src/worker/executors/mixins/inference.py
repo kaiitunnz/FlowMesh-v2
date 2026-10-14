@@ -240,7 +240,7 @@ class InferenceMixin(DataMixin):
             value = cfg.get("default")
         return value
 
-    def _upload_outputs(
+    def _upload_traces(
         self, task: ExecutorTask, result: BaseExecutorResult, out_dir: Path
     ) -> None:
         """Upload the traces of the task and of each merged child it returned a

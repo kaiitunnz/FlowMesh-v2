@@ -42,7 +42,6 @@ from shared.utils.parsing import safe_float, safe_int, to_bool
 from ..content.artifacts import checkpoint_spool_dir
 from ..utils.logging import configure_hf_library_logging
 from .base_executor import ExecutionError, Executor, ExecutorTask
-from .mixins.training import TrainingMixin
 from .utils.checkpoint_spool import CheckpointSpool
 from .utils.checkpoints import (
     archive_path_for,
@@ -402,7 +401,7 @@ def _resolve_report_to(value: Any) -> str | list[str]:
     )
 
 
-class PPOExecutor(TrainingMixin, Executor):
+class PPOExecutor(Executor):
     """PPO training executor using TRL library."""
 
     name = "ppo_executor"
@@ -739,9 +738,7 @@ class PPOExecutor(TrainingMixin, Executor):
                 dataset_size=dataset_size,
                 output_dir=out_dir.as_posix(),
             )
-            write_executor_result(
-                out_dir / "results.json", task.task_id, task.spec, result
-            )
+            write_executor_result(out_dir / "results.json", task.task_id, result)
             self._task_out_dir = None
             raise ExecutionError(error_msg or "PPO training failed") from exc
 
