@@ -24,6 +24,7 @@ from shared.content import (
 )
 from shared.tasks.artifact_binding import ArtifactBinding, ArtifactKind
 
+from ..executors.base_executor import TaskCancelledError
 from .access import ContentAccessDenied
 from .plane import WorkerContentPlane
 
@@ -58,11 +59,13 @@ class ArtifactMaterializer:
         plane: WorkerContentPlane,
         task_id: str,
         root: Path,
+        cancelled: Callable[[], bool] = lambda: False,
         backoff_sec: float = _READ_BACKOFF_SEC,
     ) -> None:
         self._plane = plane
         self._task_id = task_id
         self._root = root
+        self._cancelled = cancelled
         self._backoff_sec = backoff_sec
 
     def materialize(self, binding: ArtifactBinding) -> Path:
@@ -119,6 +122,10 @@ class ArtifactMaterializer:
         )
 
     def _read[T](self, reference: ContentReference, read: Callable[[], T]) -> T:
+        if self._cancelled():
+            raise TaskCancelledError(
+                f"Task {self._task_id} ended while reading its artifact inputs"
+            )
         for attempt in range(1, _READ_ATTEMPTS + 1):
             try:
                 return read()

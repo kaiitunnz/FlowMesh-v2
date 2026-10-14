@@ -11,10 +11,14 @@ from typing import Any
 import pytest
 from transformers import TrainerControl, TrainerState, TrainingArguments
 
-from shared.content import ContentStoreError, SharedFilesystemObjectStore, TreeManifest
+from shared.content import (
+    ContentStoreError,
+    SharedFilesystemObjectStore,
+    TreeManifest,
+    WriteCancelled,
+)
 from shared.tasks.artifact_binding import ArtifactBinding
 from worker.content.artifacts import (
-    ArtifactPublisher,
     open_spool,
     spool_checkpoint,
     spool_failed,
@@ -59,7 +63,8 @@ def _uploader(
     tmp_path: Path, store: Any, reports: list[ArtifactBinding]
 ) -> CheckpointUploader:
     return CheckpointUploader(
-        ArtifactPublisher(store, "org"),
+        store,
+        "org",
         tmp_path / "spool",
         reports.append,
         logging.getLogger("test"),
@@ -215,3 +220,57 @@ def test_a_save_waits_while_too_many_checkpoints_wait_to_publish(
     assert saved.wait(5)
     saving.join()
     assert [step for step, _ in spooled_steps(spool)] == [3, 4]
+
+
+class _Endless(SharedFilesystemObjectStore):
+    """A store whose writes run until the writer cancels them."""
+
+    def __init__(self, root: Path) -> None:
+        super().__init__(root)
+        self.writes = 0
+
+    def write_file(self, scope: str, path: Path, **kwargs: Any) -> Any:
+        self.writes += 1
+        cancelled = kwargs["cancelled"]
+        while not cancelled():
+            time.sleep(0.01)
+        raise WriteCancelled("cancelled")
+
+
+def test_an_abort_interrupts_the_upload_under_way(tmp_path: Path) -> None:
+    store = _Endless(tmp_path / "cas")
+    uploader = _uploader(tmp_path, store, [])
+    spool_checkpoint(_checkpoint(tmp_path / "checkpoints", 1), tmp_path / "spool", 1)
+    uploader.start()
+    while not store.writes:
+        time.sleep(0.01)
+
+    started = time.monotonic()
+    uploader.abort()
+
+    assert time.monotonic() - started < 2
+    assert store.writes == 1
+
+
+def test_a_cancelled_task_stops_its_upload_without_retrying(tmp_path: Path) -> None:
+    store = _Endless(tmp_path / "cas")
+    ended = threading.Event()
+    uploader = CheckpointUploader(
+        store,
+        "org",
+        tmp_path / "spool",
+        lambda binding: None,
+        logging.getLogger("test"),
+        cancelled=ended.is_set,
+        poll_sec=0.01,
+        backoff_sec=0.0,
+    )
+    spool_checkpoint(_checkpoint(tmp_path / "checkpoints", 1), tmp_path / "spool", 1)
+    uploader.start()
+    while not store.writes:
+        time.sleep(0.01)
+
+    ended.set()
+    with pytest.raises(CheckpointPublishFailed):
+        uploader.drain()
+    assert store.writes == 1

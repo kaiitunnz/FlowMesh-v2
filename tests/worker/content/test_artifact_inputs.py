@@ -31,7 +31,11 @@ from tests.worker.factories import (
 from worker.content import WorkerContentCache, WorkerContentPlane
 from worker.content.artifact_inputs import ArtifactMaterializer
 from worker.content.inputs import TaskInputHydrator
-from worker.executors.base_executor import ExecutionError, RunSignals
+from worker.executors.base_executor import (
+    ExecutionError,
+    RunSignals,
+    TaskCancelledError,
+)
 from worker.executors.ssh_session import SSHConfig
 from worker.executors.ssh_session.inputs import resolve_inputs, stage_inputs_locally
 
@@ -345,3 +349,23 @@ def test_staged_ssh_inputs_are_writable_copies_of_the_cache(tmp_path: Path) -> N
     staged = tmp_path / "in" / "tsk-train" / "artifacts" / "final_model" / "config.json"
     assert staged.stat().st_nlink == 1
     assert staged.stat().st_mode & stat.S_IWUSR
+
+
+def test_a_task_that_ends_stops_reading_its_artifact_inputs(tmp_path: Path) -> None:
+    store = SharedFilesystemObjectStore(tmp_path / "shared")
+    tree = _publish_tree(store)
+    plane = FakeContentPlane(store)
+    ended = False
+
+    def end_after_manifest() -> None:
+        nonlocal ended
+        ended = True
+
+    plane.on_read = end_after_manifest
+    msg = _message(["flowmesh-artifact:0"], {"0": tree})
+
+    with pytest.raises(TaskCancelledError):
+        TaskInputHydrator(
+            cast(Any, plane), cancelled=lambda task_id: ended
+        ).install_artifacts(msg, tmp_path / "in")
+    assert plane.reads == [tree.reference]

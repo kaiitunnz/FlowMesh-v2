@@ -13,7 +13,7 @@ or not a result envelope fails the task.
 """
 
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -165,9 +165,11 @@ class TaskInputHydrator:
         self,
         plane: WorkerContentPlane | None,
         backoff_sec: float = _READ_BACKOFF_SEC,
+        cancelled: Callable[[str], bool] = lambda task_id: False,
     ) -> None:
         self._plane = plane
         self._backoff_sec = backoff_sec
+        self._cancelled = cancelled
 
     def hydrate(self, msg: WorkerTaskMessage) -> None:
         """Install every value the message names by reference, in place.
@@ -301,7 +303,10 @@ class TaskInputHydrator:
                 "no fabric content store",
                 retryable=True,
             )
-        return ArtifactMaterializer(self._plane, msg.task_id, root)
+        task_id = msg.task_id
+        return ArtifactMaterializer(
+            self._plane, task_id, root, lambda: self._cancelled(task_id)
+        )
 
     def _hydrate_child(
         self, reader: "_TaskReader", child: MergedChildTaskStrict

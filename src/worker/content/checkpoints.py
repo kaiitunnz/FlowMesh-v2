@@ -14,9 +14,11 @@ the trainer at its next save, and fails the task when the uploader drains.
 import logging
 import shutil
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 
+from shared.content import FabricObjectStore
 from shared.tasks.artifact_binding import ArtifactBinding, step_revision
 
 from .artifacts import (
@@ -30,6 +32,8 @@ from .artifacts import (
 _POLL_SEC = 1.0
 _ATTEMPTS = 5
 _BACKOFF_SEC = 1.0
+# How long an abort waits for an upload it interrupted to stop.
+_ABORT_WAIT_SEC = 10.0
 
 
 class CheckpointPublishFailed(RuntimeError):
@@ -41,14 +45,17 @@ class CheckpointUploader:
 
     def __init__(
         self,
-        publisher: ArtifactPublisher,
+        store: FabricObjectStore,
+        scope: str,
         spool_dir: Path,
         report: Callable[[ArtifactBinding], None],
         logger: logging.Logger,
+        cancelled: Callable[[], bool] = lambda: False,
         poll_sec: float = _POLL_SEC,
         backoff_sec: float = _BACKOFF_SEC,
     ) -> None:
-        self._publisher = publisher
+        self._task_cancelled = cancelled
+        self._publisher = ArtifactPublisher(store, scope, cancelled=self._cancelled)
         self._spool_dir = spool_dir
         self._report = report
         self._logger = logger
@@ -82,11 +89,22 @@ class CheckpointUploader:
         return [self._published[step] for step in sorted(self._published)]
 
     def abort(self) -> None:
-        """Stop without publishing what is still spooled."""
+        """Stop without publishing what is still spooled, interrupting an upload."""
         self._aborted.set()
         self._stop.set()
-        self._thread.join()
+        self._thread.join(_ABORT_WAIT_SEC)
         self._clear()
+
+    def _cancelled(self) -> bool:
+        return self._aborted.is_set() or self._task_cancelled()
+
+    def _interrupted_within(self, delay: float) -> bool:
+        deadline = time.monotonic() + delay
+        while not self._cancelled():
+            if (left := deadline - time.monotonic()) <= 0:
+                return False
+            self._aborted.wait(min(left, self._poll_sec))
+        return True
 
     def _run(self) -> None:
         while not self._stop.wait(self._poll_sec):
@@ -119,6 +137,9 @@ class CheckpointUploader:
                 )
                 return binding
             except Exception as exc:
+                if self._cancelled():
+                    self._error = exc
+                    return None
                 self._logger.warning(
                     "Publishing checkpoint %d failed (attempt %d of %d): %s",
                     step,
@@ -130,7 +151,7 @@ class CheckpointUploader:
                     self._error = exc
                     fail_spool(self._spool_dir, str(exc))
                     return None
-            if self._aborted.wait(delay):
+            if self._interrupted_within(delay):
                 return None
             delay *= 2
         return None

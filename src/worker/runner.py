@@ -16,6 +16,7 @@ from shared.content import (
     ContentReference,
     ContentStoreError,
     FabricObjectStore,
+    WriteCancelled,
 )
 from shared.harness.adapter import HarnessResultKind
 from shared.inference import (
@@ -189,7 +190,9 @@ class Runner:
         self.executors = executors
         self.logger = logger
         self.default_executor = default_executor
-        self._input_hydrator = TaskInputHydrator(lifecycle.content_plane)
+        self._input_hydrator = TaskInputHydrator(
+            lifecycle.content_plane, cancelled=self._task_ending
+        )
         self._peer_enabled = peer_enabled
         self._peer_connect_budget_sec = peer_connect_budget_sec
         self._peer_material = peer_material
@@ -718,6 +721,18 @@ class Runner:
             raise TaskCancelledError(ended)
         return stop_pending
 
+    def _task_ending(self, task_id: str) -> bool:
+        """Whether a cancel, a revoke of the task's dispatch, or the worker's shutdown
+        has ended the task's run."""
+        with self._cancel_lock:
+            dispatch_id = self._current_dispatch_id
+            return (
+                task_id in self._pending_cancels
+                or dispatch_id in self._cancelled_dispatches
+                or dispatch_id in self._revoked_dispatches
+                or self._shutdown_requested.is_set()
+            )
+
     def _ended_before_execution_locked(self, task_id: str) -> str | None:
         cancelled = (
             task_id in self._pending_cancels
@@ -848,7 +863,12 @@ class Runner:
             )
 
         uploader = CheckpointUploader(
-            ArtifactPublisher(store, msg.content_scope), spool, report, self.logger
+            store,
+            msg.content_scope,
+            spool,
+            report,
+            self.logger,
+            cancelled=lambda: self._task_ending(task_id),
         )
         uploader.start()
         return uploader
@@ -861,6 +881,10 @@ class Runner:
         try:
             return uploader.drain()
         except CheckpointPublishFailed as exc:
+            if self._task_ending(task_id):
+                raise TaskCancelledError(
+                    f"Task {task_id} ended while publishing its checkpoints"
+                ) from exc
             raise ExecutionError(
                 f"task {task_id} could not publish a checkpoint: {exc}",
                 retryable=True,
@@ -945,10 +969,16 @@ class Runner:
                 "content store to publish them in",
                 retryable=True,
             )
-        publisher = ArtifactPublisher(store, msg.content_scope)
+        publisher = ArtifactPublisher(
+            store, msg.content_scope, cancelled=lambda: self._task_ending(task_id)
+        )
         started = time.monotonic()
         try:
             bindings = publisher.publish_final(artifacts_dir, declared_archives(result))
+        except WriteCancelled as exc:
+            raise TaskCancelledError(
+                f"Task {task_id} ended while publishing its artifacts"
+            ) from exc
         except (ContentStoreError, ArtifactChanged, OSError) as exc:
             raise ExecutionError(
                 f"task {task_id} could not publish its artifacts: {exc}",
