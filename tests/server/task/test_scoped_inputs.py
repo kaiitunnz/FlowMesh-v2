@@ -43,7 +43,7 @@ def _dispatch(run: _Run, name: str) -> tuple[dict[str, Any], WorkerTaskMessage]:
         worker_registry=cast(WorkerRegistry, object()),
         logger=logging.getLogger("scoped-inputs"),
     )
-    inputs = ArtifactInputs()
+    inputs = ArtifactInputs("dsp-1")
     rendered, upstream = dispatcher._resolve_stage_references(
         task_id,
         record.task,
@@ -540,10 +540,10 @@ async def test_a_root_task_fed_by_tasks_reads_the_same_through_records_or_edges(
         record.task,
         dispatcher._build_stage_context(record),
         None,
-        ArtifactInputs(),
+        ArtifactInputs("dsp-1"),
     )
     by_edges, edge_bindings = dispatcher._resolve_stage_references(
-        task_id, record.task, {}, through_edges, ArtifactInputs()
+        task_id, record.task, {}, through_edges, ArtifactInputs("dsp-1")
     )
     assert by_edges == by_records
     assert by_records.spec.model_dump()["data"]["items"] == [
@@ -584,7 +584,7 @@ async def test_a_root_task_reads_a_named_input_of_a_task() -> None:
         record.task,
         dispatcher._build_stage_context(record),
         run.runtime.scoped_inputs(task_id),
-        ArtifactInputs(),
+        ArtifactInputs("dsp-1"),
     )
     assert rendered.spec.model_dump()["data"]["items"] == ["v", "v"]
     assert upstream is not None and upstream["src"].path == ("inner",)
@@ -640,9 +640,10 @@ async def test_an_artifact_ref_in_a_part_of_a_result_names_one_published_artifac
     worker = artifact_ref_source(
         project_expression("img.image", context), context, "img"
     )
-    assert spec["data"]["items"] == ["flowmesh-artifact:0"]
+    key = "dsp-1.0"
+    assert spec["data"]["items"] == [f"flowmesh-artifact:{key}"]
     assert message.artifact_inputs is not None
-    assert message.artifact_inputs["0"].reference == image.reference
+    assert message.artifact_inputs[key].reference == image.reference
     assert worker == (producer, "img.png")
     assert message.upstream_artifacts is not None
     assert [b.reference for b in message.upstream_artifacts[producer]] == [

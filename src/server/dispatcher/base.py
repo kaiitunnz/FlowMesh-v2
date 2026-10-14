@@ -701,7 +701,8 @@ class Dispatcher:
         task, scrub = credentialed
         context: dict[str, TaskRecord] = {}
         scoped: dict[str, ScopedInput] | None = None
-        artifact_inputs = ArtifactInputs()
+        dispatch_id = new_dispatch_id()
+        artifact_inputs = ArtifactInputs(dispatch_id)
         try:
             scoped = self._runtime.scoped_inputs(task_id)
             if scoped is None:
@@ -827,7 +828,6 @@ class Dispatcher:
         agent_episode = self._runtime.agent_episode_dispatch(
             task_id, OwnerFence(worker_id=worker.id, incarnation=worker.incarnation)
         )
-        dispatch_id = new_dispatch_id()
         message = WorkerTaskMessage(
             task_id=task_id,
             dispatch_id=dispatch_id,

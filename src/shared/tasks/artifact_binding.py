@@ -216,22 +216,34 @@ def model_artifact(
 
 
 ARTIFACT_REF_SCHEME = "flowmesh-artifact:"
-_TOKEN = re.compile(r"flowmesh-artifact:([0-9]+)")
+_TOKEN = re.compile(r"flowmesh-artifact:([A-Za-z0-9-]+\.[0-9]+)")
+
+
+class UnknownArtifactToken(ValueError):
+    """A spec names an artifact token its dispatch carries no artifact for."""
 
 
 class ArtifactInputs:
     """The published artifacts one dispatch's rendered spec names, each by a token
-    its worker replaces with the local path it hydrates the artifact to."""
+    its worker replaces with the local path it hydrates the artifact to.
 
-    def __init__(self) -> None:
+    Each token is keyed under ``scope``, the dispatch's own id, so text that only
+    looks like a token is never replaced.
+    """
+
+    def __init__(self, scope: str) -> None:
+        self.scope = scope
         self.bindings: dict[str, ArtifactBinding] = {}
-        self._keys: dict[tuple[str, str, str, ArtifactKind], str] = {}
+        self._keys: dict[tuple[str, ...], str] = {}
 
     def token(self, binding: ArtifactBinding, inner: str = "") -> str:
         """The token naming ``binding``, and ``inner`` inside it when a tree."""
-        identity = (*binding.reference.identity, binding.kind)
+        # A file lands under its own name, so identical bytes under two names are two
+        # inputs; a tree lands by its digest alone.
+        name = "" if binding.kind is ArtifactKind.TREE else binding.name
+        identity = (*binding.reference.identity, binding.kind, name)
         if (key := self._keys.get(identity)) is None:
-            key = self._keys[identity] = str(len(self._keys))
+            key = self._keys[identity] = f"{self.scope}.{len(self._keys)}"
             self.bindings[key] = binding
         return (
             f"{ARTIFACT_REF_SCHEME}{key}/{inner}"
@@ -240,9 +252,21 @@ class ArtifactInputs:
         )
 
 
-def substitute_artifact_tokens(value: str, paths: dict[str, str]) -> str:
-    """``value`` with each artifact token replaced by the path ``paths`` gives it."""
-    return _TOKEN.sub(lambda match: paths[match.group(1)], value)
+def substitute_artifact_tokens(value: str, paths: dict[str, str], scope: str) -> str:
+    """``value`` with each token of ``scope`` replaced by the path ``paths`` gives it.
+
+    Raises ``UnknownArtifactToken`` for a token of ``scope`` that ``paths`` lacks.
+    """
+
+    def path(match: re.Match[str]) -> str:
+        key = match.group(1)
+        if (found := paths.get(key)) is not None:
+            return found
+        if key.startswith(f"{scope}."):
+            raise UnknownArtifactToken(f"no artifact input {key} was dispatched")
+        return match.group(0)
+
+    return _TOKEN.sub(path, value)
 
 
 def names_artifact_token(value: str) -> bool:
@@ -252,6 +276,7 @@ def names_artifact_token(value: str) -> bool:
 __all__ = [
     "ARTIFACT_REF_SCHEME",
     "ArtifactInputs",
+    "UnknownArtifactToken",
     "names_artifact_token",
     "substitute_artifact_tokens",
     "FINAL_REVISION",

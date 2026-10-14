@@ -72,6 +72,10 @@ def _train(run: _Run, name: str, **extra: Any) -> str:
     return producer
 
 
+def _token(n: int) -> str:
+    return f"flowmesh-artifact:dsp-1.{n}"
+
+
 def _tokens(message: Any) -> list[ArtifactBinding]:
     return list((message.artifact_inputs or {}).values())
 
@@ -79,7 +83,7 @@ def _tokens(message: Any) -> list[ArtifactBinding]:
 def _reads_tree_of(run: _Run, consumer: str, producer: str) -> bool:
     """Whether the ready ``consumer`` renders one item naming ``producer``'s tree."""
     spec, message = _dispatch(run, consumer)
-    return spec["data"]["items"] == ["flowmesh-artifact:0"] and [
+    return spec["data"]["items"] == [_token(0)] and [
         b.reference for b in _tokens(message)
     ] == [_tree(message.content_scope, producer).reference]
 
@@ -97,7 +101,7 @@ async def test_a_root_input_projecting_a_file_names_its_published_tree() -> None
 
     spec, message = _dispatch(run, "use")
 
-    assert spec["data"]["items"] == ["flowmesh-artifact:0"]
+    assert spec["data"]["items"] == [_token(0)]
     assert [b.reference for b in _tokens(message)] == [
         _tree(message.content_scope, train).reference
     ]
@@ -157,7 +161,7 @@ async def test_a_fed_back_file_names_its_producers_tree() -> None:
 
     spec, message = _dispatch(run, "step")
 
-    assert spec["data"]["items"] == ["flowmesh-artifact:0"]
+    assert spec["data"]["items"] == [_token(0)]
     assert [b.reference for b in _tokens(message)] == [
         _tree(message.content_scope, step).reference
     ]
@@ -191,7 +195,7 @@ async def test_each_aggregate_members_file_names_its_own_producers_tree() -> Non
 
     spec, message = _dispatch(run, "use")
 
-    assert spec["data"]["items"] == ["flowmesh-artifact:0", "flowmesh-artifact:1"]
+    assert spec["data"]["items"] == [_token(0), _token(1)]
     assert [b.reference for b in _tokens(message)] == [
         _tree(message.content_scope, left).reference,
         _tree(message.content_scope, right).reference,

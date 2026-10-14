@@ -208,7 +208,7 @@ def _render(
     )
     namespace._producer_model = partial(Dispatcher._producer_model, dispatcher)
     record = runtime._tasks[parent]
-    inputs = ArtifactInputs()
+    inputs = ArtifactInputs("dsp-1")
     parent_spec = dispatcher._render_checkpoint_load(
         record, resolve(parent, record.task, record), inputs
     ).spec

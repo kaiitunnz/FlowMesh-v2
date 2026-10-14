@@ -93,17 +93,17 @@ def _result(**fields: Any) -> LoRAResult:
 
 def test_an_archive_ref_renders_as_the_tree_it_archives() -> None:
     result = _result(final_lora_archive=ArtifactRef(path="final_lora.tar.gz"))
-    inputs = ArtifactInputs()
+    inputs = ArtifactInputs("dsp-1")
     rendered = _dispatcher()._render_artifact_ref(
         result.final_lora_archive, result.artifacts_, inputs
     )
-    assert rendered == "flowmesh-artifact:0"
-    assert inputs.bindings == {"0": _TREE}
+    assert rendered == "flowmesh-artifact:dsp-1.0"
+    assert inputs.bindings == {"dsp-1.0": _TREE}
 
 
 def test_a_path_inside_a_tree_renders_under_its_token() -> None:
     result = _result()
-    inputs = ArtifactInputs()
+    inputs = ArtifactInputs("dsp-1")
     dispatcher = _dispatcher()
     whole = dispatcher._render_artifact_ref(
         {"path": "final_lora"}, result.artifacts_, inputs
@@ -111,24 +111,24 @@ def test_a_path_inside_a_tree_renders_under_its_token() -> None:
     member = dispatcher._render_artifact_ref(
         {"path": "final_lora/adapter_config.json"}, result.artifacts_, inputs
     )
-    assert whole == "flowmesh-artifact:0"
-    assert member == "flowmesh-artifact:0/adapter_config.json"
+    assert whole == "flowmesh-artifact:dsp-1.0"
+    assert member == "flowmesh-artifact:dsp-1.0/adapter_config.json"
     assert list(inputs.bindings.values()) == [_TREE]
 
 
 def test_a_file_artifact_renders_its_own_token() -> None:
-    inputs = ArtifactInputs()
+    inputs = ArtifactInputs("dsp-1")
     rendered = _dispatcher()._render_artifact_ref(
         {"path": "x.bin"}, _result().artifacts_, inputs
     )
-    assert rendered == "flowmesh-artifact:0"
-    assert inputs.bindings == {"0": _FILE}
+    assert rendered == "flowmesh-artifact:dsp-1.0"
+    assert inputs.bindings == {"dsp-1.0": _FILE}
 
 
 def test_a_ref_the_producer_never_published_fails_the_render() -> None:
     with pytest.raises(ValueError, match="published no artifact"):
         _dispatcher()._render_artifact_ref(
-            {"path": "missing.bin"}, _result().artifacts_, ArtifactInputs()
+            {"path": "missing.bin"}, _result().artifacts_, ArtifactInputs("dsp-1")
         )
 
 
@@ -136,31 +136,33 @@ def test_a_non_artifact_value_or_context_renders_nothing() -> None:
     dispatcher = _dispatcher()
     assert (
         dispatcher._render_artifact_ref(
-            "plain-text", _result().artifacts_, ArtifactInputs()
+            "plain-text", _result().artifacts_, ArtifactInputs("dsp-1")
         )
         is None
     )
     assert (
-        dispatcher._render_artifact_ref({"path": "x.bin"}, None, ArtifactInputs())
+        dispatcher._render_artifact_ref(
+            {"path": "x.bin"}, None, ArtifactInputs("dsp-1")
+        )
         is None
     )
 
 
 def test_a_checkpoints_ref_renders_as_the_last_checkpoint_published() -> None:
-    inputs = ArtifactInputs()
+    inputs = ArtifactInputs("dsp-1")
     rendered = _dispatcher()._render_artifact_ref(
         {"path": "checkpoints"},
         ArtifactContext(task_id="tsk-abc", checkpoints="step-20"),
         inputs,
     )
-    assert rendered == "flowmesh-artifact:0"
-    assert inputs.bindings == {"0": _STEP}
+    assert rendered == "flowmesh-artifact:dsp-1.0"
+    assert inputs.bindings == {"dsp-1.0": _STEP}
 
 
 def test_a_checkpoints_ref_of_a_task_that_published_none_fails_the_render() -> None:
     with pytest.raises(ValueError, match="published no artifact"):
         _dispatcher()._render_artifact_ref(
-            {"path": "checkpoints"}, _result().artifacts_, ArtifactInputs()
+            {"path": "checkpoints"}, _result().artifacts_, ArtifactInputs("dsp-1")
         )
 
 
@@ -173,3 +175,14 @@ def test_a_checkpoints_ref_reads_as_its_revisions_download_path() -> None:
         == "/api/v1/results/tsk-abc/files/checkpoints?revision=step-20"
     )
     assert context.revision_of("final_lora") is None
+
+
+def test_two_files_of_the_same_bytes_are_two_inputs() -> None:
+    inputs = ArtifactInputs("dsp-1")
+    renamed = _FILE.model_copy(update={"name": "copy.bin"})
+
+    first = inputs.token(_FILE)
+    second = inputs.token(renamed)
+
+    assert first != second
+    assert inputs.bindings == {"dsp-1.0": _FILE, "dsp-1.1": renamed}

@@ -153,7 +153,7 @@ def test_dispatcher_resolves_ssh_input_stage_names_from_local_stage_names() -> N
     context = dispatcher._build_stage_context(current)
     dispatcher._validate_ssh_inputs(current, spec, context)
     _, upstream_results = dispatcher._resolve_stage_references(
-        current.task_id, current.task, context, None, ArtifactInputs()
+        current.task_id, current.task, context, None, ArtifactInputs("dsp-1")
     )
 
     assert upstream_results is not None
@@ -395,7 +395,7 @@ def test_stage_reference_renders_the_producers_published_artifact() -> None:
         worker_registry=cast(WorkerRegistry, object()),
         logger=logging.getLogger("test-stage-reference-root"),
     )
-    inputs = ArtifactInputs()
+    inputs = ArtifactInputs("dsp-1")
 
     rendered = dispatcher._resolve_reference(
         "new.final_lora_archive", {"new": records["new"]}, inputs
@@ -404,6 +404,6 @@ def test_stage_reference_renders_the_producers_published_artifact() -> None:
         "old.final_lora_archive", {"old": records["old"]}, inputs
     )
 
-    assert rendered == "flowmesh-artifact:0"
-    assert inputs.bindings == {"0": tree}
+    assert rendered == "flowmesh-artifact:dsp-1.0"
+    assert inputs.bindings == {"dsp-1.0": tree}
     assert pre_upgrade == {"path": "final_lora.tar.gz"}

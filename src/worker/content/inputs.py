@@ -36,6 +36,7 @@ from shared.tasks import MergedChildTaskStrict, TaskEnvelopeStrict
 from shared.tasks.artifact_binding import (
     ArtifactBinding,
     ArtifactKind,
+    UnknownArtifactToken,
     names_artifact_token,
     resolve_artifact_input,
     substitute_artifact_tokens,
@@ -222,11 +223,15 @@ class TaskInputHydrator:
                 key: _materialized(materializer, msg.task_id, binding).as_posix()
                 for key, binding in inputs.items()
             }
-        msg.task = _as_dispatched(msg.task, paths)
-        if msg.merged_children:
-            msg.merged_children = [
-                _as_dispatched(child, paths) for child in msg.merged_children
-            ]
+        scope = msg.dispatch_id or ""
+        try:
+            msg.task = _as_dispatched(msg.task, paths, scope)
+            if msg.merged_children:
+                msg.merged_children = [
+                    _as_dispatched(child, paths, scope) for child in msg.merged_children
+                ]
+        except UnknownArtifactToken as exc:
+            raise input_unreadable(str(exc)) from exc
 
     def install_upstream_artifacts(self, msg: WorkerTaskMessage, root: Path) -> None:
         """Put each upstream artifact a spec's data loads under ``root``, and record
@@ -459,27 +464,29 @@ def _with_upstream_spec[S: TaskSpecStrictBase](
 
 
 def _as_dispatched[M: BaseModel](
-    model: M, artifact_paths: dict[str, str] | None = None
+    model: M, artifact_paths: dict[str, str] | None = None, scope: str = ""
 ) -> M:
     """The model as an inline dispatch delivers it to this worker, each artifact
-    token in it replaced by the artifact's local path."""
+    token of its dispatch's ``scope`` replaced by the artifact's local path."""
     wire = model.model_dump(mode="json", exclude_none=True, by_alias=True)
     if artifact_paths:
-        wire = _with_artifact_paths(wire, artifact_paths)
+        wire = _with_artifact_paths(wire, artifact_paths, scope)
     return type(model).model_validate(normalize_numbers(wire))
 
 
-def _with_artifact_paths(value: Any, paths: dict[str, str]) -> Any:
+def _with_artifact_paths(value: Any, paths: dict[str, str], scope: str) -> Any:
     if isinstance(value, str):
         return (
-            substitute_artifact_tokens(value, paths)
+            substitute_artifact_tokens(value, paths, scope)
             if names_artifact_token(value)
             else value
         )
     if isinstance(value, dict):
-        return {key: _with_artifact_paths(item, paths) for key, item in value.items()}
+        return {
+            key: _with_artifact_paths(item, paths, scope) for key, item in value.items()
+        }
     if isinstance(value, list):
-        return [_with_artifact_paths(item, paths) for item in value]
+        return [_with_artifact_paths(item, paths, scope) for item in value]
     return value
 
 
