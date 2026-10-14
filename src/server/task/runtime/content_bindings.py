@@ -380,32 +380,69 @@ class ContentBindings:
             accepted.append(stamped)
         return accepted
 
-    def _publishable(self, record: TaskRecord, binding: ArtifactBinding) -> bool:
+    def artifact_refusal_locked(
+        self,
+        record: TaskRecord,
+        bindings: Sequence[ArtifactBinding] | None,
+        children: dict[str, Sequence[ArtifactBinding] | None],
+    ) -> str | None:
+        """Why a success's reported publications cannot be accepted whole, or None.
+
+        A report that does not parse, a publication outside the task's scope, and an
+        archive over no tree of its revision are refused; a revision and name already
+        accepted is not, since its first publication stands.
+        """
+        reports: list[tuple[TaskRecord, Sequence[ArtifactBinding] | None]] = [
+            (record, bindings)
+        ]
+        for child_id, child_bindings in children.items():
+            if (child := self._tasks.get(child_id)) is not None:
+                reports.append((child, child_bindings))
+        for owner, reported in reports:
+            if reported is None:
+                return f"task {owner.task_id} reported artifacts that do not parse"
+            trees = {
+                binding.key: binding
+                for binding in reported
+                if binding.kind is ArtifactKind.TREE
+            }
+            for binding in reported:
+                if (reason := self._refusal(owner, binding, trees)) is not None:
+                    return reason
+        return None
+
+    def _refusal(
+        self,
+        record: TaskRecord,
+        binding: ArtifactBinding,
+        reported_trees: dict[tuple[str, str], ArtifactBinding],
+    ) -> str | None:
         scopes = {binding.reference.authorization_scope}
         if binding.largest is not None:
             scopes.add(binding.largest.authorization_scope)
         if scopes != {record.org_id}:
-            self._logger.error(
-                "Task %s published %s outside its scope %s; not binding it",
-                record.task_id,
-                binding.name,
-                record.org_id,
+            return (
+                f"task {record.task_id} published {binding.name} outside its scope "
+                f"{record.org_id}"
             )
-            return False
         if binding.kind is ArtifactKind.ARCHIVE:
-            tree = record.artifacts.get((binding.revision, binding.of or ""))
+            key = (binding.revision, binding.of or "")
+            tree = record.artifacts.get(key) or reported_trees.get(key)
             if (
                 tree is None
                 or tree.kind is not ArtifactKind.TREE
                 or tree.reference.identity != binding.reference.identity
             ):
-                self._logger.error(
-                    "Task %s published archive %s over no tree %s it published",
-                    record.task_id,
-                    binding.name,
-                    binding.of,
+                return (
+                    f"task {record.task_id} published archive {binding.name} over "
+                    f"no tree {binding.of} it published"
                 )
-                return False
+        return None
+
+    def _publishable(self, record: TaskRecord, binding: ArtifactBinding) -> bool:
+        if (reason := self._refusal(record, binding, {})) is not None:
+            self._logger.error("%s; not binding it", reason)
+            return False
         return True
 
     def accepted_reference(

@@ -3162,6 +3162,18 @@ class TaskRuntime:
             return
         self.originate_facade_turn_group(task_id, group)
 
+    def artifact_refusal(self, task_id: str, payload: dict[str, Any]) -> str | None:
+        """Why a success's reported publications cannot be accepted whole, or None
+        when they can or the task is not held here."""
+        own = reported_artifacts(payload.get("artifacts"))
+        children = reported_child_artifacts(payload)
+        with self._lock:
+            if (record := self._tasks.get(task_id)) is None:
+                return None
+            return self._content_bindings.artifact_refusal_locked(
+                record, own, dict(children)
+            )
+
     def success_settles_task(self, task_id: str, payload: dict[str, Any]) -> bool:
         """Whether a worker success ends its task or yields the lane back to run again.
 

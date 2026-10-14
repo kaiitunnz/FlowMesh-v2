@@ -16,11 +16,13 @@ from server.task.models import EventEffect, TaskStatus
 from server.task.redrive import StoreRedriveScheduler
 from server.task.runtime import TaskRuntime, TransitionNotDurable
 from shared.content import ContentReference
+from shared.schemas.event import TaskEvent
 from shared.tasks.artifact_binding import ArchiveFacts, ArtifactBinding, ArtifactKind
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.redis_helpers import fake_redis_client, raw_control
 from tests.server.result_store import make_result_reader, result_payload
+from tests.server.task.test_task_merge import _monitor
 from tests.server.task.test_v2_orchestration import _TS, _WorkerRegistryStub
 
 _V1 = """apiVersion: flowmesh/v1
@@ -165,7 +167,7 @@ def test_a_stale_dispatch_binds_nothing() -> None:
     assert raw_control(registry).exists(task_artifacts_key(train)) == 0
 
 
-def test_artifacts_outside_the_scope_or_over_no_tree_are_refused() -> None:
+def test_artifacts_outside_the_scope_or_over_no_tree_are_not_bound() -> None:
     registry = _registry()
     runtime = _runtime(registry)
     _, (train, _use) = _register(runtime)
@@ -175,21 +177,73 @@ def test_artifacts_outside_the_scope_or_over_no_tree_are_refused() -> None:
     _succeed(runtime, train, [foreign, _archive("missing"), _tree("kept")], "dsp-1")
 
     assert set(_stored(registry, train)) == {("final", "kept")}
-    assert runtime._tasks[train].status == TaskStatus.DONE
 
 
-def test_a_report_that_does_not_parse_binds_nothing_but_settles() -> None:
+@pytest.mark.parametrize(
+    ("artifacts", "reason"),
+    [
+        ([{"name": "../escape", "kind": "file"}], "do not parse"),
+        ("not a list", "do not parse"),
+        (
+            [_tree("foreign").model_copy(update={"reference": _ref(b"x", "other")})],
+            "outside its scope",
+        ),
+        ([_archive("missing")], "over no tree"),
+    ],
+)
+def test_a_success_whose_artifacts_cannot_all_be_bound_fails_the_task(
+    artifacts: Any, reason: str
+) -> None:
     registry = _registry()
     runtime = _runtime(registry)
     _, (train, _use) = _register(runtime)
-    record_dispatch(runtime, train, dispatch_id="dsp-1")
+    record_dispatch(runtime, train, "wkr-1", "dsp-1")
     payload = result_payload(runtime._results, train, {"ok": True}, "org")
-    payload["artifacts"] = [{"name": "../escape", "kind": "file"}]
+    payload["artifacts"] = (
+        [
+            a.model_dump(mode="json") if isinstance(a, ArtifactBinding) else a
+            for a in artifacts
+        ]
+        if isinstance(artifacts, list)
+        else artifacts
+    )
 
-    runtime.mark_succeeded(train, "wkr-1", payload, _TS, dispatch_id="dsp-1")
+    _monitor(runtime).handle_task_event(
+        TaskEvent(
+            type="TASK_SUCCEEDED",
+            task_id=train,
+            worker_id="wkr-1",
+            dispatch_id="dsp-1",
+            payload=payload,
+            ts=_TS,
+        )
+    )
 
-    assert runtime._tasks[train].status == TaskStatus.DONE
+    record = runtime._tasks[train]
+    assert record.status == TaskStatus.FAILED
+    assert record.error is not None and record.error.startswith("artifacts_unaccepted:")
+    assert reason in record.error
     assert _stored(registry, train) == {}
+
+
+def test_a_republished_revision_or_an_archive_over_its_reported_tree_is_accepted() -> (
+    None
+):
+    registry = _registry()
+    runtime = _runtime(registry)
+    _, (train, _use) = _register(runtime)
+    with runtime._lock:
+        runtime._content_bindings.bind_artifacts_locked(
+            runtime._tasks[train], [_tree()], "dsp-0"
+        )
+    payload = {
+        "artifacts": [
+            a.model_dump(mode="json")
+            for a in (_tree(data=b"different"), _tree("other"), _archive("other"))
+        ]
+    }
+
+    assert runtime.artifact_refusal(train, payload) is None
 
 
 def test_a_conflicting_publication_keeps_the_first() -> None:

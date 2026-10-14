@@ -546,7 +546,9 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   success binds the task's `final` set, and a training run publishes each checkpoint it
   saves as `step-<n>` while it runs. An `ArtifactBinding` names each artifact by its
   path and revision; a name is published once at a revision and never replaced, so the
-  same bytes again change nothing and different bytes are refused. After a retry, a
+  same bytes again change nothing and different bytes are refused. A success whose
+  publications cannot all be bound, as one outside the task's scope or an archive over
+  no tree it published, fails the task. After a retry, a
   revision an earlier attempt published keeps those bytes, and each later revision comes
   from the attempt that published it, which its binding's `dispatch_id` records. The
   catalog lives with the task's record, so a freed workflow still lists and serves its

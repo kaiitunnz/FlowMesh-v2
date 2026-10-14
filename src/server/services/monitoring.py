@@ -566,6 +566,23 @@ class EventMonitor:
                 # Count only a settling success; one that yields the lane back would
                 # tally several times for one task.
                 settles = self._runtime.success_settles_task(event.task_id, payload)
+                if settles and (
+                    refusal := self._runtime.artifact_refusal(event.task_id, payload)
+                ):
+                    # A success whose publications cannot all be bound would settle
+                    # with artifacts its result names missing.
+                    self._handle_task_failed(
+                        event.model_copy(
+                            update={
+                                "type": "TASK_FAILED",
+                                "error": f"artifacts_unaccepted: {refusal}",
+                                "retryable": False,
+                            }
+                        ),
+                        worker_id,
+                        payload,
+                    )
+                    return
                 if settles and (failure := export_failure(payload)) is not None:
                     # The completion ends the agent, so the exports it declared are
                     # its output; one it could not copy out fails it. Re-running the
