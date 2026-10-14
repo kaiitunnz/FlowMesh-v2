@@ -83,6 +83,8 @@ _LOGS_NAME = "logs.jsonl"
 # Bundles streaming at once; each holds a thread and a compressor.
 _STREAM_SLOTS = 4
 _RETRY_AFTER_SEC = 5
+# What a download gathers before each send.
+_SEND_BYTES = 1 << 20
 
 router = APIRouter(prefix="/results", tags=["Results"])
 
@@ -312,6 +314,15 @@ async def download_result_bundle(
     has_logs = "logs" in sections and await asyncio.to_thread(
         _has_dir, base_dir / LOGS_DIR
     )
+    if (
+        "artifacts" in sections
+        and revision != FINAL_REVISION
+        and not any(rev == revision for rev, _ in bindings)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"no artifacts published at revision {revision}",
+        )
     if result is None and not bindings and not has_logs:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="result bundle not found"
@@ -473,7 +484,9 @@ def _resolve_bundle_sections(include: list[str]) -> tuple[str, ...]:
 async def _read_result_bytes(runtime: TaskRuntime, task_id: str) -> bytes:
     try:
         result = await asyncio.to_thread(runtime.read_result_bytes, task_id)
-    except (ResultUnreadable, ResultUnavailable) as exc:
+    except ResultUnavailable as exc:
+        raise _store_unavailable(exc) from exc
+    except ResultUnreadable as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to read result: {exc}",
@@ -668,7 +681,13 @@ class ArtifactResponse(Response):
             headers["content-length"] = str(size)
         else:
             start, end = span
-            status_code, chunks = 206, download.part(start, end - start)
+            # A range spanning the whole object is read whole, so it is verified.
+            status_code = 206
+            chunks = (
+                download.whole()
+                if (start, end) == (0, size)
+                else download.part(start, end - start)
+            )
             headers["content-range"] = f"bytes {start}-{end - 1}/{size}"
             headers["content-length"] = str(end - start)
         try:
@@ -693,9 +712,8 @@ class ArtifactResponse(Response):
         headers: MutableHeaders,
         chunks: Iterator[bytes],
     ) -> None:
-        end = object()
         try:
-            chunk = await to_thread.run_sync(next, chunks, end)
+            body, done = await to_thread.run_sync(_gather, chunks)
         except ResultUnavailable as exc:
             await PlainTextResponse(
                 f"the content store is unreachable: {exc}",
@@ -715,14 +733,27 @@ class ArtifactResponse(Response):
                 "headers": headers.raw,
             }
         )
-        if scope.get("method", "GET").upper() == "HEAD":
-            await send({"type": "http.response.body", "body": b"", "more_body": False})
-            return
-        while chunk is not end:
-            assert isinstance(chunk, bytes)
-            await send({"type": "http.response.body", "body": chunk, "more_body": True})
-            chunk = await to_thread.run_sync(next, chunks, end)
-        await send({"type": "http.response.body", "body": b"", "more_body": False})
+        while True:
+            await send(
+                {"type": "http.response.body", "body": body, "more_body": not done}
+            )
+            if done:
+                return
+            body, done = await to_thread.run_sync(_gather, chunks)
+
+
+def _gather(chunks: Iterator[bytes]) -> tuple[bytes, bool]:
+    """About ``_SEND_BYTES`` of ``chunks``, and whether they are done.
+
+    The first gather reaches past an archive view's leading headers into its first
+    stored member, so an unreachable store answers before the response starts.
+    """
+    gathered = bytearray()
+    while len(gathered) < _SEND_BYTES:
+        if (chunk := next(chunks, None)) is None:
+            return bytes(gathered), True
+        gathered += chunk
+    return bytes(gathered), False
 
 
 async def _no_receive() -> Message:

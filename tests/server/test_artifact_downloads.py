@@ -18,7 +18,7 @@ from fastapi import FastAPI, HTTPException, status
 
 from server.routers.v1 import results as results_router
 from server.task import artifact_reads
-from server.task.results import ResultReader, ResultUnreadable
+from server.task.results import ResultReader, ResultUnavailable, ResultUnreadable
 from shared.content import (
     ContentReference,
     ContentUnavailable,
@@ -345,20 +345,59 @@ def _member(binding: ArtifactBinding, runtime: _Runtime, path: str) -> Any:
 
 
 @pytest.mark.anyio
-async def test_a_corrupt_member_ends_the_archive_before_its_last_bytes(
+async def test_a_corrupt_member_in_the_first_window_answers_500(
     runtime: _Runtime, published: dict[str, ArtifactBinding]
 ) -> None:
-    facts = published["final_model.tar.gz"].archive
-    assert facts is not None
     _corrupt(
         runtime,
         _member(published["final_model"], runtime, "weights/model.safetensors"),
     )
-    sent: list[bytes] = []
+
+    served = await serve(await _download(runtime, "final_model.tar.gz"))
+
+    assert served.status == 500
+
+
+@pytest.mark.anyio
+async def test_an_archive_whose_members_are_unreachable_answers_503(
+    runtime: _Runtime,
+    published: dict[str, ArtifactBinding],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     response = await _download(runtime, "final_model.tar.gz")
-    with pytest.raises(ResultUnreadable):
-        sent.append((await serve(response)).body)
-    assert not sent
+
+    def down(*_args: Any, **_kwargs: Any) -> Any:
+        raise ContentUnavailable("store down")
+
+    monkeypatch.setattr(runtime.store, "open", down)
+    served = await serve(response)
+
+    assert served.status == 503
+    assert served.headers["retry-after"]
+
+
+@pytest.mark.anyio
+async def test_a_range_spanning_the_whole_object_is_verified(
+    runtime: _Runtime, published: dict[str, ArtifactBinding]
+) -> None:
+    weights = _member(published["final_model"], runtime, "weights/model.safetensors")
+    _corrupt(runtime, weights)
+
+    served = await serve(
+        await _download(runtime, "final_model/weights/model.safetensors"),
+        {"Range": "bytes=0-"},
+    )
+
+    assert served.status == 500
+
+
+def test_the_bundle_reader_fills_what_it_is_asked_for() -> None:
+    reader = artifact_reads._ChunkReader(iter([b"ab", b"", b"cd", b"e"]))
+    buffer = bytearray(4)
+
+    assert reader.readinto(buffer) == 4 and buffer == b"abcd"
+    assert reader.readinto(buffer) == 1 and buffer[:1] == b"e"
+    assert reader.readinto(buffer) == 0
 
 
 @pytest.mark.anyio
@@ -460,6 +499,32 @@ async def test_a_bundle_holds_the_result_the_revisions_files_and_the_logs(
     assert _bundled(step.body) == {
         "tsk-1/artifacts/checkpoints/checkpoint-2/trainer_state.json": b'{"step": 2}'
     }
+
+
+@pytest.mark.anyio
+async def test_a_bundle_at_a_revision_never_published_is_not_found(
+    runtime: _Runtime, published: dict[str, ArtifactBinding]
+) -> None:
+    with pytest.raises(HTTPException) as raised:
+        await _bundle(runtime, ["artifacts"], revision="step-9")
+    assert raised.value.status_code == status.HTTP_404_NOT_FOUND
+
+
+@pytest.mark.anyio
+async def test_the_result_file_answers_503_while_the_store_is_unreachable(
+    runtime: _Runtime,
+    published: dict[str, ArtifactBinding],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def down(_task_id: str) -> bytes:
+        raise ResultUnavailable("store down")
+
+    monkeypatch.setattr(runtime, "read_result_bytes", down)
+
+    with pytest.raises(HTTPException) as raised:
+        await _download(runtime, "results.json")
+    assert raised.value.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+    assert raised.value.headers == {"Retry-After": str(results_router._RETRY_AFTER_SEC)}
 
 
 @pytest.mark.anyio

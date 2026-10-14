@@ -215,16 +215,19 @@ class _ChunkReader(io.RawIOBase):
         return True
 
     def readinto(self, buffer: Buffer, /) -> int:
-        while not self._held:
-            try:
-                self._held = next(self._chunks)
-            except StopIteration:
-                return 0
+        """Fill ``buffer`` until it is full or the chunks end."""
         view = memoryview(buffer).cast("B")
-        count = min(len(view), len(self._held))
-        view[:count] = self._held[:count]
-        self._held = self._held[count:]
-        return count
+        filled = 0
+        while filled < len(view):
+            while not self._held:
+                if (held := next(self._chunks, None)) is None:
+                    return filled
+                self._held = held
+            count = min(len(view) - filled, len(self._held))
+            view[filled : filled + count] = self._held[:count]
+            self._held = self._held[count:]
+            filled += count
+        return filled
 
 
 class _Cancelled(Exception):
