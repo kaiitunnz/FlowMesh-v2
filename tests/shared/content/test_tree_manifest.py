@@ -55,7 +55,6 @@ def test_lookup_finds_a_member_and_a_directory() -> None:
 
     assert manifest.member("a/y") == TreeMember("a/y", _D, 5)
     assert manifest.member("a") is None
-    assert [member.path for member in manifest.under("a")] == ["a/x", "a/y"]
     assert manifest.largest() == TreeMember("a/y", _D, 5)
     assert manifest.size_bytes == 8
 

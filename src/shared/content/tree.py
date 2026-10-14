@@ -7,9 +7,11 @@ bytes a member does not. The manifest is canonical — members sorted by path, e
 one way — so the same files always name the same tree.
 """
 
+import bisect
 import json
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable
 from dataclasses import dataclass
+from operator import attrgetter
 from typing import Self
 
 from shared.utils.nofollow import is_plain_segment
@@ -76,26 +78,10 @@ class TreeManifest:
 
     def member(self, path: str) -> TreeMember | None:
         """Return the member at ``path``, or None."""
-        low, high = 0, len(self.members)
-        while low < high:
-            mid = (low + high) // 2
-            if self.members[mid].path < path:
-                low = mid + 1
-            else:
-                high = mid
-        if low < len(self.members) and self.members[low].path == path:
-            return self.members[low]
+        index = bisect.bisect_left(self.members, path, key=attrgetter("path"))
+        if index < len(self.members) and self.members[index].path == path:
+            return self.members[index]
         return None
-
-    def under(self, prefix: str) -> Iterator[TreeMember]:
-        """Yield the members at or below directory ``prefix``; every member for
-        ``""``."""
-        if not prefix:
-            yield from self.members
-            return
-        for member in self.members:
-            if member.path.startswith(prefix + "/"):
-                yield member
 
     def encode(self) -> bytes:
         return json.dumps(
