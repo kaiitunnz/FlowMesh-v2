@@ -19,8 +19,10 @@ from shared.content import ContentReference, is_member_path
 from shared.utils.nofollow import is_plain_segment
 
 FINAL_REVISION = "final"
-REVISION_PATTERN = r"^(final|step-(0|[1-9][0-9]*))$"
-_STEP = re.compile(r"step-(0|[1-9][0-9]*)")
+_STEP_GRAMMAR = r"step-(0|[1-9][0-9]*)"
+REVISION_PATTERN = rf"^({FINAL_REVISION}|{_STEP_GRAMMAR})$"
+_STEP = re.compile(_STEP_GRAMMAR)
+_REVISION = re.compile(REVISION_PATTERN)
 
 
 def revision_step(revision: str) -> int | None:
@@ -45,7 +47,7 @@ def step_revision(step: int) -> str:
 
 def is_revision(value: str) -> bool:
     """Return whether ``value`` names a revision: ``final`` or ``step-<n>``."""
-    return value == FINAL_REVISION or _STEP.fullmatch(value) is not None
+    return _REVISION.fullmatch(value) is not None
 
 
 def _revision(value: str) -> str:
