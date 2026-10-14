@@ -17,6 +17,7 @@ from shared.content import (
     TreeManifest,
     TreeMember,
 )
+from shared.schemas.event import TaskFailureKind
 from shared.tasks import TaskType
 from shared.tasks.artifact_binding import ArchiveFacts, ArtifactBinding, ArtifactKind
 from shared.tasks.result_binding import ResultBinding
@@ -151,7 +152,7 @@ def test_an_artifact_outside_the_tasks_scope_is_refused(tmp_path: Path) -> None:
     assert not (tmp_path / "in").exists()
 
 
-def test_an_outage_mid_tree_is_retryable_and_leaves_no_partial_tree(
+def test_an_outage_mid_tree_names_its_input_and_leaves_no_partial_tree(
     tmp_path: Path,
 ) -> None:
     store = SharedFilesystemObjectStore(tmp_path / "shared")
@@ -168,6 +169,9 @@ def test_an_outage_mid_tree_is_retryable_and_leaves_no_partial_tree(
     with pytest.raises(ExecutionError) as raised:
         TaskInputHydrator(cast(Any, plane)).install_artifacts(msg, tmp_path / "in")
     assert raised.value.retryable
+    assert raised.value.failure_kind is TaskFailureKind.INPUT_UNAVAILABLE
+    assert raised.value.unavailable_inputs == (plane.reads[1],)
+    assert plane.reads.count(plane.reads[1]) == 3
     assert not (tmp_path / "in" / tree.reference.content_digest).exists()
 
     plane.error, plane.on_read = None, None

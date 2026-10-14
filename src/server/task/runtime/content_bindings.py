@@ -479,9 +479,13 @@ class ContentBindings:
     def consumed_inputs_locked(
         self, record: TaskRecord, references: Sequence[ContentReference]
     ) -> tuple[ContentReference, ...]:
-        """The named objects the task consumes, each once."""
+        """The named objects the task consumes, each once: a bound input, or an
+        object its dispatch's artifact inputs name or hold."""
         return tuple(
             reference
             for reference in dict.fromkeys(references)
             if self.consumes_locked(record, reference)
+            or any(
+                reference.identity in objects for objects in record.dispatched_objects
+            )
         )

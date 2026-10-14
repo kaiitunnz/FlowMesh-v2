@@ -12,18 +12,37 @@ a link to the cached copy, so what stays on disk is the cache's, under its bound
 
 import os
 import shutil
+import time
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 
-from shared.content import ContentReference, TreeManifest, TreeManifestError
+from shared.content import (
+    ContentReference,
+    ContentUnavailable,
+    TreeManifest,
+    TreeManifestError,
+)
 from shared.tasks.artifact_binding import ArtifactBinding, ArtifactKind
 
+from .access import ContentAccessDenied
 from .plane import WorkerContentPlane
 
 ARTIFACT_INPUTS_DIR = ".artifact-inputs"
+# A read that cannot reach the store retries briefly before the task reports it.
+_READ_ATTEMPTS = 3
+_READ_BACKOFF_SEC = 0.2
 
 
 class ArtifactInputUnreadable(RuntimeError):
     """An artifact input's tree manifest is not one."""
+
+
+class ArtifactInputUnavailable(RuntimeError):
+    """An object an artifact input names could not be read from the store."""
+
+    def __init__(self, reference: ContentReference, cause: Exception) -> None:
+        super().__init__(f"{reference.content_digest}: {cause}")
+        self.reference = reference
 
 
 def artifact_inputs_dir(out_dir: Path) -> Path:
@@ -34,10 +53,17 @@ def artifact_inputs_dir(out_dir: Path) -> Path:
 class ArtifactMaterializer:
     """Puts one task's artifact inputs on disk through the content plane."""
 
-    def __init__(self, plane: WorkerContentPlane, task_id: str, root: Path) -> None:
+    def __init__(
+        self,
+        plane: WorkerContentPlane,
+        task_id: str,
+        root: Path,
+        backoff_sec: float = _READ_BACKOFF_SEC,
+    ) -> None:
         self._plane = plane
         self._task_id = task_id
         self._root = root
+        self._backoff_sec = backoff_sec
 
     def materialize(self, binding: ArtifactBinding) -> Path:
         digest = binding.reference.content_digest
@@ -50,9 +76,7 @@ class ArtifactMaterializer:
         if dest.is_dir():
             return dest
         try:
-            manifest = TreeManifest.decode(
-                self._plane.hydrate(self._task_id, binding.reference)
-            )
+            manifest = TreeManifest.decode(self._manifest_bytes(binding.reference))
         except TreeManifestError as exc:
             raise ArtifactInputUnreadable(
                 f"artifact {binding.name} names no tree: {exc}"
@@ -73,9 +97,7 @@ class ArtifactMaterializer:
             self._copy(binding.reference, dest)
             return
         try:
-            manifest = TreeManifest.decode(
-                self._plane.hydrate(self._task_id, binding.reference)
-            )
+            manifest = TreeManifest.decode(self._manifest_bytes(binding.reference))
         except TreeManifestError as exc:
             raise ArtifactInputUnreadable(
                 f"artifact {binding.name} names no tree: {exc}"
@@ -87,16 +109,37 @@ class ArtifactMaterializer:
 
     def _copy(self, reference: ContentReference, dest: Path) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)
-        self._plane.hydrate_to(self._task_id, reference, dest)
+        self._read(
+            reference, lambda: self._plane.hydrate_to(self._task_id, reference, dest)
+        )
+
+    def _manifest_bytes(self, reference: ContentReference) -> bytes:
+        return self._read(
+            reference, lambda: self._plane.hydrate(self._task_id, reference)
+        )
+
+    def _read[T](self, reference: ContentReference, read: Callable[[], T]) -> T:
+        for attempt in range(1, _READ_ATTEMPTS + 1):
+            try:
+                return read()
+            except (ContentUnavailable, ContentAccessDenied) as exc:
+                if attempt == _READ_ATTEMPTS:
+                    raise ArtifactInputUnavailable(reference, exc) from exc
+            time.sleep(self._backoff_sec)
+        raise AssertionError("unreachable")
 
     def _fetch(self, reference: ContentReference, dest: Path) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)
-        self._plane.materialize_to(self._task_id, reference, dest)
+        self._read(
+            reference,
+            lambda: self._plane.materialize_to(self._task_id, reference, dest),
+        )
         os.chmod(dest, 0o444)
 
 
 __all__ = [
     "ARTIFACT_INPUTS_DIR",
+    "ArtifactInputUnavailable",
     "ArtifactInputUnreadable",
     "ArtifactMaterializer",
     "artifact_inputs_dir",

@@ -297,6 +297,24 @@ async def test_an_unreachable_input_returns_the_task_without_spending_an_attempt
 
 
 @pytest.mark.anyio
+async def test_an_unreachable_artifact_member_is_held_like_any_input() -> None:
+    fixture = _Attributing()
+    runtime = fixture.runtime
+    task_id, _ = await _consumer(runtime)
+    member = reference_for("org", b"weights")
+    runtime.note_artifact_inputs(task_id, [], (frozenset({member.identity}),))
+
+    fixture.report(_unavailable(task_id, [member]))
+
+    record = runtime._tasks[task_id]
+    assert record.status == TaskStatus.PENDING
+    assert record.attempts == 0
+    assert record.failed_workers == []
+    fixture.scheduler.run_due()
+    assert fixture.probe.reads == [member]
+
+
+@pytest.mark.anyio
 async def test_input_control_reads_fine_runs_again_blaming_no_worker() -> None:
     fixture = _Attributing()
     runtime = fixture.runtime

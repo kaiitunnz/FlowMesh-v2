@@ -49,7 +49,11 @@ from shared.utils.manifest import ARTIFACTS_DIR
 from ..executors.base_executor import ExecutionError
 from ..executors.utils.artifacts import data_artifact_refs
 from .access import ContentAccessDenied, ContentBackendUnsupported
-from .artifact_inputs import ArtifactInputUnreadable, ArtifactMaterializer
+from .artifact_inputs import (
+    ArtifactInputUnavailable,
+    ArtifactInputUnreadable,
+    ArtifactMaterializer,
+)
 from .plane import WorkerContentPlane
 
 # A read that cannot reach the store retries briefly before the task reports it.
@@ -83,11 +87,12 @@ def _reading_artifacts(task_id: str) -> Iterator[None]:
     """Classify a failure to put an artifact input on disk."""
     try:
         yield
-    except (ContentUnavailable, ContentAccessDenied) as exc:
-        raise ExecutionError(
-            f"task {task_id} cannot reach an artifact it loads: {exc}",
-            retryable=True,
+    except ArtifactInputUnavailable as exc:
+        raise input_unavailable(
+            f"task {task_id} cannot reach an artifact it loads: {exc}", exc.reference
         ) from exc
+    except ContentBackendUnsupported as exc:
+        raise ExecutionError(str(exc), retryable=True) from exc
     except (ContentStoreError, ArtifactInputUnreadable) as exc:
         raise input_unreadable(
             f"task {task_id} artifact input unreadable: {exc}"
