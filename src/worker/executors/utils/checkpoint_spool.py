@@ -8,6 +8,8 @@ import torch
 from transformers import TrainerCallback, TrainerControl, TrainerState
 from transformers.training_args import TrainingArguments
 
+from shared.utils.nofollow import PathRefused, private_dir
+
 from ...content.artifacts import (
     spool_checkpoint,
     spool_failed,
@@ -51,25 +53,34 @@ class CheckpointSpool(TrainerCallback):
         )
         if distributed:
             torch.distributed.barrier()
-        if (
-            state.is_world_process_zero
-            and args.output_dir is not None
-            and spool_is_open(self._spool_dir)
-        ):
+        if state.is_world_process_zero and args.output_dir is not None:
             step = state.global_step
-            checkpoint = Path(args.output_dir) / f"checkpoint-{step}"
-            if checkpoint.is_dir():
-                spool_checkpoint(checkpoint, self._spool_dir, step)
-            self._wait_for_uploads()
+            self._spool(Path(args.output_dir) / f"checkpoint-{step}", step)
         if distributed:
             torch.distributed.barrier()
-        if spool_failed(self._spool_dir):
+        try:
+            with private_dir(self._spool_dir, create=False) as spool:
+                failed = spool_failed(spool)
+        except (FileNotFoundError, PathRefused):
+            failed = False
+        if failed:
             control.should_training_stop = True
 
-    def _wait_for_uploads(self) -> None:
+    def _spool(self, checkpoint: Path, step: int) -> None:
+        try:
+            with private_dir(self._spool_dir, create=False) as spool:
+                if not spool_is_open(spool):
+                    return
+                if checkpoint.is_dir():
+                    spool_checkpoint(checkpoint, spool, step)
+                self._wait_for_uploads(spool)
+        except FileNotFoundError:
+            return
+
+    def _wait_for_uploads(self, spool: Path) -> None:
         while (
-            spool_is_open(self._spool_dir)
-            and not spool_failed(self._spool_dir)
-            and len(spooled_steps(self._spool_dir)) > self._max_pending
+            spool_is_open(spool)
+            and not spool_failed(spool)
+            and len(spooled_steps(spool)) > self._max_pending
         ):
             time.sleep(self._poll_sec)

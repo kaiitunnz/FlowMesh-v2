@@ -10,6 +10,7 @@ through, and a special file is never opened as a file.
 import errno
 import logging
 import os
+import shutil
 import stat
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -111,6 +112,43 @@ def _open_child(fd: int, name: str, create: bool, mode: int | None) -> int:
         except PermissionError:
             pass
     return child
+
+
+@contextmanager
+def private_dir(base_dir: Path, create: bool = True) -> Iterator[Path]:
+    """Create or open ``base_dir`` as a directory only this user may write, and yield
+    a path anchored to it.
+
+    ``base_dir``'s parent is trusted, as in ``open_dir``. ``base_dir`` is opened
+    without following a link, must be owned by this user, and is set to ``0700``, so
+    no one else can plant an entry in it. The path yielded names the opened directory
+    itself, so a rename of ``base_dir`` or a link put in its place changes nothing
+    reached through it while the context holds.
+
+    Raises ``PathRefused`` when ``base_dir`` is a link, not a directory, or owned by
+    another user, and ``FileNotFoundError`` when it is missing and not ``create``.
+    """
+    with open_dir(base_dir, create=create, mode=0o700) as fd:
+        if os.fstat(fd).st_uid != os.geteuid():
+            raise PathRefused(errno.EPERM, "owned by another user", base_dir.name)
+        yield fd_path(fd)
+
+
+def fd_path(fd: int) -> Path:
+    """A path that names the file the descriptor ``fd`` holds open."""
+    return Path(f"/proc/self/fd/{fd}")
+
+
+def remove_below(base_dir: Path) -> None:
+    """Remove ``base_dir`` and everything under it without following a link; a link
+    in its place is removed itself. ``base_dir``'s parent is trusted."""
+    try:
+        if stat.S_ISDIR(os.lstat(base_dir).st_mode):
+            shutil.rmtree(base_dir, ignore_errors=True)
+        else:
+            base_dir.unlink()
+    except FileNotFoundError:
+        return
 
 
 def walk(top_fd: int) -> Iterator[tuple[str, list[str], list[str], int]]:
@@ -260,18 +298,34 @@ def regular_files(top: Path) -> Iterator[tuple[str, BinaryIO | OSError]]:
     """
     try:
         with open_dir(top) as top_fd:
-            for rel_dir, dirs, others, dir_fd in walk(top_fd):
-                dirs[:] = [name for name in dirs if not is_atomic_temp(name)]
-                for name in others:
-                    if is_atomic_temp(name):
-                        continue
-                    rel_name = join_relative(rel_dir, name)
-                    try:
-                        opened = open_regular(dir_fd, name)
-                    except OSError as exc:
-                        yield rel_name, exc
-                        continue
-                    if opened is not None:
-                        yield rel_name, opened
+            yield from _regular_files(top_fd)
     except (FileNotFoundError, PathRefused):
         return
+
+
+def regular_files_at(
+    dir_fd: int, *parts: str
+) -> Iterator[tuple[str, BinaryIO | OSError]]:
+    """Yield each regular file under ``parts...`` below the directory ``dir_fd``, as
+    ``regular_files`` does, never following a link to reach it."""
+    try:
+        with open_dir_at(dir_fd, *parts) as top_fd:
+            yield from _regular_files(top_fd)
+    except (FileNotFoundError, PathRefused):
+        return
+
+
+def _regular_files(top_fd: int) -> Iterator[tuple[str, BinaryIO | OSError]]:
+    for rel_dir, dirs, others, dir_fd in walk(top_fd):
+        dirs[:] = [name for name in dirs if not is_atomic_temp(name)]
+        for name in others:
+            if is_atomic_temp(name):
+                continue
+            rel_name = join_relative(rel_dir, name)
+            try:
+                opened = open_regular(dir_fd, name)
+            except OSError as exc:
+                yield rel_name, exc
+                continue
+            if opened is not None:
+                yield rel_name, opened

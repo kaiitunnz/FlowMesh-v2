@@ -20,6 +20,7 @@ from shared.content.archive import MemberReader, TreeArchive
 from shared.schemas.artifact import ArtifactRef
 from shared.schemas.result.catalog import SFTResult
 from shared.tasks.artifact_binding import ArtifactKind
+from shared.utils.nofollow import PathRefused
 from worker.content.artifacts import (
     ArtifactChanged,
     ArtifactPublisher,
@@ -170,3 +171,13 @@ def test_a_result_names_its_archive_views() -> None:
     )
 
     assert declared_archives(result) == {"final_model.tar.gz": "final_model"}
+
+
+def test_an_artifacts_link_publishes_nothing_through_it(tmp_path: Path) -> None:
+    outside = _artifacts(tmp_path)
+    linked = tmp_path / "task" / "artifacts"
+    linked.parent.mkdir()
+    linked.symlink_to(outside)
+
+    with pytest.raises(PathRefused):
+        ArtifactPublisher(_store(tmp_path), "org").publish_final(linked, {})

@@ -312,3 +312,21 @@ def test_a_training_task_reports_its_checkpoints_as_it_runs_and_at_success(
     ]
     assert [u["artifact_published"][0]["revision"] for u in updates] == ["step-5"]
     assert not (tmp_path / "out" / "tsk-1" / ".checkpoint-spool").exists()
+
+
+def test_a_starting_worker_clears_the_working_dirs_a_crash_left(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "kept").write_bytes(b"not the worker's")
+    left = tmp_path / "out" / "tsk-old"
+    for name in (".artifact-inputs", ".ssh-inputs", ".checkpoint-spool"):
+        (left / name / "x").mkdir(parents=True)
+    (left / ".export-staging").symlink_to(outside)
+    (left / "artifacts").mkdir()
+
+    _run(tmp_path, BaseExecutorResult(), SharedFilesystemObjectStore(tmp_path / "cas"))
+
+    assert sorted(p.name for p in left.iterdir()) == ["artifacts"]
+    assert (outside / "kept").read_bytes() == b"not the worker's"

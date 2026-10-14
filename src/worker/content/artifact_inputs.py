@@ -14,7 +14,9 @@ import os
 import shutil
 import time
 from collections.abc import Callable
+from contextlib import ExitStack
 from pathlib import Path, PurePosixPath
+from typing import Self
 
 from shared.content import (
     ContentReference,
@@ -23,12 +25,14 @@ from shared.content import (
     TreeManifestError,
 )
 from shared.tasks.artifact_binding import ArtifactBinding, ArtifactKind
+from shared.utils.nofollow import private_dir
 
 from ..executors.base_executor import TaskCancelledError
 from .access import ContentAccessDenied
 from .plane import WorkerContentPlane
 
 ARTIFACT_INPUTS_DIR = ".artifact-inputs"
+SSH_INPUTS_DIR = ".ssh-inputs"
 # A read that cannot reach the store retries briefly before the task reports it.
 _READ_ATTEMPTS = 3
 _READ_BACKOFF_SEC = 0.2
@@ -51,8 +55,18 @@ def artifact_inputs_dir(out_dir: Path) -> Path:
     return out_dir / ARTIFACT_INPUTS_DIR
 
 
+def ssh_inputs_dir(out_dir: Path) -> Path:
+    """Where an SSH task's upstream artifacts are staged, beside its own output."""
+    return out_dir / SSH_INPUTS_DIR
+
+
 class ArtifactMaterializer:
-    """Puts one task's artifact inputs on disk through the content plane."""
+    """Puts one task's artifact inputs on disk through the content plane.
+
+    Used as a context: ``root`` lies in the task's world-writable output, so it is
+    held open as a directory only this worker may write while the inputs land, and
+    nothing below it is reached through a link put in its place.
+    """
 
     def __init__(
         self,
@@ -67,48 +81,57 @@ class ArtifactMaterializer:
         self._root = root
         self._cancelled = cancelled
         self._backoff_sec = backoff_sec
+        self._held = ExitStack()
+        self._dir = root
+
+    def __enter__(self) -> Self:
+        self._dir = self._held.enter_context(private_dir(self._root))
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self._held.close()
+        self._dir = self._root
 
     def materialize(self, binding: ArtifactBinding) -> Path:
+        """Hydrate an artifact under the root once, returning its local path."""
         digest = binding.reference.content_digest
-        dest = self._root / digest
         if binding.kind is not ArtifactKind.TREE:
-            path = dest / PurePosixPath(binding.name).name
-            if not path.exists():
-                self._fetch(binding.reference, path)
-            return path
-        if dest.is_dir():
-            return dest
-        try:
-            manifest = TreeManifest.decode(self._manifest_bytes(binding.reference))
-        except TreeManifestError as exc:
-            raise ArtifactInputUnreadable(
-                f"artifact {binding.name} names no tree: {exc}"
-            ) from exc
+            rel = PurePosixPath(digest, PurePosixPath(binding.name).name)
+            if not (self._dir / rel).exists():
+                self._fetch(binding.reference, self._dir / rel)
+            return self._root / rel
+        if (self._dir / digest).is_dir():
+            return self._root / digest
+        manifest = self._manifest(binding)
         scope = binding.reference.authorization_scope
-        staging = self._root / f".{digest}.partial"
+        staging = self._dir / f".{digest}.partial"
         shutil.rmtree(staging, ignore_errors=True)
-        staging.mkdir(parents=True)
+        staging.mkdir()
         for member in manifest.members:
             self._fetch(member.reference(scope), staging / member.path)
-        staging.rename(dest)
-        return dest
+        staging.rename(self._dir / digest)
+        return self._root / digest
 
-    def copy_at(self, binding: ArtifactBinding, dest: Path) -> None:
-        """Put a writable copy of the artifact at ``dest`` under its own layout: a
-        file as ``dest``, a tree as a directory of its files."""
+    def copy_at(self, binding: ArtifactBinding, rel: PurePosixPath) -> Path:
+        """Put a writable copy of the artifact at ``rel`` under the root, laid out as
+        it was published: a file as ``rel``, a tree as a directory of its files."""
         if binding.kind is not ArtifactKind.TREE:
-            self._copy(binding.reference, dest)
-            return
+            self._copy(binding.reference, self._dir / rel)
+            return self._root / rel
+        manifest = self._manifest(binding)
+        scope = binding.reference.authorization_scope
+        (self._dir / rel).mkdir(parents=True, exist_ok=True)
+        for member in manifest.members:
+            self._copy(member.reference(scope), self._dir / rel / member.path)
+        return self._root / rel
+
+    def _manifest(self, binding: ArtifactBinding) -> TreeManifest:
         try:
-            manifest = TreeManifest.decode(self._manifest_bytes(binding.reference))
+            return TreeManifest.decode(self._manifest_bytes(binding.reference))
         except TreeManifestError as exc:
             raise ArtifactInputUnreadable(
                 f"artifact {binding.name} names no tree: {exc}"
             ) from exc
-        scope = binding.reference.authorization_scope
-        dest.mkdir(parents=True, exist_ok=True)
-        for member in manifest.members:
-            self._copy(member.reference(scope), dest / member.path)
 
     def _copy(self, reference: ContentReference, dest: Path) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -146,6 +169,8 @@ class ArtifactMaterializer:
 
 __all__ = [
     "ARTIFACT_INPUTS_DIR",
+    "SSH_INPUTS_DIR",
+    "ssh_inputs_dir",
     "ArtifactInputUnavailable",
     "ArtifactInputUnreadable",
     "ArtifactMaterializer",

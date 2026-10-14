@@ -1,7 +1,7 @@
 """Task runner that executes assignments relayed by the server."""
 
 import logging
-import shutil
+import os
 import socket
 import threading
 import time
@@ -65,11 +65,12 @@ from shared.tools.model.schema import MODEL_INTERFACE
 from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
 from shared.utils.hardware import available_devices, gpus_fit_dispatch
 from shared.utils.manifest import ARTIFACTS_DIR, prepare_output_dir, sync_manifest
+from shared.utils.nofollow import PathRefused, remove_below
 from shared.utils.recent import RecentSet
 from shared.utils.redact import credential_scrubber
 from shared.utils.time import now_iso
 
-from .content.artifact_inputs import artifact_inputs_dir
+from .content.artifact_inputs import artifact_inputs_dir, ssh_inputs_dir
 from .content.artifacts import (
     ArtifactChanged,
     ArtifactPublisher,
@@ -78,6 +79,7 @@ from .content.artifacts import (
     declared_archives,
 )
 from .content.checkpoints import CheckpointPublishFailed, CheckpointUploader
+from .content.exports import EXPORT_STAGING_DIR
 from .content.inputs import TaskInputHydrator, input_unreadable, read_input
 from .egress import MediatedEgressSidecar, ModelEgress, SearchEgress
 from .executors.base_executor import ExecutionError, Executor, TaskCancelledError
@@ -839,6 +841,25 @@ class Runner:
             ):
                 return executor.run(msg, out_dir)
 
+    def _clear_working_dirs(self) -> None:
+        """Remove the working directories a task run leaves only while it runs, which
+        a worker that crashed mid-task left behind."""
+        try:
+            task_dirs = list(os.scandir(self.results_dir))
+        except FileNotFoundError:
+            return
+        for entry in task_dirs:
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+            out_dir = Path(entry.path)
+            for working in (
+                artifact_inputs_dir(out_dir),
+                ssh_inputs_dir(out_dir),
+                checkpoint_spool_dir(out_dir),
+                out_dir / EXPORT_STAGING_DIR,
+            ):
+                remove_below(working)
+
     def _resolve_output_dir(self, task_id: str) -> Path:
         """Prepare and return the canonical output directory for a task's results."""
         out_dir = self.results_dir / task_id
@@ -855,7 +876,7 @@ class Runner:
         if store is None:
             return None
         spool = checkpoint_spool_dir(out_dir)
-        shutil.rmtree(spool, ignore_errors=True)
+        remove_below(spool)
         task_id = msg.task_id
 
         def report(binding: ArtifactBinding) -> None:
@@ -984,7 +1005,7 @@ class Runner:
             raise TaskCancelledError(
                 f"Task {task_id} ended while publishing its artifacts"
             ) from exc
-        except ReservedArtifactName as exc:
+        except (ReservedArtifactName, PathRefused) as exc:
             raise ExecutionError(
                 f"task {task_id} could not publish its artifacts: {exc}",
                 retryable=False,
@@ -1303,6 +1324,7 @@ class Runner:
         self._mediated_op_thread = None
 
     def start(self) -> None:
+        self._clear_working_dirs()
         self._start_idle_checker()
         self._start_interrupt_monitor()
         self._start_mediated_op_router()
@@ -1377,9 +1399,7 @@ class Runner:
                     self._input_hydrator.install_upstream_artifacts(
                         msg, artifact_inputs_dir(out_dir)
                     )
-                    self._input_hydrator.stage_ssh_inputs(
-                        msg, artifact_inputs_dir(out_dir) / "ssh"
-                    )
+                    self._input_hydrator.stage_ssh_inputs(msg, ssh_inputs_dir(out_dir))
                     if msg.input_preparation:
                         self._raise_if_cancel_pending(task_id)
                         self.lifecycle.notify_task_started(
@@ -1621,7 +1641,8 @@ class Runner:
                             self._stopped_dispatches.discard(dispatch_id)
                     with self._active_executor_lock:
                         self._active_executor_last_used_at = time.time()
-                    shutil.rmtree(artifact_inputs_dir(out_dir), ignore_errors=True)
+                    remove_below(artifact_inputs_dir(out_dir))
+                    remove_below(ssh_inputs_dir(out_dir))
                     self.lifecycle.set_idle(task_id)
                     if task_log_emitter is not None:
                         if log_handler_attached:

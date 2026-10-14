@@ -170,3 +170,31 @@ def test_a_refusal_leaves_the_earlier_copy_in_place(
 
     assert _files(artifacts)["out/report.md"] == b"# report\n"
     assert not (artifacts.parent / ".export-staging").exists()
+
+
+def test_a_planted_staging_link_neither_fails_nor_redirects_the_copy(
+    workspace: Path, artifacts: Path, tmp_path: Path
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    artifacts.parent.mkdir(parents=True)
+    (artifacts.parent / ".export-staging").symlink_to(outside)
+
+    spool_exports(workspace, [AgentExport(path="notes.txt")], artifacts)
+
+    assert _files(artifacts) == {"notes.txt": b"notes\n"}
+    assert list(outside.iterdir()) == []
+
+
+def test_an_artifacts_link_is_refused_and_nothing_lands_through_it(
+    workspace: Path, artifacts: Path, tmp_path: Path
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    artifacts.parent.mkdir(parents=True)
+    artifacts.symlink_to(outside)
+
+    failure = _refused(workspace, artifacts, AgentExport(path="notes.txt"))
+
+    assert failure.failure.kind == EXPORT_UNSAFE
+    assert list(outside.iterdir()) == []

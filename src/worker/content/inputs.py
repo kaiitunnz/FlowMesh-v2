@@ -15,7 +15,7 @@ or not a result envelope fails the task.
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from pydantic import BaseModel
@@ -45,6 +45,7 @@ from shared.tasks.specs import SSHSpecStrict, TaskSpecStrictBase
 from shared.tasks.worker_message import WorkerTaskMessage
 from shared.utils.json import normalize_numbers
 from shared.utils.manifest import ARTIFACTS_DIR
+from shared.utils.nofollow import PathRefused
 
 from ..executors.base_executor import ExecutionError
 from ..executors.utils.artifacts import data_artifact_refs
@@ -213,14 +214,14 @@ class TaskInputHydrator:
         the spec, in place."""
         if not msg.artifact_inputs:
             return
-        materializer = self._materializer(msg, root)
         inputs = msg.artifact_inputs or {}
         for binding in inputs.values():
             _check_scope(msg, binding)
-        paths = {
-            key: _materialized(materializer, msg.task_id, binding).as_posix()
-            for key, binding in inputs.items()
-        }
+        with self._materializer(msg, root) as materializer:
+            paths = {
+                key: _materialized(materializer, msg.task_id, binding).as_posix()
+                for key, binding in inputs.items()
+            }
         msg.task = _as_dispatched(msg.task, paths)
         if msg.merged_children:
             msg.merged_children = [
@@ -241,27 +242,27 @@ class TaskInputHydrator:
         wanted = [(spec, refs) for spec in specs if (refs := data_artifact_refs(spec))]
         if not wanted:
             return
-        materializer = self._materializer(msg, root)
         published = {
             producer: {binding.key: binding for binding in bindings}
             for producer, bindings in msg.upstream_artifacts.items()
         }
-        for spec, refs in wanted:
-            paths: dict[tuple[str, str], str] = {}
-            for producer, path in refs:
-                missing = input_unreadable(
-                    f"task {producer} published no artifact named {path!r}"
-                )
-                found = resolve_artifact_input(published.get(producer, {}), path)
-                if found is None:
-                    raise missing
-                binding, inner = found
-                _check_scope(msg, binding)
-                local = _materialized(materializer, msg.task_id, binding)
-                if inner and not (local := local / inner).is_file():
-                    raise missing
-                paths[(producer, path)] = local.as_posix()
-            spec.record_hydrated_artifacts(paths)
+        with self._materializer(msg, root) as materializer:
+            for spec, refs in wanted:
+                paths: dict[tuple[str, str], str] = {}
+                for producer, path in refs:
+                    missing = input_unreadable(
+                        f"task {producer} published no artifact named {path!r}"
+                    )
+                    found = resolve_artifact_input(published.get(producer, {}), path)
+                    if found is None:
+                        raise missing
+                    binding, inner = found
+                    _check_scope(msg, binding)
+                    local = _materialized(materializer, msg.task_id, binding)
+                    if inner and not (local := local / inner).is_file():
+                        raise missing
+                    paths[(producer, path)] = local.as_posix()
+                spec.record_hydrated_artifacts(paths)
 
     def stage_ssh_inputs(self, msg: WorkerTaskMessage, root: Path) -> None:
         """Stage writable copies of the published artifacts of each upstream task an
@@ -285,18 +286,21 @@ class TaskInputHydrator:
         }
         if not any(published.values()):
             return
-        materializer = self._materializer(msg, root)
         staged: dict[str, str] = {}
-        for producer, bindings in published.items():
-            dest = root / producer
-            for binding in bindings:
-                _check_scope(msg, binding)
-                with _reading_artifacts(msg.task_id):
-                    materializer.copy_at(binding, dest / ARTIFACTS_DIR / binding.name)
-            staged[producer] = dest.as_posix()
+        with self._materializer(msg, root) as materializer:
+            for producer, bindings in published.items():
+                for binding in bindings:
+                    _check_scope(msg, binding)
+                    rel = PurePosixPath(producer, ARTIFACTS_DIR, binding.name)
+                    with _reading_artifacts(msg.task_id):
+                        materializer.copy_at(binding, rel)
+                staged[producer] = (root / producer).as_posix()
         msg.record_staged_inputs(staged)
 
-    def _materializer(self, msg: WorkerTaskMessage, root: Path) -> ArtifactMaterializer:
+    @contextmanager
+    def _materializer(
+        self, msg: WorkerTaskMessage, root: Path
+    ) -> Iterator[ArtifactMaterializer]:
         if self._plane is None:
             raise ExecutionError(
                 f"task {msg.task_id} loads published artifacts and this worker reaches "
@@ -304,9 +308,18 @@ class TaskInputHydrator:
                 retryable=True,
             )
         task_id = msg.task_id
-        return ArtifactMaterializer(
+        materializer = ArtifactMaterializer(
             self._plane, task_id, root, lambda: self._cancelled(task_id)
         )
+        try:
+            entered = materializer.__enter__()
+        except PathRefused as exc:
+            raise ExecutionError(
+                f"task {task_id} cannot hold its artifact inputs at {root}: {exc}",
+                retryable=False,
+            ) from exc
+        with materializer:
+            yield entered
 
     def _hydrate_child(
         self, reader: "_TaskReader", child: MergedChildTaskStrict

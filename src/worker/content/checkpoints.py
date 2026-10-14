@@ -16,10 +16,12 @@ import shutil
 import threading
 import time
 from collections.abc import Callable
+from contextlib import ExitStack
 from pathlib import Path
 
 from shared.content import FabricObjectStore
 from shared.tasks.artifact_binding import ArtifactBinding, step_revision
+from shared.utils.nofollow import private_dir, remove_below
 
 from .artifacts import (
     CHECKPOINTS_DIR,
@@ -57,6 +59,8 @@ class CheckpointUploader:
         self._task_cancelled = cancelled
         self._publisher = ArtifactPublisher(store, scope, cancelled=self._cancelled)
         self._spool_dir = spool_dir
+        self._held = ExitStack()
+        self._spool = spool_dir
         self._report = report
         self._logger = logger
         self._poll_sec = poll_sec
@@ -70,7 +74,8 @@ class CheckpointUploader:
         )
 
     def start(self) -> None:
-        open_spool(self._spool_dir)
+        self._spool = self._held.enter_context(private_dir(self._spool_dir))
+        open_spool(self._spool)
         self._thread.start()
 
     def drain(self) -> list[ArtifactBinding]:
@@ -113,7 +118,7 @@ class CheckpointUploader:
                 return
 
     def _sweep(self) -> None:
-        for step, snapshot in spooled_steps(self._spool_dir):
+        for step, snapshot in spooled_steps(self._spool):
             if step in self._published:
                 continue
             if (
@@ -149,7 +154,7 @@ class CheckpointUploader:
                 )
                 if attempt == _ATTEMPTS:
                     self._error = exc
-                    fail_spool(self._spool_dir, str(exc))
+                    fail_spool(self._spool, str(exc))
                     return None
             if self._interrupted_within(delay):
                 return None
@@ -157,7 +162,8 @@ class CheckpointUploader:
         return None
 
     def _clear(self) -> None:
-        shutil.rmtree(self._spool_dir, ignore_errors=True)
+        self._held.close()
+        remove_below(self._spool_dir)
 
 
 __all__ = ["CheckpointPublishFailed", "CheckpointUploader"]

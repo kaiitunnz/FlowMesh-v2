@@ -85,11 +85,10 @@ def test_a_tree_lands_whole_and_read_only_and_two_tokens_share_it(
     store = SharedFilesystemObjectStore(tmp_path / "shared")
     tree = _publish_tree(store)
     plane = FakeContentPlane(store)
-    materializer = ArtifactMaterializer(cast(Any, plane), "tsk-1", tmp_path / "in")
-
-    first = materializer.materialize(tree)
-    reads = len(plane.reads)
-    again = materializer.materialize(tree)
+    with ArtifactMaterializer(cast(Any, plane), "tsk-1", tmp_path / "in") as held:
+        first = held.materialize(tree)
+        reads = len(plane.reads)
+        again = held.materialize(tree)
 
     assert first == again == tmp_path / "in" / tree.reference.content_digest
     assert len(plane.reads) == reads
@@ -103,11 +102,10 @@ def test_a_tree_lands_whole_and_read_only_and_two_tokens_share_it(
 def test_a_file_lands_under_its_own_name(tmp_path: Path) -> None:
     store = SharedFilesystemObjectStore(tmp_path / "shared")
     notes = _publish_file(store)
-    materializer = ArtifactMaterializer(
+    with ArtifactMaterializer(
         cast(Any, FakeContentPlane(store)), "tsk-1", tmp_path / "in"
-    )
-
-    path = materializer.materialize(notes)
+    ) as materializer:
+        path = materializer.materialize(notes)
 
     assert path.name == "notes.txt" and path.read_bytes() == b"notes"
 
@@ -179,9 +177,8 @@ def test_an_outage_mid_tree_names_its_input_and_leaves_no_partial_tree(
     assert not (tmp_path / "in" / tree.reference.content_digest).exists()
 
     plane.error, plane.on_read = None, None
-    path = ArtifactMaterializer(cast(Any, plane), "tsk-1", tmp_path / "in").materialize(
-        tree
-    )
+    with ArtifactMaterializer(cast(Any, plane), "tsk-1", tmp_path / "in") as held:
+        path = held.materialize(tree)
     assert (path / "config.json").read_bytes() == b"{}"
 
 
@@ -369,3 +366,53 @@ def test_a_task_that_ends_stops_reading_its_artifact_inputs(tmp_path: Path) -> N
             cast(Any, plane), cancelled=lambda task_id: ended
         ).install_artifacts(msg, tmp_path / "in")
     assert plane.reads == [tree.reference]
+
+
+@pytest.mark.parametrize("planted", ["link", "foreign"])
+def test_a_link_or_foreign_dir_in_place_of_the_inputs_root_is_refused(
+    tmp_path: Path, planted: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SharedFilesystemObjectStore(tmp_path / "shared")
+    tree = _publish_tree(store)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    root = tmp_path / "out" / ".artifact-inputs"
+    root.parent.mkdir()
+    if planted == "link":
+        root.symlink_to(outside)
+    else:
+        root.mkdir()
+        monkeypatch.setattr(os, "geteuid", lambda: os.getuid() + 1)
+    msg = _message(["flowmesh-artifact:0"], {"0": tree})
+
+    with pytest.raises(ExecutionError) as raised:
+        TaskInputHydrator(cast(Any, FakeContentPlane(store))).install_artifacts(
+            msg, root
+        )
+
+    assert not raised.value.retryable
+    assert list(outside.iterdir()) == []
+
+
+def test_the_inputs_land_through_the_held_dir_when_its_name_is_swapped(
+    tmp_path: Path,
+) -> None:
+    store = SharedFilesystemObjectStore(tmp_path / "shared")
+    tree = _publish_tree(store)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    root = tmp_path / "out" / ".artifact-inputs"
+    root.parent.mkdir()
+    plane = FakeContentPlane(store)
+
+    def swap() -> None:
+        if len(plane.reads) == 1:
+            root.rename(tmp_path / "out" / "moved")
+            root.symlink_to(outside)
+
+    plane.on_read = swap
+    with ArtifactMaterializer(cast(Any, plane), "tsk-1", root) as held:
+        held.materialize(tree)
+
+    assert list(outside.iterdir()) == []
+    assert (tmp_path / "out" / "moved" / tree.reference.content_digest).is_dir()

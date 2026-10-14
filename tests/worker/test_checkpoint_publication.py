@@ -18,6 +18,7 @@ from shared.content import (
     WriteCancelled,
 )
 from shared.tasks.artifact_binding import ArtifactBinding
+from shared.utils.nofollow import PathRefused
 from worker.content.artifacts import (
     open_spool,
     spool_checkpoint,
@@ -57,6 +58,11 @@ def test_a_half_written_snapshot_is_not_spooled(tmp_path: Path) -> None:
     (spool / ".step-3.partial" / "checkpoint-3").mkdir(parents=True)
 
     assert spooled_steps(spool) == []
+
+
+def _open_spool(spool: Path) -> None:
+    spool.mkdir(parents=True, exist_ok=True)
+    open_spool(spool)
 
 
 def _uploader(
@@ -128,7 +134,7 @@ def test_only_the_first_rank_snapshots_a_save(tmp_path: Path, zero: bool) -> Non
     state = TrainerState(global_step=7)
     state.is_world_process_zero = zero
 
-    open_spool(tmp_path / "spool")
+    _open_spool(tmp_path / "spool")
 
     CheckpointSpool(tmp_path / "spool").on_save(
         TrainingArguments(output_dir=root.as_posix(), report_to=[]),
@@ -199,7 +205,7 @@ def test_a_save_waits_while_too_many_checkpoints_wait_to_publish(
     tmp_path: Path,
 ) -> None:
     spool = tmp_path / "spool"
-    open_spool(spool)
+    _open_spool(spool)
     root = tmp_path / "checkpoints"
     for step in (1, 2, 3):
         _checkpoint(root, step)
@@ -274,3 +280,14 @@ def test_a_cancelled_task_stops_its_upload_without_retrying(tmp_path: Path) -> N
     with pytest.raises(CheckpointPublishFailed):
         uploader.drain()
     assert store.writes == 1
+
+
+def test_a_spool_planted_as_a_link_is_refused(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (tmp_path / "spool").symlink_to(outside)
+    uploader = _uploader(tmp_path, SharedFilesystemObjectStore(tmp_path / "cas"), [])
+
+    with pytest.raises(PathRefused):
+        uploader.start()
+    assert list(outside.iterdir()) == []

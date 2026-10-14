@@ -13,8 +13,9 @@ import os
 import re
 import shutil
 import stat
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from pathlib import Path, PurePosixPath
+from typing import BinaryIO
 
 from pydantic import BaseModel
 
@@ -34,7 +35,15 @@ from shared.tasks.artifact_binding import (
 )
 from shared.utils.atomic import is_atomic_temp
 from shared.utils.manifest import RESULTS_NAME
-from shared.utils.nofollow import regular_files
+from shared.utils.nofollow import (
+    PathRefused,
+    fd_path,
+    open_dir,
+    open_dir_at,
+    open_regular,
+    regular_files,
+    regular_files_at,
+)
 
 CHECKPOINTS_DIR = CHECKPOINTS_ARTIFACT
 _CHECKPOINT = re.compile(r"checkpoint-(0|[1-9][0-9]*)")
@@ -61,9 +70,10 @@ def spool_checkpoint(checkpoint_dir: Path, spool_dir: Path, step: int) -> Path |
     """Snapshot a closed ``checkpoint-<n>`` directory into the spool by hard link.
 
     The snapshot appears whole, under ``step-<n>``, once every file is linked, so the
-    uploader never sees half of it. A trainer rotating its checkpoints only unlinks
-    them, which leaves the snapshot's links in place. Returns the snapshot, or None
-    when the step already has one.
+    uploader never sees half of it. Each file is linked from the descriptor that
+    opened it without following a link. A trainer rotating its checkpoints only
+    unlinks them, which leaves the snapshot's links in place. Returns the snapshot, or
+    None when the step already has one.
     """
     ready = spool_dir / f"step-{step}"
     if ready.exists():
@@ -74,13 +84,14 @@ def spool_checkpoint(checkpoint_dir: Path, spool_dir: Path, step: int) -> Path |
     for rel, opened in regular_files(checkpoint_dir):
         if isinstance(opened, OSError):
             raise opened
-        opened.close()
         dest = target / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            os.link(checkpoint_dir / rel, dest)
-        except OSError:
-            shutil.copy2(checkpoint_dir / rel, dest)
+        with opened:
+            try:
+                os.link(fd_path(opened.fileno()), dest, follow_symlinks=True)
+            except OSError:
+                with dest.open("xb") as copy:
+                    shutil.copyfileobj(opened, copy)
     target.mkdir(parents=True, exist_ok=True)
     staging.rename(ready)
     return ready
@@ -92,7 +103,6 @@ _SPOOL_FAILED = ".failed"
 
 def open_spool(spool_dir: Path) -> None:
     """Mark a spool as having an uploader, which a trainer's save waits on."""
-    spool_dir.mkdir(parents=True, exist_ok=True)
     (spool_dir / _SPOOL_OPEN).touch()
 
 
@@ -162,37 +172,58 @@ class ArtifactPublisher:
         """
         bindings: list[ArtifactBinding] = []
         trees: dict[str, TreeManifest] = {}
-        for name, path, is_dir in _final_entries(artifacts_dir, step_revisions):
-            if name == RESULTS_NAME:
-                raise ReservedArtifactName(
-                    f"an artifact may not be named {RESULTS_NAME}, which names the "
-                    "task's result"
+        with open_dir(artifacts_dir) as top_fd:
+            root = fd_path(top_fd)
+            for name, is_dir in _final_entries(top_fd, step_revisions):
+                if name == RESULTS_NAME:
+                    raise ReservedArtifactName(
+                        f"an artifact may not be named {RESULTS_NAME}, which names "
+                        "the task's result"
+                    )
+                if is_dir:
+                    binding, manifest = self._publish_members(
+                        name,
+                        regular_files_at(top_fd, *name.split("/")),
+                        FINAL_REVISION,
+                    )
+                    trees[name] = manifest
+                elif (published := self._publish_file_at(top_fd, name)) is not None:
+                    binding = published
+                else:
+                    continue
+                bindings.append(binding)
+            tree_bindings = {binding.name: binding for binding in bindings}
+            for archive_name, tree_name in archives.items():
+                if (archived := trees.get(tree_name)) is None:
+                    continue
+                bindings.append(
+                    self.publish_archive(
+                        archive_name,
+                        tree_bindings[tree_name],
+                        archived,
+                        root / tree_name,
+                    )
                 )
-            if is_dir:
-                binding, manifest = self.publish_tree(name, path, FINAL_REVISION)
-                trees[name] = manifest
-            else:
-                binding = self.publish_file(name, path, FINAL_REVISION)
-            bindings.append(binding)
-        tree_bindings = {binding.name: binding for binding in bindings}
-        for archive_name, tree_name in archives.items():
-            if (archived := trees.get(tree_name)) is None:
-                continue
-            bindings.append(
-                self.publish_archive(
-                    archive_name,
-                    tree_bindings[tree_name],
-                    archived,
-                    artifacts_dir / tree_name,
-                )
-            )
         return bindings
 
-    def publish_file(self, name: str, path: Path, revision: str) -> ArtifactBinding:
-        reference = self._store.write_file(self._scope, path, cancelled=self._cancelled)
+    def _publish_file_at(self, top_fd: int, name: str) -> ArtifactBinding | None:
+        """Publish the regular file ``name`` below ``top_fd`` from the descriptor
+        that opened it, or None when it is no longer one."""
+        *parents, last = name.split("/")
+        try:
+            with open_dir_at(top_fd, *parents) as dir_fd:
+                opened = open_regular(dir_fd, last)
+        except (FileNotFoundError, PathRefused):
+            return None
+        if opened is None:
+            return None
+        with opened:
+            reference = self._store.write_file(
+                self._scope, fd_path(opened.fileno()), cancelled=self._cancelled
+            )
         return ArtifactBinding(
             name=name,
-            revision=revision,
+            revision=FINAL_REVISION,
             kind=ArtifactKind.FILE,
             reference=reference,
             size_bytes=reference.size_bytes,
@@ -203,14 +234,22 @@ class ArtifactPublisher:
         self, name: str, top: Path, revision: str
     ) -> tuple[ArtifactBinding, TreeManifest]:
         """Publish every regular file under ``top`` and the manifest naming them."""
+        return self._publish_members(name, regular_files(top), revision)
+
+    def _publish_members(
+        self,
+        name: str,
+        files: Iterable[tuple[str, BinaryIO | OSError]],
+        revision: str,
+    ) -> tuple[ArtifactBinding, TreeManifest]:
         members: list[TreeMember] = []
-        for rel, opened in regular_files(top):
+        for rel, opened in files:
             if isinstance(opened, OSError):
                 raise opened
-            opened.close()
-            reference = self._store.write_file(
-                self._scope, top / rel, cancelled=self._cancelled
-            )
+            with opened:
+                reference = self._store.write_file(
+                    self._scope, fd_path(opened.fileno()), cancelled=self._cancelled
+                )
             members.append(
                 TreeMember(rel, reference.content_digest, reference.size_bytes)
             )
@@ -303,30 +342,35 @@ def _verified_reader(top: Path) -> Callable[[TreeMember, int, int], Iterator[byt
     return read
 
 
-def _final_entries(
-    artifacts_dir: Path, step_revisions: bool
-) -> Iterator[tuple[str, Path, bool]]:
-    """Each artifact of the ``final`` set: its name, path, and whether it is a tree."""
-    for name, path, is_dir in _entries(artifacts_dir, ""):
+def _final_entries(top_fd: int, step_revisions: bool) -> Iterator[tuple[str, bool]]:
+    """Each artifact of the ``final`` set: its name and whether it is a tree."""
+    for name, is_dir in _entries(top_fd):
         if not step_revisions or name != CHECKPOINTS_DIR or not is_dir:
-            yield name, path, is_dir
+            yield name, is_dir
             continue
-        for child, child_path, child_is_dir in _entries(path, f"{CHECKPOINTS_DIR}/"):
-            if not (child_is_dir and checkpoint_step(child_path.name) is not None):
-                yield child, child_path, child_is_dir
+        try:
+            with open_dir_at(top_fd, CHECKPOINTS_DIR) as fd:
+                children = _entries(fd)
+        except (FileNotFoundError, PathRefused):
+            continue
+        for child, child_is_dir in children:
+            if not (child_is_dir and checkpoint_step(child) is not None):
+                yield f"{CHECKPOINTS_DIR}/{child}", child_is_dir
 
 
-def _entries(directory: Path, prefix: str) -> Iterator[tuple[str, Path, bool]]:
-    try:
-        entries = sorted(os.scandir(directory), key=lambda entry: entry.name)
-    except FileNotFoundError:
-        return
-    for entry in entries:
-        if is_atomic_temp(entry.name):
-            continue
-        mode = entry.stat(follow_symlinks=False).st_mode
-        if stat.S_ISDIR(mode) or stat.S_ISREG(mode):
-            yield f"{prefix}{entry.name}", Path(entry.path), stat.S_ISDIR(mode)
+def _entries(dir_fd: int) -> list[tuple[str, bool]]:
+    found: list[tuple[str, bool]] = []
+    with os.scandir(dir_fd) as entries:
+        for entry in entries:
+            if is_atomic_temp(entry.name):
+                continue
+            try:
+                mode = entry.stat(follow_symlinks=False).st_mode
+            except FileNotFoundError:
+                continue
+            if stat.S_ISDIR(mode) or stat.S_ISREG(mode):
+                found.append((entry.name, stat.S_ISDIR(mode)))
+    return sorted(found)
 
 
 __all__ = [

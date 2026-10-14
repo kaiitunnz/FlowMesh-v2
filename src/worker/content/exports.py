@@ -29,10 +29,13 @@ from shared.utils.nofollow import (
     open_dir,
     open_dir_at,
     open_regular,
+    private_dir,
+    remove_below,
     walk,
 )
 
 _COPY_BYTES = 1 << 20
+EXPORT_STAGING_DIR = ".export-staging"
 
 
 class ExportFailed(RuntimeError):
@@ -56,28 +59,32 @@ def spool_exports(
     replace everything an earlier completion left there only once every export
     copied, so what the task publishes is exactly what this completion exported.
     """
-    staging = artifacts_dir.parent / ".export-staging"
-    shutil.rmtree(staging, ignore_errors=True)
-    staging.mkdir(parents=True)
+    staging_dir = artifacts_dir.parent / EXPORT_STAGING_DIR
+    remove_below(staging_dir)
     try:
-        try:
-            with open_dir(workspace) as workspace_fd:
+        with private_dir(staging_dir) as staging:
+            try:
+                with open_dir(workspace) as workspace_fd:
+                    for export in exports:
+                        _copy_export(workspace_fd, export, staging)
+            except (FileNotFoundError, PathRefused) as exc:
+                raise ExportFailed(
+                    EXPORT_MISSING, f"the workspace is unreadable: {exc}"
+                )
+            with private_dir(artifacts_dir) as artifacts:
+                for entry in artifacts.iterdir():
+                    if entry.is_dir() and not entry.is_symlink():
+                        shutil.rmtree(entry)
+                    else:
+                        entry.unlink()
                 for export in exports:
-                    _copy_export(workspace_fd, export, staging)
-        except (FileNotFoundError, PathRefused) as exc:
-            raise ExportFailed(EXPORT_MISSING, f"the workspace is unreadable: {exc}")
-        artifacts_dir.mkdir(parents=True, exist_ok=True)
-        for entry in artifacts_dir.iterdir():
-            if entry.is_dir() and not entry.is_symlink():
-                shutil.rmtree(entry)
-            else:
-                entry.unlink()
-        for export in exports:
-            dest = artifacts_dir / export.published_name
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            (staging / export.published_name).rename(dest)
+                    dest = artifacts / export.published_name
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    (staging / export.published_name).rename(dest)
+    except PathRefused as exc:
+        raise _unsafe(f"the task's output holds a link or another user's entry: {exc}")
     finally:
-        shutil.rmtree(staging, ignore_errors=True)
+        remove_below(staging_dir)
 
 
 def _copy_export(workspace_fd: int, export: AgentExport, staging: Path) -> None:
