@@ -1136,17 +1136,17 @@ class TaskRuntime:
     async def _restore_artifacts(self, workflow_ids: Sequence[str]) -> None:
         """Load the artifact catalog of each restored task that published one: all of
         it for a task that can still bind, and the final set of a settled one."""
+        settled: list[str] = []
+        live: list[str] = []
         with self._lock:
-            records = [
-                record
-                for workflow_id in workflow_ids
-                for record in self._tasks.of_workflow(workflow_id)
-                if record.has_artifacts
-            ]
-        if not records:
+            for workflow_id in workflow_ids:
+                for task in self._tasks.of_workflow(workflow_id):
+                    if task.has_artifacts:
+                        (
+                            settled if task.status in TERMINAL_TASK_STATUSES else live
+                        ).append(task.task_id)
+        if not settled and not live:
             return
-        settled = [r.task_id for r in records if r.status in TERMINAL_TASK_STATUSES]
-        live = [r.task_id for r in records if r.status not in TERMINAL_TASK_STATUSES]
         registry = self._workflow_registry
         catalogs = {
             **await registry.artifact_bindings_many_async(live),
