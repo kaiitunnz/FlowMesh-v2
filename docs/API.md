@@ -70,10 +70,8 @@ scope or key, fetched by name alone. Errors carry `detail.code`:
 | GET | `/api/v1/results/{task_id}/logs` | Download archived `logs.jsonl`. |
 
 A task publishes its artifacts as the `final` revision when it succeeds, and a training
-run publishes each checkpoint it saves as `step-<n>`. A publication is immutable: after a
-retry, a checkpoint an earlier attempt published keeps that attempt's bytes. A download
-answers one `Range`, conditioned by `If-Range`, with `206`, and answers a request naming
-several ranges whole.
+run publishes each checkpoint it saves as `step-<n>`. A download answers one `Range`,
+conditioned by `If-Range`, with `206`, and answers a request naming several ranges whole.
 
 ## Content
 
