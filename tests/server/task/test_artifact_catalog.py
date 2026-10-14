@@ -16,6 +16,7 @@ from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
 from server.clients.redis import task_artifacts_key, task_state_key
 from server.config import OrchestrationConfig
+from server.registries.artifacts import artifact_field
 from server.registries.workflow import WorkflowRegistry
 from server.task.models import EventEffect, TaskRecord, TaskStatus
 from server.task.redrive import StoreRedriveScheduler
@@ -749,3 +750,18 @@ def test_one_checkpoint_of_a_settled_task_is_read_without_its_catalog() -> None:
     assert missing is None
     final = runtime.artifact_binding(train, "final", "final_model")
     assert final is not None and final.reference == _tree().reference
+
+
+def test_a_binding_stored_under_another_field_reads_as_none() -> None:
+    registry = _registry()
+    misfiled = _step(20, b"ckpt-20")
+    registry._rds.sync.hash_set(
+        task_artifacts_key("tsk-1"),
+        {artifact_field("step-21", "checkpoints"): misfiled.model_dump_json()},
+    )
+
+    assert registry.artifact_binding("tsk-1", "step-21", "checkpoints") is None
+    assert (
+        asyncio.run(registry.artifact_binding_async("tsk-1", "step-21", "checkpoints"))
+        is None
+    )

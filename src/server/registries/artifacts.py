@@ -29,8 +29,8 @@ def _text(value: Any) -> str:
     return value.decode() if isinstance(value, bytes) else str(value)
 
 
-def artifact_field(binding: ArtifactBinding) -> str:
-    return f"{binding.revision}{_SEPARATOR}{binding.name}"
+def artifact_field(revision: str, name: str) -> str:
+    return f"{revision}{_SEPARATOR}{name}"
 
 
 def queue_artifact_bindings(
@@ -41,10 +41,24 @@ def queue_artifact_bindings(
         pipe.hset(
             task_artifacts_key(task_id),
             mapping={
-                artifact_field(binding): binding.model_dump_json()
+                artifact_field(
+                    binding.revision, binding.name
+                ): binding.model_dump_json()
                 for binding in bindings
             },
         )
+
+
+def decode_artifact_binding(
+    task_id: str, field: Any, raw: Any
+) -> ArtifactBinding | None:
+    """Decode one stored binding of a task's catalog, or None when it does not
+    parse."""
+    try:
+        return ArtifactBinding.model_validate_json(raw)
+    except ValidationError:
+        _logger.error("Task %s has an unreadable artifact binding %r", task_id, field)
+        return None
 
 
 def decode_artifact_bindings(
@@ -53,19 +67,19 @@ def decode_artifact_bindings(
     """Decode a task's catalog from its stored hash, or only ``revision`` of it,
     skipping a field that does not parse."""
     bindings: ArtifactBindings = {}
-    prefix = None if revision is None else f"{revision}{_SEPARATOR}"
+    prefix = None if revision is None else artifact_field(revision, "")
     for field, value in raw.items():
         if prefix is not None and not _text(field).startswith(prefix):
             continue
-        try:
-            binding = ArtifactBinding.model_validate_json(value)
-        except ValidationError:
-            _logger.error(
-                "Task %s has an unreadable artifact binding %r", task_id, field
-            )
-            continue
-        bindings[binding.key] = binding
+        if (binding := decode_artifact_binding(task_id, field, value)) is not None:
+            bindings[binding.key] = binding
     return bindings
+
+
+def _keyed(
+    binding: ArtifactBinding | None, revision: str, name: str
+) -> ArtifactBinding | None:
+    return binding if binding is not None and binding.key == (revision, name) else None
 
 
 class ArtifactCatalogStore:
@@ -85,20 +99,20 @@ class ArtifactCatalogStore:
         self, task_id: str, revision: str, name: str
     ) -> ArtifactBinding | None:
         """Read one binding of a task's catalog, or None when it holds none."""
-        field = f"{revision}{_SEPARATOR}{name}"
+        field = artifact_field(revision, name)
         (raw,) = self._rds.sync.hash_mget(task_artifacts_key(task_id), [field])
         if raw is None:
             return None
-        return decode_artifact_bindings(task_id, {field: raw}).get((revision, name))
+        return _keyed(decode_artifact_binding(task_id, field, raw), revision, name)
 
     async def artifact_binding_async(
         self, task_id: str, revision: str, name: str
     ) -> ArtifactBinding | None:
-        field = f"{revision}{_SEPARATOR}{name}"
+        field = artifact_field(revision, name)
         (raw,) = await self._rds.asyncio.hash_mget(task_artifacts_key(task_id), [field])
         if raw is None:
             return None
-        return decode_artifact_bindings(task_id, {field: raw}).get((revision, name))
+        return _keyed(decode_artifact_binding(task_id, field, raw), revision, name)
 
     async def artifact_bindings_async(
         self, task_id: str, revision: str | None = None
@@ -142,6 +156,7 @@ class ArtifactCatalogStore:
 __all__ = [
     "ArtifactCatalogStore",
     "artifact_field",
+    "decode_artifact_binding",
     "decode_artifact_bindings",
     "queue_artifact_bindings",
 ]
