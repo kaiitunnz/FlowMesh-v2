@@ -16,6 +16,7 @@ from shared.schemas.result import BaseExecutorResult, InferenceItem, InferenceIt
 from shared.tasks.specs import InferenceSpecStrict
 from shared.utils.json import to_json_serializable
 
+from ...config import WorkerConfig
 from ..base_executor import ExecutionError, ExecutorTask
 from ..utils.checkpoints import maybe_upload_traces
 from .data import DataMixin, InferenceEntry, PromptInput
@@ -61,6 +62,8 @@ def produced_items(task_id: str, payloads: list[dict[str, Any]]) -> list[Inferen
 
 class InferenceMixin(DataMixin):
     """Shared helpers for inference-style executors."""
+
+    _config: WorkerConfig
 
     def _get_tokenizer(self) -> Any | None:
         return None
@@ -242,11 +245,14 @@ class InferenceMixin(DataMixin):
     ) -> None:
         """Upload the traces of the task and of each merged child it returned a
         result for, each from its own output directory."""
-        maybe_upload_traces(task, out_dir, logger=logger)
+        maybe_upload_traces(task, out_dir, self._config.server_base_url, logger=logger)
         for child in task.merged_children or []:
             if child.task_id in result.children:
                 maybe_upload_traces(
-                    child, out_dir.parent / child.task_id, logger=logger
+                    child,
+                    out_dir.parent / child.task_id,
+                    self._config.server_base_url,
+                    logger=logger,
                 )
 
     def _maybe_export_jsonl(

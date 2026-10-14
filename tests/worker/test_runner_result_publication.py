@@ -226,18 +226,18 @@ def _run_producing(
         executors={"echo": executor, "default": executor},
         default_executor=executor,
         logger=MagicMock(),
+        cleanup_after_publish=cleanup,
     ).start()
     return lifecycle
 
 
 @pytest.mark.parametrize("cleanup", [False, True])
 def test_success_reports_the_artifacts_it_published(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cleanup: bool
+    tmp_path: Path, cleanup: bool
 ) -> None:
-    monkeypatch.setenv("MODEL_CLEANUP_AFTER_UPLOAD", "1" if cleanup else "0")
     store = SharedFilesystemObjectStore(tmp_path / "cas")
 
-    metadata = _metadata(_run_producing(tmp_path, store))
+    metadata = _metadata(_run_producing(tmp_path, store, cleanup))
 
     (binding,) = metadata["artifacts"]
     assert binding["name"] == "final_model" and binding["kind"] == "tree"

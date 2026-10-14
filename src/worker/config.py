@@ -110,6 +110,7 @@ class WorkerConfig:
     foreign_gpu_gate: GpuGateConfig = GpuGateConfig()
     serve_default_ttl_sec: float = 3600.0
     serve_max_ttl_sec: float = 86400.0
+    model_cleanup_after_upload: bool = False
 
     @staticmethod
     def from_env() -> "WorkerConfig":
@@ -288,6 +289,9 @@ class WorkerConfig:
 
         return WorkerConfig(
             worker_token=worker_token,
+            model_cleanup_after_upload=parse_bool_env(
+                "MODEL_CLEANUP_AFTER_UPLOAD", False
+            ),
             owner_principal=owner_principal,
             server_base_url=server_base_url,
             supervisor_grpc_target=supervisor_grpc_target,

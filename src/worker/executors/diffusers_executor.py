@@ -259,7 +259,7 @@ class DiffusersExecutor(DataMixin, Executor):
             task_id, task.workflow_id, out_dir, owner_id=task.owner_id
         ):
             result = self._run_inner(spec, task_id, out_dir)
-        maybe_upload_traces(task, out_dir, logger=logger)
+        maybe_upload_traces(task, out_dir, self._config.server_base_url, logger=logger)
         return result
 
     def _run_inner(

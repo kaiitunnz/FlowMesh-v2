@@ -24,7 +24,6 @@ class TestMaybeUploadTraces:
     def test_posts_each_trace_to_the_server_with_its_auth(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setenv("FLOWMESH_BASE_URL", "http://root:8000/")
         monkeypatch.setenv("FLOWMESH_API_KEY", "flm-test")
         _traces(tmp_path)
         posted: list[tuple[str, str | None]] = []
@@ -39,7 +38,9 @@ class TestMaybeUploadTraces:
 
         monkeypatch.setattr(checkpoints.requests, "post", post)
 
-        assert checkpoints.maybe_upload_traces(_task(), tmp_path) == [
+        assert checkpoints.maybe_upload_traces(
+            _task(), tmp_path, "http://root:8000/"
+        ) == [
             "spans",
             "lineage",
         ]
@@ -51,7 +52,6 @@ class TestMaybeUploadTraces:
     def test_no_server_url_uploads_nothing(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.delenv("FLOWMESH_BASE_URL", raising=False)
         _traces(tmp_path)
 
         def post(*args: Any, **kwargs: Any) -> Any:
@@ -59,12 +59,11 @@ class TestMaybeUploadTraces:
 
         monkeypatch.setattr(checkpoints.requests, "post", post)
 
-        assert checkpoints.maybe_upload_traces(_task(), tmp_path) == []
+        assert checkpoints.maybe_upload_traces(_task(), tmp_path, None) == []
 
     def test_a_failed_upload_is_left_out_and_the_rest_go(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setenv("FLOWMESH_BASE_URL", "http://root:8000")
         _traces(tmp_path)
 
         class _Response:
@@ -79,7 +78,9 @@ class TestMaybeUploadTraces:
             checkpoints.requests, "post", lambda url, **kwargs: _Response(url)
         )
 
-        assert checkpoints.maybe_upload_traces(_task(), tmp_path) == ["lineage"]
+        assert checkpoints.maybe_upload_traces(
+            _task(), tmp_path, "http://root:8000"
+        ) == ["lineage"]
 
 
 @pytest.mark.parametrize(

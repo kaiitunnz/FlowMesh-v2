@@ -108,7 +108,7 @@ class OmniExecutorBase(InferenceMixin, Executor):
             raise
         if self._omni_closed_by_generation:
             self._close_omni()
-        maybe_upload_traces(task, out_dir, logger=logger)
+        maybe_upload_traces(task, out_dir, self._config.server_base_url, logger=logger)
         return result
 
     @abstractmethod

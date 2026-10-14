@@ -88,7 +88,6 @@ from .executors.inference.projection import generated_outputs
 from .executors.inference.resolution import resolve_task_contract
 from .executors.utils.checkpoints import (
     clear_directory,
-    is_cleanup_enabled,
     write_executor_result,
 )
 from .gpu_binding import FreeGpus, pick_devices
@@ -184,6 +183,7 @@ class Runner:
         peer_listener_sock: socket.socket | None = None,
         telemetry: TelemetryConfig | None = None,
         gpu_binding_task_types: frozenset[TaskType] = frozenset(),
+        cleanup_after_publish: bool = False,
     ):
         otel.configure(telemetry or DISABLED_TELEMETRY_CONFIG)
         self.lifecycle = lifecycle
@@ -193,6 +193,7 @@ class Runner:
         self.executors = executors
         self.logger = logger
         self.default_executor = default_executor
+        self._cleanup_after_publish = cleanup_after_publish
         self._input_hydrator = TaskInputHydrator(
             lifecycle.content_plane, cancelled=self._task_ending
         )
@@ -1022,7 +1023,7 @@ class Runner:
             sum(b.size_bytes for b in bindings if b.kind is not ArtifactKind.ARCHIVE),
             time.monotonic() - started,
         )
-        if is_cleanup_enabled():
+        if self._cleanup_after_publish:
             clear_directory(artifacts_dir)
         return [binding.model_dump(mode="json") for binding in bindings]
 

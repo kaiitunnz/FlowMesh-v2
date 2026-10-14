@@ -1,5 +1,4 @@
 import logging
-import os
 import shutil
 import tarfile
 import zipfile
@@ -264,14 +263,6 @@ def clear_directory(directory: Path) -> None:
             entry.unlink(missing_ok=True)
 
 
-def is_cleanup_enabled() -> bool:
-    setting = os.getenv("MODEL_CLEANUP_AFTER_UPLOAD")
-    if setting is None:
-        return False
-    normalized = setting.strip().lower()
-    return normalized not in {"0", "false", "no", "off"}
-
-
 def write_executor_result(
     path: Path,
     task_id: str,
@@ -299,10 +290,11 @@ _TRACE_UPLOAD_TIMEOUT_SEC = 30.0
 def maybe_upload_traces(
     task: TaskReference,
     out_dir: Path,
+    server_base_url: str | None,
     logger: logging.Logger | None = None,
 ) -> list[str]:
     """Upload the trace JSONL files under `out_dir/logs/` to the server's
-    `/api/v1/traces/tasks/{task_id}/{trace_type}` when `FLOWMESH_BASE_URL` names it.
+    `/api/v1/traces/tasks/{task_id}/{trace_type}` when ``server_base_url`` names it.
 
     A trace that fails to upload is logged and left out; the task's own work does not
     depend on it. Returns the uploaded trace types.
@@ -310,7 +302,7 @@ def maybe_upload_traces(
     if not task.task_id:
         raise ExecutionError("Task id missing; cannot upload traces")
     logs_dir = Path(out_dir).resolve() / "logs"
-    base_url = os.getenv("FLOWMESH_BASE_URL", "").rstrip("/")
+    base_url = (server_base_url or "").rstrip("/")
     if not base_url or not logs_dir.is_dir():
         return []
 
