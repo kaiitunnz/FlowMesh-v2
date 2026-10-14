@@ -40,8 +40,9 @@ _CACHE_MAX_ENTRY_BYTES = 8 * 1024 * 1024
 # header and its slot, about 1.3 KiB measured. The budget counts it, so it bounds the
 # memory the cache holds.
 _CACHE_ENTRY_OVERHEAD_BYTES = 1536
-# The members the decoded-tree cache keeps across its trees.
-_TREE_MEMBERS_MAX = 1 << 20
+# The members the decoded-tree cache keeps across its trees, about 201 B each, so about
+# 50 MiB at the cap. A tree over the cap is kept alone, as the most recent one.
+_TREE_MEMBERS_MAX = 1 << 18
 
 type ObjectIdentity = tuple[str, str, str]
 
@@ -68,6 +69,7 @@ class ResultReader:
             OrderedDict()
         )
         self._tree_members = 0
+        self._oversize: tuple[ObjectIdentity, frozenset[ObjectIdentity]] | None = None
         self._lock = threading.Lock()
 
     def read_bytes(self, binding: ResultBinding) -> bytes:
@@ -104,20 +106,26 @@ class ResultReader:
     def tree_members(self, reference: ContentReference) -> frozenset[ObjectIdentity]:
         """The identities of a stored tree's member objects.
 
-        A tree is decoded once and kept for the most recently read trees, so a check
-        against its members is a set lookup.
+        A tree is decoded once and kept for the most recently read trees, or alone as
+        the most recent one too large to share the cache, so a check against its
+        members is a set lookup.
         """
         key = reference.identity
         with self._lock:
             if (cached := self._trees.get(key)) is not None:
                 self._trees.move_to_end(key)
                 return cached
+            if self._oversize is not None and self._oversize[0] == key:
+                return self._oversize[1]
         scope = reference.authorization_scope
         members = frozenset(
             (scope, DigestAlgorithm.SHA256.value, member.digest)
             for member in self.read_manifest(reference).members
         )
-        if len(members) <= _TREE_MEMBERS_MAX:
+        if len(members) > _TREE_MEMBERS_MAX:
+            with self._lock:
+                self._oversize = (key, members)
+        else:
             with self._lock:
                 if key not in self._trees:
                     self._trees[key] = members

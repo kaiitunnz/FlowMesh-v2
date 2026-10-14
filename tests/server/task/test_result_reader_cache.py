@@ -1,10 +1,15 @@
 """The result reader's cache bounds the memory it holds, however small each result."""
 
 import gc
+import hashlib
 import json
 import tracemalloc
 from pathlib import Path
+from typing import Any
 
+import pytest
+
+from server.task import results
 from server.task.results import ResultReader
 from shared.content import (
     TREE_MEDIA_TYPE,
@@ -84,3 +89,47 @@ def test_a_trees_members_are_decoded_once(tmp_path: Path) -> None:
 
     assert reader.tree_members(tree) is first
     assert first == {member.identity}
+
+
+def _tree_of(store: SharedFilesystemObjectStore, count: int, tag: str) -> Any:
+    manifest = TreeManifest.of(
+        [
+            TreeMember(
+                f"{tag}-{n}.bin", hashlib.sha256(f"{tag}{n}".encode()).hexdigest(), 1
+            )
+            for n in range(count)
+        ]
+    )
+    return store.write("org", manifest.encode(), media_type=TREE_MEDIA_TYPE)
+
+
+def test_the_tree_cache_stays_within_its_member_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(results, "_TREE_MEMBERS_MAX", 10)
+    store = SharedFilesystemObjectStore(tmp_path / "cas")
+    reader = ResultReader(store, cache_max_bytes=_BUDGET)
+
+    for tag in "abcd":
+        reader.tree_members(_tree_of(store, 4, tag))
+
+    assert reader._tree_members <= 10
+    assert len(reader._trees) == 2
+
+
+def test_the_latest_tree_over_the_cap_is_decoded_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(results, "_TREE_MEMBERS_MAX", 10)
+    store = SharedFilesystemObjectStore(tmp_path / "cas")
+    reader = ResultReader(store, cache_max_bytes=_BUDGET)
+    tree = _tree_of(store, 50, "big")
+
+    first = reader.tree_members(tree)
+    reader._cache.clear()
+    for path in (tmp_path / "cas").rglob("*"):
+        if path.is_file():
+            path.unlink()
+
+    assert reader.tree_members(tree) is first
+    assert reader._tree_members == 0
