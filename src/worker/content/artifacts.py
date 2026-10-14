@@ -305,8 +305,7 @@ def declared_archives(result: BaseModel) -> dict[str, str]:
     the model's path with ``.tar.gz`` appended.
     """
     archives: dict[str, str] = {}
-    for field in type(result).model_fields:
-        value = getattr(result, field)
+    for field, value in result:
         if (
             field.endswith("_archive")
             and isinstance(value, ArtifactRef)
