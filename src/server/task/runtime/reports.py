@@ -7,7 +7,7 @@ from pydantic import ValidationError
 
 from shared.content import ContentReference
 from shared.tasks.artifact_binding import ArtifactBinding
-from shared.tasks.components.exports import EXPORT_UNSAFE, ExportFailure
+from shared.tasks.components.exports import ExportFailure, ExportFailureKind
 
 from ..models import (
     SETTLING_TASK_STATUSES,
@@ -51,7 +51,9 @@ def export_failure(payload: dict[str, Any]) -> ExportFailure | None:
     try:
         return ExportFailure.model_validate(raw)
     except ValidationError:
-        return ExportFailure(kind=EXPORT_UNSAFE, message="an unreadable export report")
+        return ExportFailure(
+            kind=ExportFailureKind.UNSAFE, message="an unreadable export report"
+        )
 
 
 def reported_child_artifacts(

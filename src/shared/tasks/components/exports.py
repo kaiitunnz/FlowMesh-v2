@@ -6,9 +6,9 @@ workspace, or the private-state fabric's own markers, is never exported: compila
 refuses it as declared, and the worker refuses a declared directory holding one.
 """
 
-from typing import Self
+from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from shared.content import is_member_path
 from shared.schemas.artifact import CHECKPOINTS_ARTIFACT
@@ -69,15 +69,21 @@ class AgentExport(BaseModel):
     def _plain(cls, value: str | None) -> str | None:
         return value if value is None else _member_path(value)
 
-    @model_validator(mode="after")
-    def _named(self) -> Self:
-        if self.name is None:
-            object.__setattr__(self, "name", self.path)
-        return self
-
     @property
     def published_name(self) -> str:
         return self.name or self.path
+
+
+class ExportFailureKind(StrEnum):
+    """Why a completing agent's exports could not be published."""
+
+    MISSING = "ExportMissing"
+    """A declared path, or the workspace, does not exist."""
+    UNSAFE = "ExportUnsafe"
+    """A path the fabric never exports, or one an agent could plant to reach past its
+    workspace or alias other bytes."""
+    UNAVAILABLE = "ExportUnavailable"
+    """The worker could not write the copy, as when its disk is full."""
 
 
 class ExportFailure(BaseModel):
@@ -85,19 +91,14 @@ class ExportFailure(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    kind: str
+    kind: ExportFailureKind
     message: str
-
-
-EXPORT_MISSING = "ExportMissing"
-EXPORT_UNSAFE = "ExportUnsafe"
 
 
 __all__ = [
     "AgentExport",
     "EXCLUDED_EXPORT_PATHS",
-    "EXPORT_MISSING",
-    "EXPORT_UNSAFE",
     "ExportFailure",
+    "ExportFailureKind",
     "excluded_export_path",
 ]

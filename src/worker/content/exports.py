@@ -16,10 +16,9 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from shared.tasks.components.exports import (
-    EXPORT_MISSING,
-    EXPORT_UNSAFE,
     AgentExport,
     ExportFailure,
+    ExportFailureKind,
     excluded_export_path,
 )
 from shared.utils.atomic import is_atomic_temp
@@ -41,13 +40,13 @@ EXPORT_STAGING_DIR = ".export-staging"
 class ExportFailed(RuntimeError):
     """A declared export could not be copied out."""
 
-    def __init__(self, kind: str, message: str) -> None:
+    def __init__(self, kind: ExportFailureKind, message: str) -> None:
         super().__init__(message)
         self.failure = ExportFailure(kind=kind, message=message)
 
 
 def _unsafe(message: str) -> ExportFailed:
-    return ExportFailed(EXPORT_UNSAFE, message)
+    return ExportFailed(ExportFailureKind.UNSAFE, message)
 
 
 def spool_exports(
@@ -69,7 +68,7 @@ def spool_exports(
                         _copy_export(workspace_fd, export, staging)
             except (FileNotFoundError, PathRefused) as exc:
                 raise ExportFailed(
-                    EXPORT_MISSING, f"the workspace is unreadable: {exc}"
+                    ExportFailureKind.MISSING, f"the workspace is unreadable: {exc}"
                 )
             with private_dir(artifacts_dir) as artifacts:
                 for entry in artifacts.iterdir():
@@ -98,7 +97,9 @@ def _copy_export(workspace_fd: int, export: AgentExport, staging: Path) -> None:
             try:
                 st = os.stat(last, dir_fd=parent_fd, follow_symlinks=False)
             except FileNotFoundError:
-                raise ExportFailed(EXPORT_MISSING, f"export {path!r} does not exist")
+                raise ExportFailed(
+                    ExportFailureKind.MISSING, f"export {path!r} does not exist"
+                )
             if stat.S_ISREG(st.st_mode):
                 _copy_file(parent_fd, last, dest, path)
             elif stat.S_ISDIR(st.st_mode):
@@ -107,14 +108,14 @@ def _copy_export(workspace_fd: int, export: AgentExport, staging: Path) -> None:
             else:
                 raise _unsafe(f"export {path!r} is not a regular file or directory")
     except FileNotFoundError:
-        raise ExportFailed(EXPORT_MISSING, f"export {path!r} does not exist")
+        raise ExportFailed(ExportFailureKind.MISSING, f"export {path!r} does not exist")
     except PathRefused as exc:
-        raise _unsafe(f"export {path!r} is reached through a link: {exc}")
+        raise _unsafe(f"export {path!r} is refused: {exc}")
 
 
 def _copy_tree(top_fd: int, dest: Path, path: str) -> None:
     dest.mkdir(parents=True)
-    for rel_dir, dirs, others, dir_fd in walk(top_fd):
+    for rel_dir, dirs, others, dir_fd in walk(top_fd, strict=True):
         for name in dirs:
             _check_entry(path, join_relative(rel_dir, name))
             (dest / rel_dir / name).mkdir()

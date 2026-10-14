@@ -2,17 +2,23 @@
 link, refused when anything could reach past the workspace or alias other bytes, and
 land whole under the task's artifacts or not at all."""
 
+import errno
 import os
 import socket
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
 from shared.content import SharedFilesystemObjectStore, TreeManifest
 from shared.tasks.artifact_binding import ArtifactKind
-from shared.tasks.components.exports import EXPORT_MISSING, EXPORT_UNSAFE, AgentExport
+from shared.tasks.components.exports import AgentExport, ExportFailureKind
+from shared.utils import nofollow
+from worker.content import exports as exports_module
 from worker.content.artifacts import ArtifactPublisher
 from worker.content.exports import ExportFailed, spool_exports
+from worker.executors.agent_episode_executor import _export
 
 
 @pytest.fixture
@@ -89,7 +95,7 @@ def test_a_re_driven_completion_publishes_exactly_what_it_exported(
 
 def test_a_missing_path_is_missing(workspace: Path, artifacts: Path) -> None:
     failure = _refused(workspace, artifacts, AgentExport(path="out/absent.md"))
-    assert failure.failure.kind == EXPORT_MISSING
+    assert failure.failure.kind == ExportFailureKind.MISSING
 
 
 def test_a_link_to_outside_the_workspace_is_refused(
@@ -101,7 +107,7 @@ def test_a_link_to_outside_the_workspace_is_refused(
 
     failure = _refused(workspace, artifacts, AgentExport(path="out"))
 
-    assert failure.failure.kind == EXPORT_UNSAFE
+    assert failure.failure.kind == ExportFailureKind.UNSAFE
     assert "out/leak" in failure.failure.message
     assert not artifacts.exists() or _files(artifacts) == {}
 
@@ -116,7 +122,7 @@ def test_a_declared_path_through_a_linked_directory_is_refused(
 
     failure = _refused(workspace, artifacts, AgentExport(path="via/x.md"))
 
-    assert failure.failure.kind == EXPORT_UNSAFE
+    assert failure.failure.kind == ExportFailureKind.UNSAFE
 
 
 def test_a_hard_linked_file_is_refused(workspace: Path, artifacts: Path) -> None:
@@ -124,7 +130,7 @@ def test_a_hard_linked_file_is_refused(workspace: Path, artifacts: Path) -> None
 
     failure = _refused(workspace, artifacts, AgentExport(path="out"))
 
-    assert failure.failure.kind == EXPORT_UNSAFE
+    assert failure.failure.kind == ExportFailureKind.UNSAFE
     assert "hard link" in failure.failure.message
 
 
@@ -145,7 +151,7 @@ def test_a_special_file_is_refused(
         if held is not None:
             held.close()
 
-    assert failure.failure.kind == EXPORT_UNSAFE
+    assert failure.failure.kind == ExportFailureKind.UNSAFE
 
 
 def test_credential_material_inside_a_declared_directory_is_refused(
@@ -156,7 +162,7 @@ def test_credential_material_inside_a_declared_directory_is_refused(
 
     failure = _refused(workspace, artifacts, AgentExport(path=".ssh/id_ed25519"))
 
-    assert failure.failure.kind == EXPORT_UNSAFE
+    assert failure.failure.kind == ExportFailureKind.UNSAFE
 
 
 def test_a_refusal_leaves_the_earlier_copy_in_place(
@@ -196,5 +202,43 @@ def test_an_artifacts_link_is_refused_and_nothing_lands_through_it(
 
     failure = _refused(workspace, artifacts, AgentExport(path="notes.txt"))
 
-    assert failure.failure.kind == EXPORT_UNSAFE
+    assert failure.failure.kind == ExportFailureKind.UNSAFE
     assert list(outside.iterdir()) == []
+
+
+def test_a_tree_deeper_than_a_walk_opens_is_refused(
+    workspace: Path, artifacts: Path
+) -> None:
+    deep = workspace / "deep"
+    for level in range(nofollow._MAX_WALK_DEPTH + 2):
+        deep = deep / f"d{level}"
+    deep.mkdir(parents=True)
+    (deep / "lost.txt").write_text("past the bound")
+
+    failure = _refused(workspace, artifacts, AgentExport(path="deep"))
+
+    assert failure.failure.kind == ExportFailureKind.UNSAFE
+    assert "deeper than" in failure.failure.message
+
+
+def test_a_copy_the_disk_cannot_hold_fails_and_leaves_nothing_to_publish(
+    tmp_path: Path,
+    workspace: Path,
+    artifacts: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spool_exports(workspace, [AgentExport(path="out")], artifacts)
+
+    def full(*_args: Any) -> None:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(exports_module, "_copy_file", full)
+    failure = _export(
+        [AgentExport(path="notes.txt")],
+        cast(Any, SimpleNamespace(workspace=workspace)),
+        artifacts.parent,
+    )
+
+    assert failure is not None
+    assert failure.kind == ExportFailureKind.UNAVAILABLE
+    assert not artifacts.exists()

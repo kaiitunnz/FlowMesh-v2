@@ -33,10 +33,9 @@ from shared.private_state import (
     PrivateStateUnavailableReason,
 )
 from shared.tasks.components.exports import (
-    EXPORT_MISSING,
-    EXPORT_UNSAFE,
     AgentExport,
     ExportFailure,
+    ExportFailureKind,
 )
 from shared.tasks.specs.misc import ModelBindingMode
 from shared.tasks.task_type import TaskType
@@ -51,6 +50,7 @@ from shared.tools.search.schema import (
     tool_request_digest,
 )
 from shared.utils.manifest import ARTIFACTS_DIR
+from shared.utils.nofollow import remove_below
 
 from ..content.exports import ExportFailed, spool_exports
 from ..egress import CapturedRequest, PendingEgressRequestStore
@@ -179,7 +179,8 @@ class AgentEpisodeExecutor(Executor):
         export_failure = None
         if exporting and (state is None or holder is None):
             export_failure = ExportFailure(
-                kind=EXPORT_MISSING, message="the agent holds no workspace to export"
+                kind=ExportFailureKind.MISSING,
+                message="the agent holds no workspace to export",
             )
         sealed = None
         if state is not None and holder is not None:
@@ -533,13 +534,16 @@ def _export(
     exports: Sequence[AgentExport], state: MaterializedState, out_dir: Path
 ) -> ExportFailure | None:
     """Copy the exports out of the quiesced workspace into the task's artifacts; the
-    failure, if they cannot be."""
+    failure, if they cannot be, which leaves the task no artifacts to publish."""
     try:
         spool_exports(state.workspace, exports, out_dir / ARTIFACTS_DIR)
     except ExportFailed as exc:
         _LOG.warning("Exports of the completing agent refused: %s", exc)
-        return exc.failure
+        failure = exc.failure
     except OSError as exc:
         _LOG.warning("Exports of the completing agent failed: %s", exc)
-        return ExportFailure(kind=EXPORT_UNSAFE, message=str(exc))
-    return None
+        failure = ExportFailure(kind=ExportFailureKind.UNAVAILABLE, message=str(exc))
+    else:
+        return None
+    remove_below(out_dir / ARTIFACTS_DIR)
+    return failure
