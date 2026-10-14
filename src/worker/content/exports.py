@@ -22,7 +22,6 @@ from shared.tasks.components.exports import (
     excluded_export_path,
 )
 from shared.utils.atomic import is_atomic_temp
-from shared.utils.manifest import clear_directory
 from shared.utils.nofollow import (
     PathRefused,
     join_relative,
@@ -33,6 +32,7 @@ from shared.utils.nofollow import (
     remove_below,
     walk,
 )
+from shared.utils.task_output import clear_directory
 
 _COPY_BYTES = 1 << 20
 EXPORT_STAGING_DIR = ".export-staging"

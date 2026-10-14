@@ -63,10 +63,10 @@ from shared.tools.contract import MediatedOperationPermit
 from shared.tools.model.schema import MODEL_INTERFACE
 from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
 from shared.utils.hardware import available_devices, gpus_fit_dispatch
-from shared.utils.manifest import ARTIFACTS_DIR, clear_directory, prepare_output_dir
 from shared.utils.nofollow import PathRefused, open_dir, open_regular, remove_below
 from shared.utils.recent import RecentSet
 from shared.utils.redact import credential_scrubber
+from shared.utils.task_output import ARTIFACTS_DIR, clear_directory, prepare_output_dir
 from shared.utils.time import now_iso
 
 from .content.artifact_inputs import artifact_inputs_dir, ssh_inputs_dir

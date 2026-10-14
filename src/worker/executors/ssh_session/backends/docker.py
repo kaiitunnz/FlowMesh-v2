@@ -22,7 +22,7 @@ import requests
 import worker
 from shared.schemas.worker import SSHBackendName
 from shared.tasks.worker_message import WorkerHardware
-from shared.utils.manifest import ARTIFACTS_DIR, RESULTS_NAME
+from shared.utils.task_output import ARTIFACTS_DIR, RESULTS_NAME
 from worker.config import WorkerConfig
 from worker.executors.utils.docker import (
     DockerUnavailableError,

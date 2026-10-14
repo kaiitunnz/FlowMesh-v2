@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, field_validator
 
 from shared.content import is_member_path
 from shared.schemas.artifact import CHECKPOINTS_ARTIFACT
-from shared.utils.manifest import RESULTS_NAME
+from shared.utils.task_output import RESULTS_NAME
 
 # Paths, relative to the workspace, that are never exported, nor anything under them.
 EXCLUDED_EXPORT_PATHS: tuple[str, ...] = (

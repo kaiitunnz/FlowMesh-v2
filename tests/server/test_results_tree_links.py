@@ -16,7 +16,7 @@ from fastapi import HTTPException, status
 
 from server.routers.v1 import results as results_router
 from server.services.log_archiver import TaskLogArchiver
-from shared.utils.manifest import prepare_output_dir, scratch_dir
+from shared.utils.task_output import prepare_output_dir, scratch_dir
 from tests.server.asgi_responses import serve
 
 _LOGGER = logging.getLogger("test.results_tree_links")

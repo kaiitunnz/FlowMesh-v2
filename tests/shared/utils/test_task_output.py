@@ -7,14 +7,14 @@ from unittest.mock import patch
 
 import pytest
 
-from shared.utils.manifest import (
+from shared.utils.nofollow import PathRefused
+from shared.utils.task_output import (
     ARTIFACTS_DIR,
     LOGS_DIR,
     SCRATCH_DIR,
     prepare_output_dir,
     scratch_dir,
 )
-from shared.utils.nofollow import PathRefused
 
 
 def _race(fn, *, threads: int = 8) -> list[BaseException]:

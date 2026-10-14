@@ -19,8 +19,8 @@ from shared.schemas.result import result_file_path
 from shared.telemetry.ids import workflow_to_trace_id_int
 from shared.utils.atomic import atomic_write_stream
 from shared.utils.json import encode_jsonl_bytes
-from shared.utils.manifest import LOGS_DIR
 from shared.utils.nofollow import PathRefused, open_below, open_dir
+from shared.utils.task_output import LOGS_DIR
 
 from ...app_state import (
     get_logger,

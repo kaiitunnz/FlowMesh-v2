@@ -45,8 +45,8 @@ from shared.tasks.result_binding import BindingKind, ResultBinding
 from shared.tasks.specs import SSHSpecStrict, TaskSpecStrictBase
 from shared.tasks.worker_message import WorkerTaskMessage
 from shared.utils.json import normalize_numbers
-from shared.utils.manifest import ARTIFACTS_DIR
 from shared.utils.nofollow import PathRefused
+from shared.utils.task_output import ARTIFACTS_DIR
 
 from ..executors.base_executor import ExecutionError
 from ..executors.utils.artifacts import data_artifact_refs

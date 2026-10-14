@@ -3,7 +3,7 @@
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from shared.utils.manifest import (
+from shared.utils.task_output import (
     ARTIFACTS_DIR,
     LOGS_DIR,
     prepare_output_dir,

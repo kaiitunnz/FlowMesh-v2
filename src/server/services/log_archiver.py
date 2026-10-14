@@ -8,8 +8,8 @@ from threading import Event
 from typing import Any
 
 from shared.schemas.result import result_file_path
-from shared.utils.manifest import LOGS_DIR, prepare_output_dir
 from shared.utils.nofollow import PathRefused, open_append, open_dir
+from shared.utils.task_output import LOGS_DIR, prepare_output_dir
 
 from ..clients.redis import (
     TASK_LOGS_STREAM_PREFIX,

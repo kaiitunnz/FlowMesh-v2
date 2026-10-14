@@ -49,8 +49,8 @@ from shared.tools.search.schema import (
     parse_search_request,
     tool_request_digest,
 )
-from shared.utils.manifest import ARTIFACTS_DIR
 from shared.utils.nofollow import remove_below
+from shared.utils.task_output import ARTIFACTS_DIR
 
 from ..content.exports import ExportFailed, spool_exports
 from ..egress import CapturedRequest, PendingEgressRequestStore

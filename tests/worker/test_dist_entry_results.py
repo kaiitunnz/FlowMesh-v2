@@ -11,7 +11,7 @@ from shared.schemas.result import DPOResult, LoRAResult, PPOResult, SFTResult
 from shared.tasks import TaskType
 from shared.tasks.components.model import ModelConfig, ModelSource
 from shared.tasks.specs import SFTSpecStrict
-from shared.utils.manifest import scratch_dir
+from shared.utils.task_output import scratch_dir
 from tests.worker.factories import make_worker_task_message
 from worker.executors import (
     dpo_dist_entry,

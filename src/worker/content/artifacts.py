@@ -36,7 +36,6 @@ from shared.tasks.artifact_binding import (
     revision_step,
 )
 from shared.utils.atomic import is_atomic_temp
-from shared.utils.manifest import RESULTS_NAME
 from shared.utils.nofollow import (
     PathRefused,
     fd_path,
@@ -46,6 +45,7 @@ from shared.utils.nofollow import (
     regular_files,
     regular_files_at,
 )
+from shared.utils.task_output import RESULTS_NAME
 
 CHECKPOINTS_DIR = CHECKPOINTS_ARTIFACT
 _CHECKPOINT = re.compile(r"checkpoint-(0|[1-9][0-9]*)")

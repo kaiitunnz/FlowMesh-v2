@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 
 from shared.tasks.worker_message import WorkerTaskMessage
-from shared.utils.manifest import RESULTS_NAME
+from shared.utils.task_output import RESULTS_NAME
 
 from ..base_executor import ExecutionError, RunSignals
 from .base import SessionInterrupted

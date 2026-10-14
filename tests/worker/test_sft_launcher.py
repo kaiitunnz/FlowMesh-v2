@@ -14,7 +14,7 @@ from shared.schemas.result import SFTResult
 from shared.tasks import TaskType
 from shared.tasks.components.model import ModelConfig, ModelSource
 from shared.tasks.specs import SFTSpecStrict
-from shared.utils.manifest import scratch_dir
+from shared.utils.task_output import scratch_dir
 from tests.worker.factories import make_worker_config, make_worker_task_message
 from worker.executors import sft_executor
 from worker.executors.base_executor import ExecutionError

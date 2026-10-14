@@ -24,7 +24,7 @@ from shared.schemas.result import SSHResult
 from shared.tasks.specs.ssh import RELAYED_SSH_ACCESS_MODES, SSHSpecStrict
 from shared.tasks.task_type import TaskType
 from shared.utils import new_ssh_session_id
-from shared.utils.manifest import ARTIFACTS_DIR, prepare_output_dir
+from shared.utils.task_output import ARTIFACTS_DIR, prepare_output_dir
 from worker.config import WorkerConfig
 from worker.executors.ssh_session import (
     SessionGone,

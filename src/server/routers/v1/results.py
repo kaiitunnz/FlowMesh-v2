@@ -37,11 +37,6 @@ from shared.tasks.artifact_binding import (
     revision_step,
 )
 from shared.utils.atomic import is_atomic_temp
-from shared.utils.manifest import (
-    ARTIFACTS_DIR,
-    LOGS_DIR,
-    RESULTS_NAME,
-)
 from shared.utils.nofollow import (
     PathRefused,
     is_plain_segment,
@@ -50,6 +45,11 @@ from shared.utils.nofollow import (
     open_dir,
     open_regular,
     walk,
+)
+from shared.utils.task_output import (
+    ARTIFACTS_DIR,
+    LOGS_DIR,
+    RESULTS_NAME,
 )
 
 from ...app_state import (
