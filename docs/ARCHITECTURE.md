@@ -556,8 +556,9 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   run whose checkpoint cannot be published stops at its next save and fails.
 - **Agent exports.** An agent declares workspace paths to publish as `exports`. When the
   agent completes, its worker copies them out of the quiesced workspace into the task's
-  artifacts, which publish like any other. An export that is missing or unsafe to copy
-  fails the agent and publishes nothing; see [`WORKFLOWS.md`](WORKFLOWS.md).
+  artifacts, which publish like any other. A missing export fails the agent unless it is
+  declared optional, and an unsafe one always does, publishing nothing; see
+  [`WORKFLOWS.md`](WORKFLOWS.md).
 - **Consumed values by reference.** A dispatch names each upstream value its task
   consumes by reference, and the task's worker hydrates each through its content cache
   before anything validates or runs the task. A worker that cannot reach the store names

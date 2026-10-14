@@ -180,7 +180,7 @@ the author owns: a failure before the episode's next seal may run it again, and
 the fabric neither deduplicates nor compensates it.
 
 An agent publishes files from its workspace by declaring them as `exports`, each a
-workspace path and an optional artifact `name` (the path by default):
+workspace path, an optional artifact `name` (the path by default), and `optional`:
 
 ```yaml
 - name: coder
@@ -191,6 +191,7 @@ workspace path and an optional artifact `name` (the path by default):
     exports:
       - { path: out/report.md }
       - { path: build/dist, name: dist }
+      - { path: out/notes.md, optional: true }
     v2:
       authority: { invoke: ["sandbox.execute"], delegate: [] }
 ```
@@ -202,7 +203,8 @@ from the `out` tree.
 Submission refuses an export of a credential path such as `.ssh/`, two exports whose
 names overlap, and an export named under `checkpoints` or `results.json`. At
 completion, a missing path, a link, a special file, a file with a second hard link, or
-a credential file inside an exported directory fails the agent.
+a credential file inside an exported directory fails the agent; a missing optional
+export is skipped instead.
 
 ### Structured regions
 

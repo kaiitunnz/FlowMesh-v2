@@ -63,6 +63,8 @@ class AgentExport(BaseModel):
 
     path: str
     name: str | None = None
+    optional: bool = False
+    """Whether the agent completes without this export when its path does not exist."""
 
     @field_validator("path", "name")
     @classmethod

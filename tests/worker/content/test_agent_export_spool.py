@@ -3,6 +3,7 @@ link, refused when anything could reach past the workspace or alias other bytes,
 land whole under the task's artifacts or not at all."""
 
 import errno
+import logging
 import os
 import socket
 from pathlib import Path
@@ -242,3 +243,74 @@ def test_a_copy_the_disk_cannot_hold_fails_and_leaves_nothing_to_publish(
     assert failure is not None
     assert failure.kind == ExportFailureKind.UNAVAILABLE
     assert not artifacts.exists()
+
+
+@pytest.mark.parametrize("path", ["out/absent.md", "gone/deeper/absent.md"])
+def test_a_missing_optional_export_is_skipped_while_the_rest_publish(
+    workspace: Path, artifacts: Path, path: str
+) -> None:
+    skipped = spool_exports(
+        workspace,
+        [AgentExport(path=path, optional=True), AgentExport(path="notes.txt")],
+        artifacts,
+    )
+
+    assert skipped == [AgentExport(path=path, optional=True)]
+    assert _files(artifacts) == {"notes.txt": b"notes\n"}
+    assert not (artifacts.parent / exports_module.EXPORT_STAGING_DIR).exists()
+
+
+def test_a_present_optional_export_publishes(workspace: Path, artifacts: Path) -> None:
+    assert (
+        spool_exports(workspace, [AgentExport(path="out", optional=True)], artifacts)
+        == []
+    )
+    assert "out/report.md" in _files(artifacts)
+
+
+def test_every_optional_export_missing_completes_with_nothing_to_publish(
+    workspace: Path, artifacts: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO)
+    failure = _export(
+        [
+            AgentExport(path="a.md", optional=True),
+            AgentExport(path="b/c.md", optional=True),
+        ],
+        cast(Any, SimpleNamespace(workspace=workspace)),
+        artifacts.parent,
+    )
+
+    assert failure is None
+    assert _files(artifacts) == {}
+    skips = [r.getMessage() for r in caplog.records if "skipped" in r.getMessage()]
+    assert len(skips) == 2 and "'b/c.md'" in skips[1]
+
+
+def test_an_optional_export_that_is_a_link_is_still_refused(
+    tmp_path: Path, workspace: Path, artifacts: Path
+) -> None:
+    secret = tmp_path / "secret"
+    secret.write_text("key")
+    (workspace / "leak").symlink_to(secret)
+
+    failure = _refused(workspace, artifacts, AgentExport(path="leak", optional=True))
+
+    assert failure.failure.kind == ExportFailureKind.UNSAFE
+
+
+def test_an_optional_special_file_is_still_refused(
+    workspace: Path, artifacts: Path
+) -> None:
+    os.mkfifo(workspace / "pipe")
+
+    failure = _refused(workspace, artifacts, AgentExport(path="pipe", optional=True))
+
+    assert failure.failure.kind == ExportFailureKind.UNSAFE
+
+
+def test_an_export_declares_optional_and_nothing_else_unknown() -> None:
+    assert AgentExport.model_validate({"path": "out", "optional": True}).optional
+    assert not AgentExport(path="out").optional
+    with pytest.raises(ValueError):
+        AgentExport.model_validate({"path": "out", "required": False})

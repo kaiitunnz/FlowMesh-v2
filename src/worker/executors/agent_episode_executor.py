@@ -536,7 +536,7 @@ def _export(
     """Copy the exports out of the quiesced workspace into the task's artifacts,
     returning the failure when they cannot be copied."""
     try:
-        spool_exports(state.workspace, exports, out_dir / ARTIFACTS_DIR)
+        skipped = spool_exports(state.workspace, exports, out_dir / ARTIFACTS_DIR)
     except ExportFailed as exc:
         _LOG.warning("Exports of the completing agent refused: %s", exc)
         failure = exc.failure
@@ -544,6 +544,8 @@ def _export(
         _LOG.warning("Exports of the completing agent failed: %s", exc)
         failure = ExportFailure(kind=ExportFailureKind.UNAVAILABLE, message=str(exc))
     else:
+        for export in skipped:
+            _LOG.info("Optional export %r does not exist; skipped", export.path)
         return None
     remove_below(out_dir / ARTIFACTS_DIR)
     return failure

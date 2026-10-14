@@ -5,8 +5,9 @@ writer the step started is proved stopped, and lands under the task's artifacts,
 the task publishes it like any other artifact. Anything an agent could plant to reach
 past its workspace or to alias other bytes ends the copy refused: a link, a special
 file, a file with a second hard link, an in-flight write, or a path the fabric never
-exports. A declared path that does not exist ends it as missing. An agent's artifacts
-are its exports alone, so each copy owns the task's artifacts directory.
+exports. A declared path that does not exist ends it as missing, unless its export is
+optional, which is then skipped. An agent's artifacts are its exports alone, so each
+copy owns the task's artifacts directory.
 """
 
 import os
@@ -51,8 +52,9 @@ def _unsafe(message: str) -> ExportFailed:
 
 def spool_exports(
     workspace: Path, exports: Sequence[AgentExport], artifacts_dir: Path
-) -> None:
-    """Copy each export from ``workspace`` to ``artifacts_dir`` under its name.
+) -> list[AgentExport]:
+    """Copy each export from ``workspace`` to ``artifacts_dir`` under its name, and
+    return the optional exports skipped because their paths do not exist.
 
     The copies land whole or not at all: they are staged beside the artifacts and
     replace everything an earlier completion left there only once every export
@@ -64,15 +66,18 @@ def spool_exports(
         with private_dir(staging_dir) as staging:
             try:
                 with open_dir(workspace) as workspace_fd:
-                    for export in exports:
-                        _copy_export(workspace_fd, export, staging)
+                    copied = [
+                        export
+                        for export in exports
+                        if _copy_export(workspace_fd, export, staging)
+                    ]
             except (FileNotFoundError, PathRefused) as exc:
                 raise ExportFailed(
                     ExportFailureKind.MISSING, f"the workspace is unreadable: {exc}"
                 )
             with private_dir(artifacts_dir) as artifacts:
                 clear_directory(artifacts)
-                for export in exports:
+                for export in copied:
                     dest = artifacts / export.published_name
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     (staging / export.published_name).rename(dest)
@@ -80,22 +85,22 @@ def spool_exports(
         raise _unsafe(f"the task's output holds a link or another user's entry: {exc}")
     finally:
         remove_below(staging_dir)
+    return [export for export in exports if export not in copied]
 
 
-def _copy_export(workspace_fd: int, export: AgentExport, staging: Path) -> None:
+def _copy_export(workspace_fd: int, export: AgentExport, staging: Path) -> bool:
+    """Copy one export into ``staging``; return False for an optional one whose path
+    does not exist, which stages nothing."""
     path = export.path
     if (excluded := excluded_export_path(path)) is not None:
         raise _unsafe(f"export {path!r} lies under {excluded!r}")
     *parents, last = path.split("/")
     dest = staging / export.published_name
+    found = False
     try:
         with open_dir_at(workspace_fd, *parents) as parent_fd:
-            try:
-                st = os.stat(last, dir_fd=parent_fd, follow_symlinks=False)
-            except FileNotFoundError:
-                raise ExportFailed(
-                    ExportFailureKind.MISSING, f"export {path!r} does not exist"
-                )
+            st = os.stat(last, dir_fd=parent_fd, follow_symlinks=False)
+            found = True
             if stat.S_ISREG(st.st_mode):
                 _copy_file(parent_fd, last, dest, path)
             elif stat.S_ISDIR(st.st_mode):
@@ -104,9 +109,12 @@ def _copy_export(workspace_fd: int, export: AgentExport, staging: Path) -> None:
             else:
                 raise _unsafe(f"export {path!r} is not a regular file or directory")
     except FileNotFoundError:
+        if export.optional and not found:
+            return False
         raise ExportFailed(ExportFailureKind.MISSING, f"export {path!r} does not exist")
     except PathRefused as exc:
         raise _unsafe(f"export {path!r} is refused: {exc}")
+    return True
 
 
 def _copy_tree(top_fd: int, dest: Path, path: str) -> None:
