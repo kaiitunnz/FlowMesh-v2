@@ -575,8 +575,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   its own store access, checking an artifact member only for its presence and size: it
   holds the task while it cannot reach the store either, fails it when the content is
   missing or corrupt, and otherwise queues it again a second later, in every case
-  without spending an attempt or blaming the worker. While another worker is eligible,
-  the task waits for one rather than returning to that worker.
+  without spending an attempt or blaming the worker. Its next placement passes over that
+  worker while another idle worker can take it.
 - **Published outputs.** A leaf declares `result: {visibility: published}` to publish its
   value, and a spawn region declares it to publish its children's results as a collection
   keyed by child index within each spawning scope. A spawn whose input failed publishes

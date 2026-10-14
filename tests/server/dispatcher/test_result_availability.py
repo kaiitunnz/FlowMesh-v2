@@ -8,6 +8,7 @@ once rather than retrying toward a result that will never read.
 
 import asyncio
 import logging
+import threading
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest import mock
@@ -15,6 +16,8 @@ from unittest import mock
 import pytest
 
 from server.config import OrchestrationConfig
+from server.dispatcher import base as dispatcher_base
+from server.dispatcher.base import Dispatcher
 from server.registries.worker import Worker
 from server.task.results import ResultUnavailable
 from server.task.runtime import TaskRuntime
@@ -250,9 +253,9 @@ def test_a_worker_that_could_not_reach_an_input_is_passed_over() -> None:
 
 def _avoiding(
     idle: list[str], eligible: list[str]
-) -> tuple[TaskRuntime, str, mock.Mock, CapturingDispatcher]:
+) -> tuple[TaskRuntime, str, mock.Mock, Dispatcher]:
     """A task whose input wkr-1 could not reach, with ``idle`` workers idle and
-    ``eligible`` able to run it."""
+    ``eligible`` able to run it, and a dispatcher that requeues for real."""
     reader = make_result_reader()
     runtime = TaskRuntime(
         cast(Any, FakeRegistry()),
@@ -275,31 +278,57 @@ def _avoiding(
         _worker().model_copy(update={"id": w}) for w in eligible
     ]
     registry.publish_task.return_value = 1
-    dispatcher = CapturingDispatcher(
+    dispatcher = Dispatcher(
         runtime=runtime,
         worker_registry=registry,
         logger=logging.getLogger("dispatch"),
         worker_selection_strategy="first_fit",
+        no_worker_grace_sec=0,
     )
     record = runtime.get_record(b)
     assert record is not None
     record.avoided_worker = "wkr-1"
+    with runtime._cv:
+        assert runtime._ready.pop_ready_locked() == b
     return runtime, b, registry, dispatcher
 
 
-def test_a_task_waits_for_another_eligible_worker_rather_than_its_reporter() -> None:
-    runtime, b, registry, dispatcher = _avoiding(["wkr-1"], ["wkr-1", "wkr-2"])
-
-    assert dispatcher.dispatch_once(b) is False
-
-    registry.publish_task.assert_not_called()
-    record = runtime.get_record(b)
-    assert record is not None and record.attempts == 0
-
-
-def test_a_task_returns_to_its_reporter_when_no_other_worker_can_run_it() -> None:
-    _, b, registry, dispatcher = _avoiding(["wkr-1"], ["wkr-1"])
+def test_a_task_goes_back_to_its_reporter_while_no_other_worker_is_idle() -> None:
+    _, b, registry, dispatcher = _avoiding(["wkr-1"], ["wkr-1", "wkr-2"])
 
     assert dispatcher.dispatch_once(b) is True
 
+    assert registry.publish_task.call_args[0][0].id == "wkr-1"
+
+
+def test_a_task_goes_to_another_idle_worker_over_its_reporter() -> None:
+    _, b, registry, dispatcher = _avoiding(["wkr-1", "wkr-2"], ["wkr-1", "wkr-2"])
+
+    assert dispatcher.dispatch_once(b) is True
+
+    assert registry.publish_task.call_args[0][0].id == "wkr-2"
+
+
+def test_a_task_back_on_its_reporter_takes_no_loop_backoff() -> None:
+    runtime, b, registry, dispatcher = _avoiding(["wkr-1"], ["wkr-1", "wkr-2"])
+    with runtime._cv:
+        runtime._ready.enqueue_ready_locked(b)
+    stop = threading.Event()
+    sleeps: list[float] = []
+    passes: list[bool] = []
+    dispatch_once = dispatcher.dispatch_once
+
+    def attempt(task_id: str) -> bool:
+        passes.append(placed := dispatch_once(task_id))
+        if placed or len(passes) == 3:
+            stop.set()
+        return placed
+
+    with (
+        mock.patch.object(dispatcher_base.time, "sleep", sleeps.append),
+        mock.patch.object(dispatcher, "dispatch_once", attempt),
+    ):
+        dispatcher.dispatch_loop(stop, poll_interval=0.01)
+
+    assert sleeps == []
     assert registry.publish_task.call_args[0][0].id == "wkr-1"

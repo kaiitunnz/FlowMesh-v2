@@ -641,24 +641,10 @@ class Dispatcher:
             pool = free or pool
 
         # A worker that could not reach an input of the task is passed over while
-        # another is eligible: the input reads fine at control, so the fault is likely
-        # its own path to the store. The task waits for that other worker rather than
-        # returning to this one; a private state's owner is the only worker it has.
-        if (avoided := record.avoided_worker) is not None and owner is None:
-            others = [c for c in pool if c.id != avoided]
-            if not others and (
-                self.eligible_worker_ids(record, relay=relays_only)
-                - failed_ids
-                - {avoided}
-            ):
-                self._logger.debug(
-                    "Only %s, which could not read an input of %s, is idle; waiting",
-                    avoided,
-                    task_id,
-                )
-                self.requeue_task(task_id, reason="avoided_worker", count_retry=False)
-                return False
-            pool = others or pool
+        # another idle worker can take it: the input reads fine at control, so the
+        # fault is likely its own path to the store.
+        if record.avoided_worker is not None:
+            pool = [c for c in pool if c.id != record.avoided_worker] or pool
 
         # 5. Worker selection (best-fit scoring by default)
         selection_info: dict[str, Any] = {}
