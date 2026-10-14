@@ -81,6 +81,16 @@ class ArtifactCatalogStore:
             task_id, self._rds.sync.hash_getall(task_artifacts_key(task_id)), revision
         )
 
+    def artifact_binding(
+        self, task_id: str, revision: str, name: str
+    ) -> ArtifactBinding | None:
+        """Read one binding of a task's catalog, or None when it holds none."""
+        field = f"{revision}{_SEPARATOR}{name}"
+        (raw,) = self._rds.sync.hash_mget(task_artifacts_key(task_id), [field])
+        if raw is None:
+            return None
+        return decode_artifact_bindings(task_id, {field: raw}).get((revision, name))
+
     async def artifact_bindings_async(
         self, task_id: str, revision: str | None = None
     ) -> ArtifactBindings:

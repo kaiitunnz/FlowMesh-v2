@@ -70,8 +70,17 @@ class _Runtime:
     def __init__(self, bindings: dict[str, list[ArtifactBinding]]) -> None:
         self._bindings = bindings
 
-    def artifact_bindings(self, task_id: str) -> dict[tuple[str, str], Any]:
-        return {binding.key: binding for binding in self._bindings.get(task_id, [])}
+    def artifact_binding(
+        self, task_id: str, revision: str, name: str
+    ) -> ArtifactBinding | None:
+        return next(
+            (
+                binding
+                for binding in self._bindings.get(task_id, [])
+                if binding.key == (revision, name)
+            ),
+            None,
+        )
 
     def final_artifacts(self, task_id: str) -> dict[tuple[str, str], Any]:
         return final_set(

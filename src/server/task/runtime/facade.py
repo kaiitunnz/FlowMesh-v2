@@ -3588,6 +3588,28 @@ class TaskRuntime:
             return {}
         return self._workflow_registry.artifact_bindings(task_id, revision)
 
+    def artifact_binding(
+        self, task_id: str, revision: str, name: str
+    ) -> ArtifactBinding | None:
+        """A task's published artifact ``name`` at ``revision``, or None when it has
+        none; a settled task's checkpoints are read from its stored catalog alone."""
+        with self._lock:
+            if (record := self._tasks.get(task_id)) is not None:
+                if (binding := record.artifacts.get((revision, name))) is not None:
+                    return binding
+                if (
+                    record.status not in TERMINAL_TASK_STATUSES
+                    or not record.has_artifacts
+                    or revision == FINAL_REVISION
+                ):
+                    return None
+        if record is None:
+            if (persisted := self._stored_task(task_id)) is None:
+                return None
+            if not persisted.persisted.record.has_artifacts:
+                return None
+        return self._workflow_registry.artifact_binding(task_id, revision, name)
+
     def final_artifacts(self, task_id: str) -> ArtifactBindings:
         """A task's final set by revision and name, empty for a task that has none."""
         with self._lock:

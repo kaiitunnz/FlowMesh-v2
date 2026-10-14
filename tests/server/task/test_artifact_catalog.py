@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import logging
 from typing import Any, cast
+from unittest import mock
 
 import fakeredis
 import pytest
@@ -587,3 +588,24 @@ def test_a_revision_read_decodes_only_that_revision() -> None:
             use: {},
         }
     )
+
+
+def test_one_checkpoint_of_a_settled_task_is_read_without_its_catalog() -> None:
+    registry = _registry()
+    runtime = _runtime(registry)
+    _, (train, _use) = _register(runtime)
+    record_dispatch(runtime, train, dispatch_id="dsp-1")
+    for step in range(1, 51):
+        assert _publish(runtime, train, _step(step, f"ckpt-{step}".encode()), "dsp-1")
+    _succeed(runtime, train, [_tree()], dispatch_id="dsp-1")
+
+    with mock.patch.object(
+        registry._rds.sync, "hash_getall", side_effect=AssertionError("whole catalog")
+    ):
+        found = runtime.artifact_binding(train, "step-20", "checkpoints")
+        missing = runtime.artifact_binding(train, "step-99", "checkpoints")
+
+    assert found is not None and found.reference == _ref(b"ckpt-20")
+    assert missing is None
+    final = runtime.artifact_binding(train, "final", "final_model")
+    assert final is not None and final.reference == _tree().reference

@@ -1630,8 +1630,11 @@ class Dispatcher:
         ):
             return None
         if (revision := context.revision_of(path)) is not None:
+            binding = self._runtime.artifact_binding(
+                context.task_id, revision, path.split("/", 1)[0]
+            )
             found = resolve_artifact_path(
-                self._runtime.artifact_bindings(context.task_id) or {}, revision, path
+                {binding.key: binding} if binding is not None else {}, revision, path
             )
         else:
             found = resolve_artifact_input(
