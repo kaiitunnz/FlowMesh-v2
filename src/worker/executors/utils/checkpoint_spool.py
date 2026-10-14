@@ -58,13 +58,16 @@ class CheckpointSpool(TrainerCallback):
             self._spool(Path(args.output_dir) / f"checkpoint-{step}", step)
         if distributed:
             torch.distributed.barrier()
+        if self.failed():
+            control.should_training_stop = True
+
+    def failed(self) -> bool:
+        """Return whether a checkpoint this spool took could not be published."""
         try:
             with private_dir(self._spool_dir, create=False) as spool:
-                failed = spool_failed(spool)
+                return spool_failed(spool)
         except (FileNotFoundError, PathRefused):
-            failed = False
-        if failed:
-            control.should_training_stop = True
+            return False
 
     def _spool(self, checkpoint: Path, step: int) -> None:
         try:

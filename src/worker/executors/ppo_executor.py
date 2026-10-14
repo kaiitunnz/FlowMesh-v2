@@ -350,14 +350,21 @@ class _EarlyStopSignal(Exception):
     """Internal signal: KL exceeded ``target_kl``; unwind ``PPOTrainer.train``."""
 
 
+class _CheckpointPublishStop(Exception):
+    """Internal signal: a saved checkpoint could not be published; unwind
+    ``PPOTrainer.train`` so the task fails as a publication failure."""
+
+
 class _EarlyStopPPOTrainer(PPOTrainer):
-    """``PPOTrainer`` subclass that halts when ``objective/kl`` exceeds a threshold.
+    """``PPOTrainer`` subclass that halts when ``objective/kl`` exceeds a threshold,
+    or once a saved checkpoint could not be published.
 
     TRL's PPO loop calls ``self.log(metrics)`` once per update step but
     never checks ``control.should_training_stop``, so a stock
     ``TrainerCallback`` cannot end training. Overriding ``log`` and
-    raising ``_EarlyStopSignal`` instead lets the exception unwind the
-    loop cleanly; the executor catches it at the ``train()`` call site.
+    raising ``_EarlyStopSignal`` or ``_CheckpointPublishStop`` instead lets the
+    exception unwind the loop cleanly; the executor catches it at the ``train()``
+    call site.
 
     ``target_kl`` defaults to ``None`` so the subclass is a safe
     drop-in when early stopping is disabled.
@@ -367,6 +374,11 @@ class _EarlyStopPPOTrainer(PPOTrainer):
 
     def log(self, logs: dict[str, float], *args: Any, **kwargs: Any) -> None:
         super().log(logs, *args, **kwargs)
+        if any(
+            isinstance(callback, CheckpointSpool) and callback.failed()
+            for callback in self.callback_handler.callbacks
+        ):
+            raise _CheckpointPublishStop()
         if self.target_kl is None:
             return
         kl = logs.get("objective/kl")
@@ -701,18 +713,22 @@ class PPOExecutor(Executor):
             self._install_kl_early_stopping(ppo_trainer, training_config)
 
             logger.info("Starting PPO training...")
+            publish_failed = False
             try:
                 with reward_ctx:
                     ppo_trainer.train()
             except _EarlyStopSignal:
                 pass
+            except _CheckpointPublishStop:
+                publish_failed = True
+                logger.warning("PPO stopped: a saved checkpoint could not be published")
             logger.info("PPO training completed")
 
             ok = True
             error_msg = None
 
             # Save model if requested
-            if training_config.get("save_model", True):
+            if training_config.get("save_model", True) and not publish_failed:
                 try:
                     logger.info("Saving trained model...")
                     model_save_path = checkpoint_dir / "final_model"

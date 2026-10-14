@@ -1,21 +1,28 @@
 """Unit tests for PPO KL-based early stopping."""
 
-from typing import Any
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
 
 pytest.importorskip("trl", reason="trl not installed (needs --extra training)")
 
+from worker.content.artifacts import fail_spool, open_spool
 from worker.executors.base_executor import ExecutionError
 from worker.executors.ppo_executor import (
     PPOExecutor,
+    _CheckpointPublishStop,
     _EarlyStopPPOTrainer,
     _EarlyStopSignal,
 )
+from worker.executors.utils.checkpoint_spool import CheckpointSpool
 
 
-def _make_trainer(target_kl: float | None) -> _EarlyStopPPOTrainer:
+def _make_trainer(
+    target_kl: float | None, callbacks: list[Any] | None = None
+) -> _EarlyStopPPOTrainer:
     """Build a bare ``_EarlyStopPPOTrainer`` without running ``__init__``.
 
     ``_EarlyStopPPOTrainer.log`` defers to ``super().log`` (TRL/HF Trainer); the
@@ -23,6 +30,7 @@ def _make_trainer(target_kl: float | None) -> _EarlyStopPPOTrainer:
     """
     trainer = _EarlyStopPPOTrainer.__new__(_EarlyStopPPOTrainer)
     trainer.target_kl = target_kl
+    trainer.callback_handler = cast(Any, SimpleNamespace(callbacks=callbacks or []))
     return trainer
 
 
@@ -56,6 +64,32 @@ def test_threshold_unset_is_no_op(_super_log) -> None:
     """When ``target_kl is None`` the override is a pure pass-through."""
     trainer = _make_trainer(target_kl=None)
     trainer.log({"objective/kl": 9.99})
+
+
+def _spool(tmp_path: Path, failed: bool) -> CheckpointSpool:
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    open_spool(spool)
+    if failed:
+        fail_spool(spool, "store unreachable")
+    return CheckpointSpool(spool)
+
+
+@patch("trl.experimental.ppo.ppo_trainer.PPOTrainer.log", autospec=True)
+def test_a_failed_checkpoint_publication_stops_training(
+    _super_log: Any, tmp_path: Path
+) -> None:
+    trainer = _make_trainer(target_kl=None, callbacks=[_spool(tmp_path, True)])
+    with pytest.raises(_CheckpointPublishStop):
+        trainer.log({"objective/kl": 0.01})
+
+
+@patch("trl.experimental.ppo.ppo_trainer.PPOTrainer.log", autospec=True)
+def test_training_goes_on_while_checkpoints_publish(
+    _super_log: Any, tmp_path: Path
+) -> None:
+    trainer = _make_trainer(target_kl=None, callbacks=[_spool(tmp_path, False)])
+    trainer.log({"objective/kl": 0.01})
 
 
 # ---------------------------------------------------------------------------
