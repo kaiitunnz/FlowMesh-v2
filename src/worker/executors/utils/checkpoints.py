@@ -2,7 +2,7 @@ import logging
 import shutil
 import tarfile
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import quote, urljoin, urlparse
 
@@ -16,6 +16,7 @@ from shared.utils.atomic import atomic_write_text
 from shared.utils.http import add_auth_headers
 from shared.utils.redact import redact_url
 
+from ...content.artifact_inputs import ARTIFACT_INPUTS_DIR
 from ...utils.redaction import redact_urls
 from ..base_executor import ExecutionError, TaskReference
 from .artifacts import is_flowmesh_origin_url
@@ -49,6 +50,15 @@ def hydrated_path(value: str) -> Path | None:
         return None
     path = Path(value)
     return path if path.is_absolute() and path.exists() else None
+
+
+def load_identity(value: str) -> str:
+    """Return what a load names regardless of the task it was hydrated for: a hydrated
+    artifact as its digest and the path inside it, anything else as given."""
+    parts = PurePosixPath(value).parts
+    if ARTIFACT_INPUTS_DIR not in parts:
+        return value
+    return "/".join(parts[parts.index(ARTIFACT_INPUTS_DIR) + 1 :])
 
 
 def resolve_checkpoint_load(

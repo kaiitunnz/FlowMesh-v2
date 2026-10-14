@@ -84,7 +84,7 @@ from shared.tasks.task_type import TaskType
 from .base_executor import ExecutionError, Executor, ExecutorTask
 from .mixins.data import InferenceEntry
 from .mixins.inference import InferenceMixin, PreparedInferenceEntry, produced_items
-from .utils.checkpoints import resolve_checkpoint_load
+from .utils.checkpoints import load_identity, resolve_checkpoint_load
 from .utils.collective import loopback_collective_env
 
 logger = logging.getLogger(__name__)
@@ -280,10 +280,10 @@ Summary:"""
         checkpoint_cfg: dict[str, Any],
         spec: InferenceSpecStrict,
     ) -> dict[str, Any]:
-        return {
-            **self._base_reuse_key(spec),
-            "checkpoint": copy.deepcopy(checkpoint_cfg),
-        }
+        checkpoint = copy.deepcopy(checkpoint_cfg)
+        if isinstance(url := checkpoint.get("url"), str):
+            checkpoint["url"] = load_identity(url)
+        return {**self._base_reuse_key(spec), "checkpoint": checkpoint}
 
     def _extra_llm_kwargs(self, spec: InferenceSpecStrict) -> dict[str, Any]:
         return {}

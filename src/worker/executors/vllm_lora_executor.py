@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """VLLMLoRAExecutor: LoRA-enabled vLLM inference."""
 
+import dataclasses
 import logging
 import os
 import shutil
@@ -28,6 +29,7 @@ from .utils.checkpoints import (
     detect_archive_format,
     download_and_unpack,
     hydrated_path,
+    load_identity,
     select_extracted_subdir,
 )
 from .vllm_executor import VLLMExecutor
@@ -56,6 +58,9 @@ class VLLMLoRAExecutor(VLLMExecutor):
         super().__init__(*args, **kwargs)
         self._adapter_specs: list[LoRAAdapterSpec] = []
         self._runtime_specs: list[LoRAAdapterSpec] = []
+        # The engine the merged adapters went into: a reused engine, whose key names
+        # the same adapters, already carries them.
+        self._merged_into: Any = None
 
     def _build_inference_spec(
         self,
@@ -64,7 +69,14 @@ class VLLMLoRAExecutor(VLLMExecutor):
         spec: InferenceSpecStrict,
     ) -> dict[str, Any]:
         base_spec = super()._build_inference_spec(vllm_cfg, checkpoint_cfg, spec)
-        base_spec["adapters"] = self._extract_adapter_specs(spec)
+        base_spec["adapters"] = [
+            dataclasses.replace(
+                adapter,
+                path=adapter.path and load_identity(adapter.path),
+                url=adapter.url and load_identity(adapter.url),
+            )
+            for adapter in self._extract_adapter_specs(spec)
+        ]
         return base_spec
 
     def _extra_llm_kwargs(self, spec: InferenceSpecStrict) -> dict[str, Any]:
@@ -151,7 +163,7 @@ class VLLMLoRAExecutor(VLLMExecutor):
                 runtime_specs.append(adapter)
         self._runtime_specs = runtime_specs
 
-        if not merge_specs:
+        if not merge_specs or self._merged_into is self._llm:
             return
         if self._llm is None:
             raise ExecutionError("vLLM must be initialized before LoRA merge")
@@ -170,6 +182,7 @@ class VLLMLoRAExecutor(VLLMExecutor):
             merge_fn(adapter_name=adapter.name)
             if unload_fn is not None:
                 unload_fn(adapter_name=adapter.name)
+        self._merged_into = self._llm
 
     def _build_lora_requests(self, out_dir: Path) -> Any | None:
         if not self._runtime_specs:
