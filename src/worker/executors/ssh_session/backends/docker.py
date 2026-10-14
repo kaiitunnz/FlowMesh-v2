@@ -510,13 +510,10 @@ class DockerSessionBackend(SSHSessionBackend):
         for resolved in request.resolved_inputs:
             dst = shlex.quote(f"/dst/{resolved.task_id}")
             commands.append(f"mkdir -p {dst}")
-            if resolved.source_path.exists():
-                src = shlex.quote(f"/src/{resolved.task_id}")
-                commands.append(f"cp -a {src}/. {dst}/")
-            elif resolved.staged_path is not None:
+            if resolved.staged_path is not None:
                 # The worker staged the upstream's artifacts under the task's own
                 # output, which lies in the results volume mounted at /src.
-                rel = resolved.staged_path.relative_to(resolved.source_path.parent)
+                rel = resolved.staged_path.relative_to(resolved.results_root)
                 src = shlex.quote(f"/src/{rel.as_posix()}")
                 commands.append(f"cp -a {src}/. {dst}/")
             if resolved.results is not None:

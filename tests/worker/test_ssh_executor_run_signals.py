@@ -460,7 +460,7 @@ def test_a_signal_during_local_staging_leaves_no_staging_dir(
     upstream = ResolvedSSHInput(
         stage="up",
         task_id="tsk-up",
-        source_path=tmp_path / "absent",
+        results_root=tmp_path,
         mount_path="/in",
         staged_path=staged,
     )
@@ -480,7 +480,7 @@ def test_a_duplicate_mount_path_fails_before_staging_anything(
     monkeypatch.setattr(inputs_module.tempfile, "tempdir", str(tmp_path))
     upstreams = [
         ResolvedSSHInput(
-            stage=stage, task_id=f"tsk-{stage}", source_path=tmp_path, mount_path="/in"
+            stage=stage, task_id=f"tsk-{stage}", results_root=tmp_path, mount_path="/in"
         )
         for stage in ("a", "b")
     ]

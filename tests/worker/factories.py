@@ -209,6 +209,9 @@ class FakeContentPlane:
     ) -> None:
         dest.write_bytes(self.hydrate(task_id, reference))
 
+    def hydrate_to(self, task_id: str, reference: ContentReference, dest: Path) -> None:
+        dest.write_bytes(self.hydrate(task_id, reference))
+
 
 def no_mediated_op(timeout: float) -> None:
     """Stand in for an empty mediated-op queue: wait briefly, then return nothing."""

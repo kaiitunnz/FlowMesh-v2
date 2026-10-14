@@ -66,11 +66,11 @@ class ArtifactMaterializer:
         staging.rename(dest)
         return dest
 
-    def materialize_at(self, binding: ArtifactBinding, dest: Path) -> None:
-        """Put the artifact at ``dest`` under its own layout: a file as ``dest``, a
-        tree as a directory of its files."""
+    def copy_at(self, binding: ArtifactBinding, dest: Path) -> None:
+        """Put a writable copy of the artifact at ``dest`` under its own layout: a
+        file as ``dest``, a tree as a directory of its files."""
         if binding.kind is not ArtifactKind.TREE:
-            self._fetch(binding.reference, dest)
+            self._copy(binding.reference, dest)
             return
         try:
             manifest = TreeManifest.decode(
@@ -83,7 +83,11 @@ class ArtifactMaterializer:
         scope = binding.reference.authorization_scope
         dest.mkdir(parents=True, exist_ok=True)
         for member in manifest.members:
-            self._fetch(member.reference(scope), dest / member.path)
+            self._copy(member.reference(scope), dest / member.path)
+
+    def _copy(self, reference: ContentReference, dest: Path) -> None:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        self._plane.hydrate_to(self._task_id, reference, dest)
 
     def _fetch(self, reference: ContentReference, dest: Path) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)

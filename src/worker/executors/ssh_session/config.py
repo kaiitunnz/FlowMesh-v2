@@ -52,14 +52,14 @@ MAX_MOUNT_PATH_COMPONENT_BYTES = 255
 class ResolvedSSHInput:
     stage: str
     task_id: str
-    source_path: Path
+    # The worker's results directory, which ``staged_path`` lies under.
+    results_root: Path
     mount_path: str
     # The upstream's stored result envelope, hydrated from its reference; None when the
     # dispatch named the upstream by task id only.
     results: bytes | None = None
     # Where the worker staged the upstream's published artifacts, laid out as its
-    # output directory (``artifacts/<name>``); None when it holds the upstream's own
-    # output or the upstream published none.
+    # output directory (``artifacts/<name>``); None when the upstream published none.
     staged_path: Path | None = None
 
 

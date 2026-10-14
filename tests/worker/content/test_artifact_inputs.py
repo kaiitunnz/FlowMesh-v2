@@ -282,9 +282,7 @@ def test_an_ssh_input_stages_its_upstreams_artifacts_from_the_store_not_the_root
     lane = _CacheLane(tmp_path / "cache")
     plane = WorkerContentPlane(cast(Any, lane), cast(Any, _Access(store)))
 
-    TaskInputHydrator(cast(Any, plane)).stage_ssh_inputs(
-        msg, tmp_path / "in", tmp_path / "results"
-    )
+    TaskInputHydrator(cast(Any, plane)).stage_ssh_inputs(msg, tmp_path / "in")
 
     staged = msg.staged_input("tsk-train")
     assert staged == (tmp_path / "in" / "tsk-train").as_posix()
@@ -306,16 +304,40 @@ def test_an_ssh_input_stages_its_upstreams_artifacts_from_the_store_not_the_root
     assert len(lane.peer_reads) == len(_FILES) + 2
 
 
-def test_an_ssh_input_whose_upstream_ran_here_is_not_staged_again(
+def test_an_ssh_input_stages_from_the_plane_whatever_its_local_output_holds(
     tmp_path: Path,
 ) -> None:
     store = SharedFilesystemObjectStore(tmp_path / "shared")
     msg = _ssh_message(store, [_publish_file(store)])
-    (tmp_path / "results" / "tsk-train").mkdir(parents=True)
-    plane = FakeContentPlane(store)
+    stale = tmp_path / "results" / "tsk-train" / "artifacts"
+    stale.mkdir(parents=True)
+    (stale / "partial.bin").write_bytes(b"left by an earlier attempt")
 
-    TaskInputHydrator(cast(Any, plane)).stage_ssh_inputs(
-        msg, tmp_path / "in", tmp_path / "results"
+    TaskInputHydrator(cast(Any, FakeContentPlane(store))).stage_ssh_inputs(
+        msg, tmp_path / "in"
     )
+    resolved = resolve_inputs(
+        msg,
+        SSHConfig.from_spec(msg.task.spec, DEFAULT_WORKER_CONFIG),
+        tmp_path / "results",
+    )
+    staging = stage_inputs_locally(resolved, "ssn-12345678", RunSignals())
 
-    assert msg.staged_input("tsk-train") is None and plane.reads == []
+    root = staging / "tsk-train" / "artifacts"
+    assert sorted(p.relative_to(root).as_posix() for p in root.rglob("*")) == [
+        "reports",
+        "reports/notes.txt",
+    ]
+
+
+def test_staged_ssh_inputs_are_writable_copies_of_the_cache(tmp_path: Path) -> None:
+    store = SharedFilesystemObjectStore(tmp_path / "shared")
+    msg = _ssh_message(store, [_publish_tree(store)])
+    lane = _CacheLane(tmp_path / "cache")
+    plane = WorkerContentPlane(cast(Any, lane), cast(Any, _Access(store)))
+
+    TaskInputHydrator(cast(Any, plane)).stage_ssh_inputs(msg, tmp_path / "in")
+
+    staged = tmp_path / "in" / "tsk-train" / "artifacts" / "final_model" / "config.json"
+    assert staged.stat().st_nlink == 1
+    assert staged.stat().st_mode & stat.S_IWUSR

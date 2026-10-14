@@ -1333,7 +1333,7 @@ class Runner:
                         msg, artifact_inputs_dir(out_dir)
                     )
                     self._input_hydrator.stage_ssh_inputs(
-                        msg, artifact_inputs_dir(out_dir) / "ssh", self.results_dir
+                        msg, artifact_inputs_dir(out_dir) / "ssh"
                     )
                     if msg.input_preparation:
                         self._raise_if_cancel_pending(task_id)

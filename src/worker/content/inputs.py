@@ -256,12 +256,10 @@ class TaskInputHydrator:
                 paths[(producer, path)] = local.as_posix()
             spec.record_hydrated_artifacts(paths)
 
-    def stage_ssh_inputs(
-        self, msg: WorkerTaskMessage, root: Path, results_root: Path
-    ) -> None:
-        """Stage the published artifacts of each upstream task an SSH task's inputs
-        name and this worker does not hold the outputs of, as its result bundle lays
-        them out (``<root>/<task_id>/artifacts/<name>``), and record where."""
+    def stage_ssh_inputs(self, msg: WorkerTaskMessage, root: Path) -> None:
+        """Stage writable copies of the published artifacts of each upstream task an
+        SSH task's inputs name, as its result bundle lays them out
+        (``<root>/<task_id>/artifacts/<name>``), and record where."""
         spec = msg.task.spec
         if not isinstance(spec, SSHSpecStrict) or not spec.inputs:
             return
@@ -269,7 +267,6 @@ class TaskInputHydrator:
             producer
             for entry in spec.inputs
             if (producer := _input_producer(msg, entry.stage.strip())) is not None
-            and not (results_root / producer).exists()
         }
         published = {
             producer: [
@@ -288,9 +285,7 @@ class TaskInputHydrator:
             for binding in bindings:
                 _check_scope(msg, binding)
                 with _reading_artifacts(msg.task_id):
-                    materializer.materialize_at(
-                        binding, dest / ARTIFACTS_DIR / binding.name
-                    )
+                    materializer.copy_at(binding, dest / ARTIFACTS_DIR / binding.name)
             staged[producer] = dest.as_posix()
         msg.record_staged_inputs(staged)
 

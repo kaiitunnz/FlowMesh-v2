@@ -1,7 +1,6 @@
-"""Stages an SSH task's ``inputs[]`` in a local directory: an upstream's output from
-this worker's disk, or the artifacts it published, which the worker staged from its
-content plane when another worker ran it, with its hydrated result envelope beside
-them."""
+"""Stages an SSH task's ``inputs[]`` in a local directory: the artifacts each upstream
+published, which the worker staged from its content plane, with its hydrated result
+envelope beside them."""
 
 import shutil
 import tempfile
@@ -43,7 +42,7 @@ def resolve_inputs(
             ResolvedSSHInput(
                 stage=stage,
                 task_id=task_id,
-                source_path=results_root / task_id,
+                results_root=results_root,
                 mount_path=normalize_mount_path(
                     entry.mountPath or f"{DEFAULT_INPUTS_ROOT}/{stage}",
                     field_name=f"inputs[{stage}].mountPath",
@@ -83,11 +82,7 @@ def _fill_staging_dir(
         destination = staging_dir / resolved.task_id
         # Links copy as links, so staging never reads what one points to with the
         # worker's access.
-        if resolved.source_path.exists():
-            shutil.copytree(
-                resolved.source_path, destination, symlinks=True, dirs_exist_ok=True
-            )
-        elif resolved.staged_path is not None:
+        if resolved.staged_path is not None:
             shutil.copytree(
                 resolved.staged_path, destination, symlinks=True, dirs_exist_ok=True
             )

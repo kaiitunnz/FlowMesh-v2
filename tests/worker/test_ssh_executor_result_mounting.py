@@ -349,19 +349,18 @@ def _stage_in_volume(
     backend = DockerSessionBackend(
         _worker_config(tmp_path, network_mode="container:flowmesh-worker-1")
     )
-    local_source = tmp_path / "results" / "task-local"
-    local_source.mkdir(parents=True)
+    (tmp_path / "results" / "task-local").mkdir(parents=True)
     resolved_inputs = [
         ResolvedSSHInput(
             stage="local",
             task_id="task-local",
-            source_path=local_source,
+            results_root=tmp_path / "results",
             mount_path="/mnt/flowmesh/inputs/local",
         ),
         ResolvedSSHInput(
             stage="remote",
             task_id="task-remote",
-            source_path=tmp_path / "results" / "task-remote",
+            results_root=tmp_path / "results",
             mount_path="/mnt/flowmesh/inputs/remote",
             results=remote_results,
             staged_path=tmp_path / "results" / _STAGED_REL,
@@ -387,7 +386,8 @@ def test_stage_inputs_in_volume_copies_the_artifacts_the_worker_staged(
 ) -> None:
     fake_client, command = _stage_in_volume(tmp_path, monkeypatch, None)
 
-    assert "cp -a /src/task-local/. /dst/task-local/" in command
+    assert "mkdir -p /dst/task-local" in command
+    assert "/src/task-local" not in command
     assert f"cp -a /src/{_STAGED_REL}/. /dst/task-remote/" in command
     assert "wget" not in command and "/api/v1/results" not in command
     assert _archives(fake_client.containers.container) == []
@@ -417,7 +417,7 @@ def _stage_remote(
     resolved = ResolvedSSHInput(
         stage="remote",
         task_id="task-remote",
-        source_path=tmp_path / "results" / "task-remote",
+        results_root=tmp_path / "results",
         mount_path="/mnt/flowmesh/inputs/remote",
         staged_path=tmp_path / "results" / _STAGED_REL,
     )
@@ -496,7 +496,7 @@ def test_a_staging_container_carries_the_worker_labels_its_volume_does(
     assert kwargs["labels"] == fake_client.volumes.labels
 
 
-def test_a_link_in_a_local_upstream_is_staged_as_a_link(tmp_path: Path) -> None:
+def test_a_link_in_a_staged_upstream_is_staged_as_a_link(tmp_path: Path) -> None:
     secret = tmp_path / "worker-state"
     secret.write_text("not the upstream's", encoding="utf-8")
     source = tmp_path / "worker-results" / "task-pre"
@@ -506,8 +506,9 @@ def test_a_link_in_a_local_upstream_is_staged_as_a_link(tmp_path: Path) -> None:
     resolved = ResolvedSSHInput(
         stage="preprocess",
         task_id="task-pre",
-        source_path=source,
+        results_root=tmp_path / "worker-results",
         mount_path="/mnt/flowmesh/inputs/preprocess",
+        staged_path=source,
     )
 
     staging_dir = _stage_locally([resolved], "session-link")
