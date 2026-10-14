@@ -17,7 +17,7 @@ from ...content.artifacts import (
     spooled_steps,
 )
 
-# The snapshots a save leaves waiting before it waits for the uploader to catch up.
+# The snapshots a save finds waiting before it waits for the uploader to catch up.
 _MAX_PENDING = 2
 _POLL_SEC = 0.5
 
@@ -26,9 +26,11 @@ class CheckpointSpool(TrainerCallback):
     """Snapshots each checkpoint once every rank has written it.
 
     Every rank waits at the save's barrier, so a distributed save is whole before the
-    first rank snapshots it, and only that rank does. A save waits while more than
-    ``max_pending`` snapshots wait to publish, so the spool's disk stays bounded, and
-    once a checkpoint could not be published every rank stops training.
+    first rank snapshots it, and only that rank does. Before that barrier every rank
+    waits while ``max_pending`` snapshots wait to publish, so the spool's disk stays
+    bounded and no rank sits in a collective while the uploader catches up. Once a
+    checkpoint could not be published, every rank stops training at the same save, on
+    the first rank's reading.
     """
 
     def __init__(
@@ -51,6 +53,7 @@ class CheckpointSpool(TrainerCallback):
         distributed = torch.distributed.is_available() and (
             torch.distributed.is_initialized()
         )
+        self._wait_for_uploads()
         if distributed:
             torch.distributed.barrier()
         if state.is_world_process_zero and args.output_dir is not None:
@@ -58,7 +61,12 @@ class CheckpointSpool(TrainerCallback):
             self._spool(Path(args.output_dir) / f"checkpoint-{step}", step)
         if distributed:
             torch.distributed.barrier()
-        if self.failed():
+        failed = self.failed()
+        if distributed:
+            decided = [failed]
+            torch.distributed.broadcast_object_list(decided, src=0)
+            failed = bool(decided[0])
+        if failed:
             control.should_training_stop = True
 
     def failed(self) -> bool:
@@ -76,14 +84,17 @@ class CheckpointSpool(TrainerCallback):
                     return
                 if checkpoint.is_dir():
                     spool_checkpoint(checkpoint, spool, step)
-                self._wait_for_uploads(spool)
         except FileNotFoundError:
             return
 
-    def _wait_for_uploads(self, spool: Path) -> None:
-        while (
-            spool_is_open(spool)
-            and not spool_failed(spool)
-            and len(spooled_steps(spool)) > self._max_pending
-        ):
-            time.sleep(self._poll_sec)
+    def _wait_for_uploads(self) -> None:
+        try:
+            with private_dir(self._spool_dir, create=False) as spool:
+                while (
+                    spool_is_open(spool)
+                    and not spool_failed(spool)
+                    and len(spooled_steps(spool)) >= self._max_pending
+                ):
+                    time.sleep(self._poll_sec)
+        except (FileNotFoundError, PathRefused):
+            return
