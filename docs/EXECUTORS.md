@@ -78,7 +78,9 @@ directory with `.tar.gz` appended (`final_model_archive`, `final_lora_archive`) 
 an archive view of that tree: a deterministic stored-block `.tar.gz` framing of the
 tree's verified members, which the server builds as it streams a download. A training executor's checkpoints publish while it runs: each one the trainer
 saves becomes the `checkpoints` artifact at revision `step-<n>`, which a client
-downloads with `revision=step-<n>`.
+downloads with `revision=step-<n>`. A save waits while two checkpoints are still
+publishing, so the run's disk stays bounded. A checkpoint whose publication still fails
+after retries stops training at the next save and fails the task.
 
 ## Agent-episode harness backends
 

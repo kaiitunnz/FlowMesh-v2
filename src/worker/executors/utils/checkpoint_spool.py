@@ -1,5 +1,6 @@
 """The trainer callback that hands each saved checkpoint to the task's spool."""
 
+import time
 from pathlib import Path
 from typing import Any
 
@@ -7,18 +8,36 @@ import torch
 from transformers import TrainerCallback, TrainerControl, TrainerState
 from transformers.training_args import TrainingArguments
 
-from ...content.artifacts import spool_checkpoint
+from ...content.artifacts import (
+    spool_checkpoint,
+    spool_failed,
+    spool_is_open,
+    spooled_steps,
+)
+
+# The snapshots a save leaves waiting before it waits for the uploader to catch up.
+_MAX_PENDING = 2
+_POLL_SEC = 0.5
 
 
 class CheckpointSpool(TrainerCallback):
     """Snapshots each checkpoint once every rank has written it.
 
     Every rank waits at the save's barrier, so a distributed save is whole before the
-    first rank snapshots it, and only that rank does.
+    first rank snapshots it, and only that rank does. A save waits while more than
+    ``max_pending`` snapshots wait to publish, so the spool's disk stays bounded, and
+    once a checkpoint could not be published every rank stops training.
     """
 
-    def __init__(self, spool_dir: Path) -> None:
+    def __init__(
+        self,
+        spool_dir: Path,
+        max_pending: int = _MAX_PENDING,
+        poll_sec: float = _POLL_SEC,
+    ) -> None:
         self._spool_dir = spool_dir
+        self._max_pending = max_pending
+        self._poll_sec = poll_sec
 
     def on_save(
         self,
@@ -27,11 +46,30 @@ class CheckpointSpool(TrainerCallback):
         control: TrainerControl,
         **kwargs: Any,
     ) -> None:
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
+        distributed = torch.distributed.is_available() and (
+            torch.distributed.is_initialized()
+        )
+        if distributed:
             torch.distributed.barrier()
-        if state.is_world_process_zero and args.output_dir is not None:
+        if (
+            state.is_world_process_zero
+            and args.output_dir is not None
+            and spool_is_open(self._spool_dir)
+        ):
             step = state.global_step
             checkpoint = Path(args.output_dir) / f"checkpoint-{step}"
             if checkpoint.is_dir():
-                self._spool_dir.mkdir(parents=True, exist_ok=True)
                 spool_checkpoint(checkpoint, self._spool_dir, step)
+            self._wait_for_uploads()
+        if distributed:
+            torch.distributed.barrier()
+        if spool_failed(self._spool_dir):
+            control.should_training_stop = True
+
+    def _wait_for_uploads(self) -> None:
+        while (
+            spool_is_open(self._spool_dir)
+            and not spool_failed(self._spool_dir)
+            and len(spooled_steps(self._spool_dir)) > self._max_pending
+        ):
+            time.sleep(self._poll_sec)

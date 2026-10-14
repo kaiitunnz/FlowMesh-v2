@@ -81,6 +81,34 @@ def spool_checkpoint(checkpoint_dir: Path, spool_dir: Path, step: int) -> Path |
     return ready
 
 
+_SPOOL_OPEN = ".uploading"
+_SPOOL_FAILED = ".failed"
+
+
+def open_spool(spool_dir: Path) -> None:
+    """Mark a spool as having an uploader, which a trainer's save waits on."""
+    spool_dir.mkdir(parents=True, exist_ok=True)
+    (spool_dir / _SPOOL_OPEN).touch()
+
+
+def spool_is_open(spool_dir: Path) -> bool:
+    """Whether an uploader publishes what the spool holds."""
+    return (spool_dir / _SPOOL_OPEN).exists()
+
+
+def fail_spool(spool_dir: Path, error: str) -> None:
+    """Record that a spooled checkpoint could not be published."""
+    try:
+        (spool_dir / _SPOOL_FAILED).write_text(error, encoding="utf-8")
+    except OSError:
+        pass
+
+
+def spool_failed(spool_dir: Path) -> bool:
+    """Whether a spooled checkpoint could not be published."""
+    return (spool_dir / _SPOOL_FAILED).exists()
+
+
 def spooled_steps(spool_dir: Path) -> list[tuple[int, Path]]:
     """The snapshots waiting in the spool, by step."""
     try:
@@ -284,7 +312,11 @@ __all__ = [
     "CHECKPOINTS_DIR",
     "CHECKPOINT_SPOOL_DIR",
     "checkpoint_spool_dir",
+    "fail_spool",
+    "open_spool",
     "spool_checkpoint",
+    "spool_failed",
+    "spool_is_open",
     "spooled_steps",
     "ArtifactChanged",
     "ArtifactPublisher",

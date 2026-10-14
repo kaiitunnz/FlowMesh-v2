@@ -5,6 +5,10 @@ publishes each snapshot as the ``checkpoints`` artifact at the revision of its s
 one at a time, and reports each publication on the task's event stream. The task's
 success lists every revision the uploader published, so a report lost on the way still
 binds when the task settles.
+
+A publication that fails is retried with backoff, since every write is conditional and
+repeats settle on what landed. One that still fails marks the spool failed, which stops
+the trainer at its next save, and fails the task when the uploader drains.
 """
 
 import logging
@@ -15,9 +19,17 @@ from pathlib import Path
 
 from shared.tasks.artifact_binding import ArtifactBinding, step_revision
 
-from .artifacts import CHECKPOINTS_DIR, ArtifactPublisher, spooled_steps
+from .artifacts import (
+    CHECKPOINTS_DIR,
+    ArtifactPublisher,
+    fail_spool,
+    open_spool,
+    spooled_steps,
+)
 
 _POLL_SEC = 1.0
+_ATTEMPTS = 5
+_BACKOFF_SEC = 1.0
 
 
 class CheckpointPublishFailed(RuntimeError):
@@ -34,20 +46,24 @@ class CheckpointUploader:
         report: Callable[[ArtifactBinding], None],
         logger: logging.Logger,
         poll_sec: float = _POLL_SEC,
+        backoff_sec: float = _BACKOFF_SEC,
     ) -> None:
         self._publisher = publisher
         self._spool_dir = spool_dir
         self._report = report
         self._logger = logger
         self._poll_sec = poll_sec
+        self._backoff_sec = backoff_sec
         self._published: dict[int, ArtifactBinding] = {}
         self._error: BaseException | None = None
         self._stop = threading.Event()
+        self._aborted = threading.Event()
         self._thread = threading.Thread(
             target=self._run, name="checkpoint-uploader", daemon=True
         )
 
     def start(self) -> None:
+        open_spool(self._spool_dir)
         self._thread.start()
 
     def drain(self) -> list[ArtifactBinding]:
@@ -67,6 +83,7 @@ class CheckpointUploader:
 
     def abort(self) -> None:
         """Stop without publishing what is still spooled."""
+        self._aborted.set()
         self._stop.set()
         self._thread.join()
         self._clear()
@@ -81,13 +98,10 @@ class CheckpointUploader:
         for step, snapshot in spooled_steps(self._spool_dir):
             if step in self._published:
                 continue
-            try:
-                binding, _ = self._publisher.publish_tree(
-                    CHECKPOINTS_DIR, snapshot, step_revision(step)
-                )
-            except Exception as exc:
-                self._logger.warning("Publishing checkpoint %d failed: %s", step, exc)
-                self._error = exc
+            if (
+                self._aborted.is_set()
+                or (binding := self._publish(step, snapshot)) is None
+            ):
                 return
             self._published[step] = binding
             shutil.rmtree(snapshot, ignore_errors=True)
@@ -95,6 +109,31 @@ class CheckpointUploader:
                 self._report(binding)
             except Exception:
                 self._logger.exception("Reporting checkpoint %d failed", step)
+
+    def _publish(self, step: int, snapshot: Path) -> ArtifactBinding | None:
+        delay = self._backoff_sec
+        for attempt in range(1, _ATTEMPTS + 1):
+            try:
+                binding, _ = self._publisher.publish_tree(
+                    CHECKPOINTS_DIR, snapshot, step_revision(step)
+                )
+                return binding
+            except Exception as exc:
+                self._logger.warning(
+                    "Publishing checkpoint %d failed (attempt %d of %d): %s",
+                    step,
+                    attempt,
+                    _ATTEMPTS,
+                    exc,
+                )
+                if attempt == _ATTEMPTS:
+                    self._error = exc
+                    fail_spool(self._spool_dir, str(exc))
+                    return None
+            if self._aborted.wait(delay):
+                return None
+            delay *= 2
+        return None
 
     def _clear(self) -> None:
         shutil.rmtree(self._spool_dir, ignore_errors=True)

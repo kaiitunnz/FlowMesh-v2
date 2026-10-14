@@ -2,6 +2,9 @@
 rotation cannot remove."""
 
 import logging
+import shutil
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +13,13 @@ from transformers import TrainerControl, TrainerState, TrainingArguments
 
 from shared.content import ContentStoreError, SharedFilesystemObjectStore, TreeManifest
 from shared.tasks.artifact_binding import ArtifactBinding
-from worker.content.artifacts import ArtifactPublisher, spool_checkpoint, spooled_steps
+from worker.content.artifacts import (
+    ArtifactPublisher,
+    open_spool,
+    spool_checkpoint,
+    spool_failed,
+    spooled_steps,
+)
 from worker.content.checkpoints import CheckpointPublishFailed, CheckpointUploader
 from worker.executors.utils.checkpoint_spool import CheckpointSpool
 
@@ -55,6 +64,7 @@ def _uploader(
         reports.append,
         logging.getLogger("test"),
         poll_sec=0.01,
+        backoff_sec=0.0,
     )
 
 
@@ -113,6 +123,8 @@ def test_only_the_first_rank_snapshots_a_save(tmp_path: Path, zero: bool) -> Non
     state = TrainerState(global_step=7)
     state.is_world_process_zero = zero
 
+    open_spool(tmp_path / "spool")
+
     CheckpointSpool(tmp_path / "spool").on_save(
         TrainingArguments(output_dir=root.as_posix(), report_to=[]),
         state,
@@ -120,3 +132,86 @@ def test_only_the_first_rank_snapshots_a_save(tmp_path: Path, zero: bool) -> Non
     )
 
     assert bool(spooled_steps(tmp_path / "spool")) is zero
+
+
+def test_a_save_with_no_uploader_spools_nothing(tmp_path: Path) -> None:
+    root = tmp_path / "checkpoints"
+    _checkpoint(root, 7)
+
+    _save(tmp_path / "spool", root, 7)
+
+    assert spooled_steps(tmp_path / "spool") == []
+
+
+class _Flaky(SharedFilesystemObjectStore):
+    def __init__(self, root: Path, failures: int) -> None:
+        super().__init__(root)
+        self.failures = failures
+
+    def write_file(self, scope: str, path: Path, **kwargs: Any) -> Any:
+        if self.failures:
+            self.failures -= 1
+            raise ContentStoreError("store unreachable")
+        return super().write_file(scope, path, **kwargs)
+
+
+def _save(spool: Path, root: Path, step: int, **kwargs: Any) -> TrainerControl:
+    state = TrainerState(global_step=step)
+    state.is_world_process_zero = True
+    control = TrainerControl()
+    CheckpointSpool(spool, poll_sec=0.01, **kwargs).on_save(
+        TrainingArguments(output_dir=root.as_posix(), report_to=[]), state, control
+    )
+    return control
+
+
+def test_a_transient_store_failure_is_retried(tmp_path: Path) -> None:
+    uploader = _uploader(tmp_path, _Flaky(tmp_path / "cas", failures=2), [])
+    uploader.start()
+    spool_checkpoint(_checkpoint(tmp_path / "checkpoints", 1), tmp_path / "spool", 1)
+
+    assert [b.revision for b in uploader.drain()] == ["step-1"]
+
+
+def test_a_persistent_failure_stops_training_at_the_next_save(tmp_path: Path) -> None:
+    uploader = _uploader(tmp_path, _Flaky(tmp_path / "cas", failures=99), [])
+    uploader.start()
+    root = tmp_path / "checkpoints"
+    _checkpoint(root, 1)
+
+    assert not _save(tmp_path / "spool", root, 1).should_training_stop
+    deadline = time.monotonic() + 10
+    while not spool_failed(tmp_path / "spool") and time.monotonic() < deadline:
+        time.sleep(0.01)
+    _checkpoint(root, 2)
+
+    assert _save(tmp_path / "spool", root, 2).should_training_stop
+    with pytest.raises(CheckpointPublishFailed):
+        uploader.drain()
+
+
+def test_a_save_waits_while_too_many_checkpoints_wait_to_publish(
+    tmp_path: Path,
+) -> None:
+    spool = tmp_path / "spool"
+    open_spool(spool)
+    root = tmp_path / "checkpoints"
+    for step in (1, 2, 3):
+        _checkpoint(root, step)
+        spool_checkpoint(root / f"checkpoint-{step}", spool, step)
+    _checkpoint(root, 4)
+    saved = threading.Event()
+
+    def save() -> None:
+        _save(spool, root, 4, max_pending=2)
+        saved.set()
+
+    saving = threading.Thread(target=save)
+    saving.start()
+
+    assert not saved.wait(0.3)
+    for step in (1, 2):
+        shutil.rmtree(spool / f"step-{step}")
+    assert saved.wait(5)
+    saving.join()
+    assert [step for step, _ in spooled_steps(spool)] == [3, 4]
