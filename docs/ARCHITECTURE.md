@@ -609,8 +609,9 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   largest object each of the task's direct upstream tasks published, as the holder's
   current incarnation announced it — and waits up to 5 s for that worker when it has
   just finished the producing task. A task waits once per producer finish, only for a
-  live, uncordoned holder reserved for no other dispatch, and spends no attempt and no
-  part of `TASK_NO_WORKER_GRACE_SEC` waiting; otherwise it places as usual. A task
+  live, uncordoned holder it can be placed on and reserved for no other dispatch, and
+  spends no attempt and no part of `TASK_NO_WORKER_GRACE_SEC` waiting, nor holds up any
+  other task; otherwise it places as usual. A task
   pinned to workers is placed among them alone. Holders are known only with the
   worker content cache on (`CONTENT_HYDRATION_ENABLED`).
 - **Context reuse.** Workers report cached models/datasets in their
