@@ -197,10 +197,12 @@ workspace path and an optional artifact `name` (the path by default):
 
 When the agent completes, its worker copies each path out of the workspace under its
 name among the task's artifacts, which publish by their top-level entries: `dist` as a
-tree, and `out/report.md` inside the `out` tree, read at `out/report.md`. A path that does not exist, a
-link, a special file, a file with a second hard link, or a credential path such as
-`.ssh/` fails the agent; two exports may not publish under overlapping names or
-under `checkpoints` or `results.json`, and a credential path is refused at submission.
+tree, and `out/report.md` inside the `out` tree, read at `out/report.md`.
+
+Submission refuses an export of a credential path such as `.ssh/`, two exports whose
+names overlap, and an export named under `checkpoints` or `results.json`. At
+completion, a missing path, a link, a special file, a file with a second hard link, or
+a credential file inside an exported directory fails the agent.
 
 ### Structured regions
 
@@ -369,8 +371,8 @@ A file a task produces, such as fine-tuned weights or an adapter, is an artifact
 task publishes, and its result names it by a reference (`{path: ...}`). A consumer
 reading that reference, on any path a value takes, receives the producer's
 published artifact: a placeholder renders it as the local path the consumer's worker
-hydrates it to, a model archive as the tree it archives, and an agent's input as its
-download path. A reference to a path its producer did not publish fails the consumer.
+hydrates it to, a model archive as the directory of the model it archives, and an
+agent's input as its download path. A reference to a path its producer did not publish fails the consumer.
 A stored result or published output keeps the reference and its producer's
 `_artifacts`.
 

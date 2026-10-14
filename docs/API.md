@@ -64,8 +64,8 @@ scope or key, fetched by name alone. Errors carry `detail.code`:
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/v1/results/{task_id}` | Get task result JSON, read from the shared content store. |
-| GET | `/api/v1/results/{task_id}/artifacts` | List the artifacts a task published, with each one's revision, kind, size and digest (`?revision=` for one revision). |
-| GET | `/api/v1/results/{task_id}/files/{path}` | Download a published artifact, a file inside a published tree, or an archive view (`?revision=`, default `final`). |
+| GET | `/api/v1/results/{task_id}/artifacts` | List the artifacts a task published (`?revision=` for one revision). |
+| GET | `/api/v1/results/{task_id}/files/{path}` | Download a published file, a file inside a published tree, or a model archive such as `final_model.tar.gz` (`?revision=`, default `final`). |
 | GET | `/api/v1/results/{task_id}/bundle` | Download a gzip-compressed tar of the result, artifacts and logs (`?include=` repeated per section: `results`, `artifacts`, `logs`, `all`; `?revision=` for the artifacts). |
 | GET | `/api/v1/results/{task_id}/logs` | Download archived `logs.jsonl`. |
 
@@ -73,14 +73,12 @@ A task publishes its artifacts when it succeeds, as the `final` revision, and a
 training run publishes each checkpoint it saves as `step-<n>`. A publication never
 changes once made: after a retry, a checkpoint an earlier attempt published keeps that
 attempt's bytes, and each later one comes from the attempt that saved it. A download
-streams from the shared content store and carries the object's `ETag`, a SHA-256
-`Repr-Digest` of its whole bytes, and its publication time as `Last-Modified`. A
-single `Range`, optionally conditioned by `If-Range`, is answered `206`; a request
-naming several ranges is answered whole, an unsatisfiable range `416`. A download that
-fails before its first byte answers `503` with `Retry-After` while the store is
-unreachable. Archive views and bundles are built as they stream, and the server
-compresses a bounded number of bundles at once: past that, a bundle request answers
-`503` with `Retry-After`.
+carries the object's `ETag`, a SHA-256 `Repr-Digest` of its whole bytes, and its
+publication time as `Last-Modified`. A single `Range`, optionally conditioned by
+`If-Range`, is answered `206`; a request naming several ranges is answered whole, an
+unsatisfiable range `416`. A download answers `503` with `Retry-After` while the store
+is unreachable, and a bundle request does too while the server already streams its
+limit of bundles.
 
 ## Content
 

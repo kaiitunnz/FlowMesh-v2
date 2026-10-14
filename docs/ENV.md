@@ -178,9 +178,7 @@ are the host directories or Docker volumes mounted into the server and
 worker containers. The server's holds each task's archived logs and uploaded
 traces; a worker's holds the artifacts and trace files its tasks write and its own
 copy of their logs. Task results and published artifacts live in the shared content
-store, so a downstream task reads its upstream's wherever that task ran. A worker
-uploads a task's traces to the server whenever it is given the server's URL and the
-task wrote one; a failed upload is logged and does not fail the task.
+store, so a downstream task reads its upstream's wherever that task ran.
 - When multiple deployments share one host, you can set `FLOWMESH_STACK_SUFFIX`
 in `.env` to differentiate the deployments so that FlowMesh stack CLI does
 not interfere with each other.

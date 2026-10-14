@@ -28,7 +28,7 @@ uv sync --group runtime-worker-core --group runtime-inference
 ```bash
 export SUPERVISOR_GRPC_TARGET="localhost:50051" # supervisor gRPC host:port
 export RESULTS_DIR=./results
-export FLOWMESH_BASE_URL="http://localhost:8000"  # trace uploads and SSH input bundles
+export FLOWMESH_BASE_URL="http://localhost:8000"  # trace uploads
 uv run python worker/main.py
 ```
 At startup the worker:
@@ -55,10 +55,10 @@ At startup the worker:
 | `WORKER_TAGS` | empty | Comma-separated tags used by the scheduler. |
 | `LOG_LEVEL` | `INFO` | Worker log level. |
 | `WORKER_COST_PER_HOUR` | `1.0` | Hourly cost in USD; reported with heartbeats. |
-| `FLOWMESH_BASE_URL` | `http://localhost:8000` | Server URL the worker uploads a task's trace files to and hydrates cross-node SSH input bundles from; unset, traces stay local. |
+| `FLOWMESH_BASE_URL` | `http://localhost:8000` | Server URL the worker uploads trace files to and resolves content finalizations through; unset, traces stay local. |
 | `WORKER_NETWORK_BANDWIDTH_BYTES_PER_SEC` | empty | Network bandwidth the worker advertises. |
 | `WORKER_HB_FILE` | – | Full path to the worker heartbeat file. |
-| `MODEL_CLEANUP_AFTER_UPLOAD` | `false` | Delete a task's local artifacts once they are published. |
+| `MODEL_CLEANUP_AFTER_UPLOAD` | `false` | Delete a task's local artifacts once published. |
 | `WORKER_EXECUTOR_IDLE_CLEANUP_SEC` | `60` | Seconds a worker waits before unloading an idle executor to release the resources it holds; higher values avoid reload thrash between tasks but keep those resources reserved while idle. |
 | `WORKER_FOREIGN_GPU_GATE` | `true` | Report a GPU as unavailable while a process outside FlowMesh uses it. |
 | `WORKER_FOREIGN_GPU_MEM_MIB` | `1024` | Foreign GPU-memory threshold in MiB. |
@@ -66,9 +66,6 @@ At startup the worker:
 | `WORKER_FOREIGN_GPU_GRACE_SEC` | `90` | Seconds after a task before a GPU reading counts. |
 
 > The heartbeat TTL is computed automatically as `max(HEARTBEAT_INTERVAL_SEC * 4, 120)`.
-
-> A task's trace files upload to the server when it ends, whenever `FLOWMESH_BASE_URL`
-> is set and the task wrote one; a failed upload is logged and does not fail the task.
 
 ## Output directories
 - Every task receives a dedicated subdirectory under `RESULTS_DIR`.
@@ -78,8 +75,7 @@ At startup the worker:
 - Executors write their artifacts under `<task_id>/artifacts/`. The worker
   publishes them in the shared content store: a file as one object, a directory as a
   tree, and a model archive the result names (`final_model.tar.gz`,
-  `final_lora.tar.gz`) as an archive view over its tree, built from the tree when it
-  is read. A training run publishes each checkpoint it saves as revision `step-<n>`.
+  `final_lora.tar.gz`) as an archive view over its tree. A training run publishes each checkpoint it saves as revision `step-<n>`.
 - A downstream stage names an upstream artifact with a placeholder such as
   `${train.final_model_archive}`; its worker hydrates the artifact through its
   content cache, a peer's copy, or the store, and the spec reads its local path.

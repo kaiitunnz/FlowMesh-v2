@@ -50,8 +50,8 @@ Pull results / artifacts:
 flowmesh result fetch <tsk-id>                                  # JSON result
 flowmesh result fetch <tsk-id> -o out/                          # result and its artifacts
 flowmesh result artifacts <tsk-id>                              # what the task published
-flowmesh result download <tsk-id> model/config.json -o out/     # chosen artifacts
-flowmesh result download <tsk-id> ckpt -o out/ --revision step-200  # a checkpoint
+flowmesh result download <tsk-id> final_model/config.json -o out/  # chosen files
+flowmesh result fetch <tsk-id> -o out/ --revision step-200      # a checkpoint
 flowmesh workflow outputs <wfl-id> --output <name>              # published members
 flowmesh workflow output <wfl-id> <name> --scope <scope> --key 0  # one member's value
 ```

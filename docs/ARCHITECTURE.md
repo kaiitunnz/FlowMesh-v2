@@ -537,40 +537,29 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   item settled with — and a v1 task onto its record. Every result the control plane reads
   — the result, bundle, and output routes, stage references, conditions, fan-out
   cardinality, and an agent's input budget — resolves that binding and reads the verified
-  envelope from the store; the results directory keeps only a task's logs. A task that
-  outlives its store access has it renewed while it still runs on the worker asking.
+  envelope from the store; the results directory keeps only a task's logs and uploaded
+  traces. A task that outlives its store access has it renewed while it still runs on
+  the worker asking.
 - **Task artifacts.** A task's worker publishes what the task leaves under its artifacts
   directory into the shared content store before it reports success: a file as one
-  object, a directory as a tree manifest naming its files, and each model archive the
-  result declares as an archive view, a deterministic `.tar.gz` framing of its tree. The
-  success binds the task's `final` set, and a training run publishes each checkpoint it
-  saves as `step-<n>` while it runs. An `ArtifactBinding` names each artifact by its
-  path and revision; a name is published once at a revision and never replaced, so the
-  same bytes again change nothing and different bytes are refused. A success whose
-  publications cannot all be bound, as one outside the task's scope or an archive over
-  no tree it published, fails the task. After a retry, a
-  revision an earlier attempt published keeps those bytes, and each later revision comes
-  from the attempt that published it, which its binding's `dispatch_id` records. The
-  catalog lives with the task's record, so a freed workflow still lists and serves its
-  artifacts. The root streams a download from the store, verified, and builds an archive
-  view as it streams it from the tree's verified members. A consumer reads an upstream
-  artifact only through its worker's content plane: a ref a placeholder renders becomes
-  a token its worker replaces with the local path it hydrates the artifact to, a ref the
-  data a spec projects reads is hydrated from the producer's final publications its
-  dispatch carries, and a model archive loads as the tree it archives. Those
-  publications are the task's inputs: its worker may read them from a peer, a worker
-  that cannot reach the store for one names it as it names any input, and a task waits
-  out a store control cannot read an input tree's manifest from. An
-  agent's input names an artifact by its download path,
-  `/api/v1/results/{task}/files/{path}`, which identifies it by task and path; the
-  agent's sandbox has no route to fetch it.
+  object, a directory as a tree manifest naming its files, and each model archive its
+  result declares as a `.tar.gz` view the root builds from the tree when it is
+  downloaded. Success binds the task's `final` set, and a training run publishes each
+  checkpoint it saves as `step-<n>` while it runs. An `ArtifactBinding` names each
+  artifact by path and revision, and a name is published once per revision: the same
+  bytes again change nothing, other bytes are refused, and a success whose publications
+  cannot all be bound fails the task. After a retry, a revision an earlier attempt
+  published keeps those bytes. The catalog lives with the task's record, so a freed
+  workflow still lists and serves it. A consumer's worker hydrates each upstream
+  artifact the task reads through its content plane before the task runs, as it does
+  any consumed value, and a model archive loads as the directory it archives; a dispatch
+  waits out a store control cannot read an input tree's manifest from. An agent's input
+  names an artifact by its download path.
 - **Agent exports.** An agent declares workspace paths to publish as `exports`. On the
   completion that ends it, its worker copies them out of the quiesced workspace into the
-  task's artifacts, replacing whatever an earlier completion copied, and publishes them
-  like any other artifact. The copy never follows a link, and a link, a special file, a
-  file with a second hard link, an in-flight write, or a credential path such as
-  `.ssh/` fails the agent and publishes nothing; an export is the author's to keep to
-  files the agent writes itself. A declared path that does not exist fails it too.
+  task's artifacts and publishes them like any other artifact. A missing path, a link, a
+  special file, a file with a second hard link, an in-flight write, or a credential path
+  fails the agent and publishes nothing.
 - **Consumed values by reference.** A dispatch names each upstream value its task
   consumes by reference, and the task's worker hydrates each through its content cache
   before anything validates or runs the task. A worker that cannot reach the store names
