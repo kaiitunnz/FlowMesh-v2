@@ -1037,6 +1037,7 @@ class TaskRuntime:
         """Rebuild the given workflows' scheduler state; returns those restored."""
         rehydrated_at = time.time()
         restored: list[str] = []
+        unrestorable: list[str] = []
         for workflow_id in sorted(workflow_ids):
             try:
                 stored = await self._load_stored_workflow(workflow_id)
@@ -1049,6 +1050,7 @@ class TaskRuntime:
                     workflow_id, exc
                 )
                 if tasks:
+                    unrestorable.append(workflow_id)
                     with self._transition():
                         self._install_rehydrated_workflow_locked(
                             workflow_id, tasks, None, rehydrated_at
@@ -1092,7 +1094,7 @@ class TaskRuntime:
                 )
                 self._cv.notify_all()
             restored.append(workflow_id)
-        await self._restore_artifacts(restored)
+        await self._restore_artifacts([*restored, *unrestorable])
         with self._transition():
             self._merges.restore_merges_locked()
             self._resident_tasks.seed_dispatched_resident_locked()

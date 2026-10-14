@@ -317,6 +317,28 @@ def test_a_restart_restores_the_catalog() -> None:
     assert not restored._tasks[use].has_artifacts
 
 
+def test_a_workflow_failed_at_restore_keeps_its_catalog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = _registry()
+    reader = make_result_reader()
+    runtime = _runtime(registry, reader)
+    _, (train, use) = _register(runtime)
+    record_dispatch(runtime, train, dispatch_id="dsp-1")
+    _succeed(runtime, train, [_tree()], "dsp-1")
+
+    restored = _runtime(registry, make_result_reader(reader.store))
+
+    async def unreadable(_workflow_id: str) -> None:
+        raise ValueError("written by a newer server")
+
+    monkeypatch.setattr(restored, "_load_stored_workflow", unreadable)
+    asyncio.run(restored.rehydrate())
+
+    assert restored._tasks[use].status == TaskStatus.FAILED
+    assert restored._tasks[train].artifacts == _stored(registry, train)
+
+
 def test_unregistering_a_workflow_removes_its_catalogs() -> None:
     registry = _registry()
     runtime = _runtime(registry)
