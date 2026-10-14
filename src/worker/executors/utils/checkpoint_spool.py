@@ -69,7 +69,7 @@ class CheckpointSpool(TrainerCallback):
     def _spool(self, checkpoint: Path, step: int) -> None:
         try:
             with private_dir(self._spool_dir, create=False) as spool:
-                if not spool_is_open(spool):
+                if not spool_is_open(spool) or spool_failed(spool):
                     return
                 if checkpoint.is_dir():
                     spool_checkpoint(checkpoint, spool, step)

@@ -8,7 +8,9 @@ binds when the task settles.
 
 A publication that fails is retried with backoff, since every write is conditional and
 repeats settle on what landed. One that still fails marks the spool failed, which stops
-the trainer at its next save, and fails the task when the uploader drains.
+the trainer at its next save, and fails the task when the uploader drains. However the
+uploader stops, it closes the spool, so a save never waits on it; a spool it could not
+close goes stale ``SPOOL_STALE_SEC`` after the uploader last refreshed it.
 """
 
 import logging
@@ -26,8 +28,10 @@ from shared.utils.nofollow import private_dir, remove_below
 from .artifacts import (
     CHECKPOINTS_DIR,
     ArtifactPublisher,
+    close_spool,
     fail_spool,
     open_spool,
+    refresh_spool,
     spooled_steps,
 )
 
@@ -72,11 +76,17 @@ class CheckpointUploader:
         self._thread = threading.Thread(
             target=self._run, name="checkpoint-uploader", daemon=True
         )
+        self._held_lock = threading.Lock()
+        self._cleared = False
+        self._heartbeat = threading.Thread(
+            target=self._keep_open, name="checkpoint-spool-heartbeat", daemon=True
+        )
 
     def start(self) -> None:
         self._spool = self._held.enter_context(private_dir(self._spool_dir))
         open_spool(self._spool)
         self._thread.start()
+        self._heartbeat.start()
 
     def drain(self) -> list[ArtifactBinding]:
         """Publish what is still spooled and return every revision published.
@@ -112,10 +122,33 @@ class CheckpointUploader:
         return True
 
     def _run(self) -> None:
-        while not self._stop.wait(self._poll_sec):
-            self._sweep()
-            if self._error is not None:
-                return
+        try:
+            while not self._stop.wait(self._poll_sec):
+                self._sweep()
+                if self._error is not None:
+                    return
+        finally:
+            with self._held_lock:
+                try:
+                    if not self._cleared:
+                        close_spool(self._spool)
+                except OSError:
+                    self._logger.exception("Closing the checkpoint spool failed")
+
+    def _keep_open(self) -> None:
+        """Refresh the spool's open mark while the uploader runs, through publications
+        however long, so the mark goes stale only once it stops."""
+        while self._thread.is_alive():
+            with self._held_lock:
+                if self._cleared:
+                    return
+                try:
+                    refresh_spool(self._spool)
+                except FileNotFoundError:
+                    return
+                except OSError:
+                    self._logger.debug("Refreshing the checkpoint spool failed")
+            self._thread.join(self._poll_sec)
 
     def _sweep(self) -> None:
         for step, snapshot in spooled_steps(self._spool):
@@ -162,7 +195,9 @@ class CheckpointUploader:
         return None
 
     def _clear(self) -> None:
-        self._held.close()
+        with self._held_lock:
+            self._cleared = True
+            self._held.close()
         remove_below(self._spool_dir)
 
 

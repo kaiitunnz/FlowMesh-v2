@@ -2,6 +2,7 @@
 rotation cannot remove."""
 
 import logging
+import os
 import shutil
 import threading
 import time
@@ -19,10 +20,13 @@ from shared.content import (
 )
 from shared.tasks.artifact_binding import ArtifactBinding
 from shared.utils.nofollow import PathRefused
+from worker.content import artifacts
 from worker.content.artifacts import (
+    close_spool,
     open_spool,
     spool_checkpoint,
     spool_failed,
+    spool_is_open,
     spooled_steps,
 )
 from worker.content.checkpoints import CheckpointPublishFailed, CheckpointUploader
@@ -291,3 +295,86 @@ def test_a_spool_planted_as_a_link_is_refused(tmp_path: Path) -> None:
     with pytest.raises(PathRefused):
         uploader.start()
     assert list(outside.iterdir()) == []
+
+
+def test_a_cancelled_upload_lets_the_trainer_finish(tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    cancelled = threading.Event()
+    uploader = CheckpointUploader(
+        SharedFilesystemObjectStore(tmp_path / "cas"),
+        "org",
+        tmp_path / "spool",
+        lambda binding: None,
+        logging.getLogger("test"),
+        cancelled=cancelled.is_set,
+        poll_sec=0.01,
+        backoff_sec=0.0,
+    )
+    uploader.start()
+    cancelled.set()
+    finished = threading.Event()
+
+    def train() -> None:
+        for step in (1, 2, 3, 4):
+            _checkpoint(out, step)
+            _save(tmp_path / "spool", out, step)
+        finished.set()
+
+    threading.Thread(target=train, daemon=True).start()
+
+    assert finished.wait(10), "a save waits on an uploader that stopped"
+    with pytest.raises(CheckpointPublishFailed):
+        uploader.drain()
+
+
+def test_an_uploader_that_stops_closes_its_spool(tmp_path: Path) -> None:
+    uploader = _uploader(tmp_path, _Flaky(tmp_path / "cas", failures=99), [])
+    uploader.start()
+    spool_checkpoint(_checkpoint(tmp_path / "checkpoints", 1), tmp_path / "spool", 1)
+    uploader._thread.join(10)
+
+    assert not uploader._thread.is_alive()
+    assert spool_failed(tmp_path / "spool")
+    assert not spool_is_open(tmp_path / "spool")
+    with pytest.raises(CheckpointPublishFailed):
+        uploader.drain()
+
+
+def test_a_spool_its_uploader_stopped_refreshing_goes_stale(tmp_path: Path) -> None:
+    spool = tmp_path / "spool"
+    _open_spool(spool)
+    marker = spool / ".uploading"
+    assert spool_is_open(spool)
+
+    past = time.time() - artifacts.SPOOL_STALE_SEC - 1
+    os.utime(marker, (past, past))
+
+    assert not spool_is_open(spool)
+
+
+def test_a_running_uploader_keeps_its_spool_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(artifacts, "SPOOL_STALE_SEC", 0.2)
+    uploader = _uploader(tmp_path, SharedFilesystemObjectStore(tmp_path / "cas"), [])
+    uploader.start()
+    time.sleep(0.5)
+
+    assert spool_is_open(tmp_path / "spool")
+    uploader.drain()
+
+
+def test_a_failed_or_closed_spool_takes_no_snapshot(tmp_path: Path) -> None:
+    spool = tmp_path / "spool"
+    root = tmp_path / "checkpoints"
+    _open_spool(spool)
+    (spool / ".failed").write_text("store unreachable")
+    _checkpoint(root, 1)
+
+    assert _save(spool, root, 1).should_training_stop
+    close_spool(spool)
+    (spool / ".failed").unlink()
+    _checkpoint(root, 2)
+    _save(spool, root, 2)
+
+    assert spooled_steps(spool) == []

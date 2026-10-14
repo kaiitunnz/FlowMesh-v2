@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import stat
+import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
@@ -100,6 +101,9 @@ def spool_checkpoint(checkpoint_dir: Path, spool_dir: Path, step: int) -> Path |
 
 _SPOOL_OPEN = ".uploading"
 _SPOOL_FAILED = ".failed"
+# How long a spool stays open after its uploader last refreshed it, which bounds how
+# long a save waits on an uploader that stopped without closing the spool.
+SPOOL_STALE_SEC = 60.0
 
 
 def open_spool(spool_dir: Path) -> None:
@@ -107,9 +111,23 @@ def open_spool(spool_dir: Path) -> None:
     (spool_dir / _SPOOL_OPEN).touch()
 
 
+def refresh_spool(spool_dir: Path) -> None:
+    """Refresh an open spool's mark; raises ``FileNotFoundError`` once it is closed."""
+    os.utime(spool_dir / _SPOOL_OPEN, follow_symlinks=False)
+
+
+def close_spool(spool_dir: Path) -> None:
+    """Mark a spool as having no uploader, so nothing waits on it."""
+    (spool_dir / _SPOOL_OPEN).unlink(missing_ok=True)
+
+
 def spool_is_open(spool_dir: Path) -> bool:
     """Return whether an uploader publishes what the spool holds."""
-    return (spool_dir / _SPOOL_OPEN).exists()
+    try:
+        opened = os.stat(spool_dir / _SPOOL_OPEN, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    return time.time() - opened.st_mtime < SPOOL_STALE_SEC
 
 
 def fail_spool(spool_dir: Path, error: str) -> None:
@@ -377,9 +395,12 @@ def _entries(dir_fd: int) -> list[tuple[str, bool]]:
 __all__ = [
     "CHECKPOINTS_DIR",
     "CHECKPOINT_SPOOL_DIR",
+    "SPOOL_STALE_SEC",
     "checkpoint_spool_dir",
+    "close_spool",
     "fail_spool",
     "open_spool",
+    "refresh_spool",
     "spool_checkpoint",
     "spool_failed",
     "spool_is_open",
