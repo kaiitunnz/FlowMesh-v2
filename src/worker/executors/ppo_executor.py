@@ -375,7 +375,7 @@ class _EarlyStopPPOTrainer(PPOTrainer):
     def log(self, logs: dict[str, float], *args: Any, **kwargs: Any) -> None:
         super().log(logs, *args, **kwargs)
         if any(
-            isinstance(callback, CheckpointSpool) and callback.failed()
+            isinstance(callback, CheckpointSpool) and callback.stopped
             for callback in self.callback_handler.callbacks
         ):
             raise _CheckpointPublishStop()

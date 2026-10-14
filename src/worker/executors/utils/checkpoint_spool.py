@@ -42,6 +42,7 @@ class CheckpointSpool(TrainerCallback):
         self._spool_dir = spool_dir
         self._max_pending = max_pending
         self._poll_sec = poll_sec
+        self._stopped = False
 
     def on_save(
         self,
@@ -67,7 +68,13 @@ class CheckpointSpool(TrainerCallback):
             torch.distributed.broadcast_object_list(decided, src=0)
             failed = bool(decided[0])
         if failed:
+            self._stopped = True
             control.should_training_stop = True
+
+    @property
+    def stopped(self) -> bool:
+        """Whether a save decided to stop training, alike on every rank."""
+        return self._stopped
 
     def failed(self) -> bool:
         """Return whether a checkpoint this spool took could not be published."""
