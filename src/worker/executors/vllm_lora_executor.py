@@ -176,12 +176,18 @@ class VLLMLoRAExecutor(VLLMExecutor):
                 "vLLM load_lora_adapter/merge_lora_weights API required for apply=merge"
             )
 
-        for adapter in merge_specs:
-            adapter_dir = self._resolve_adapter_directory(adapter, out_dir)
-            load_fn(adapter_name=adapter.name, adapter_path=adapter_dir.as_posix())
-            merge_fn(adapter_name=adapter.name)
-            if unload_fn is not None:
-                unload_fn(adapter_name=adapter.name)
+        try:
+            for adapter in merge_specs:
+                adapter_dir = self._resolve_adapter_directory(adapter, out_dir)
+                load_fn(adapter_name=adapter.name, adapter_path=adapter_dir.as_posix())
+                merge_fn(adapter_name=adapter.name)
+                if unload_fn is not None:
+                    unload_fn(adapter_name=adapter.name)
+        except BaseException:
+            # A partly merged engine must not be reused: merging again would add an
+            # adapter's delta twice.
+            self._shutdown_llm()
+            raise
         self._merged_into = self._llm
 
     def _build_lora_requests(self, out_dir: Path) -> Any | None:

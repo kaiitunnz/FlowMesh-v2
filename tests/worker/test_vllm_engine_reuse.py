@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from shared.tasks import TaskType
 from shared.tasks.specs import InferenceSpecStrict
 from tests.worker.factories import DEFAULT_WORKER_CONFIG
@@ -106,3 +108,29 @@ def test_a_merged_adapter_merges_once_into_a_reused_engine(tmp_path: Path) -> No
             executor._build_generate_kwargs(spec, tmp_path / task)
 
     assert engine.merge_lora_weights.call_count == 1
+
+
+def test_a_merge_that_fails_partway_leaves_no_engine_to_reuse(tmp_path: Path) -> None:
+    executor = VLLMLoRAExecutor(DEFAULT_WORKER_CONFIG, lifecycle=None)
+    broken, fresh = MagicMock(), MagicMock()
+    broken.merge_lora_weights.side_effect = [None, RuntimeError("out of memory")]
+    adapter = _hydrated(tmp_path, "tsk-a")
+    spec = _spec(
+        adapters=[
+            {"type": "lora", "name": name, "url": adapter.as_posix(), "apply": "merge"}
+            for name in ("a", "b")
+        ]
+    )
+    llm = MagicMock(side_effect=[broken, fresh])
+    with (
+        patch.object(vllm_executor, "LLM", llm),
+        patch.object(vllm_executor, "destroy_distributed_environment"),
+    ):
+        executor._ensure_llm(spec)
+        with pytest.raises(RuntimeError):
+            executor._build_generate_kwargs(spec, tmp_path / "tsk-a")
+        executor._ensure_llm(spec)
+        executor._build_generate_kwargs(spec, tmp_path / "tsk-a")
+
+    assert llm.call_count == 2
+    assert fresh.merge_lora_weights.call_count == 2
