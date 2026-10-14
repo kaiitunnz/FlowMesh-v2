@@ -101,11 +101,11 @@ class ReadyQueue:
         return True
 
     def queued_count(self) -> int:
-        """How many entries are queued, a held-back task among them."""
+        """Return how many entries are queued, a held-back task among them."""
         return len(self.ready_queue) + len(self.not_before)
 
     def next_due(self) -> float | None:
-        """The monotonic time the earliest held-back task falls due, if any."""
+        """Return the monotonic time the earliest held-back task falls due, if any."""
         while self._due and self.not_before.get(self._due[0][1]) != self._due[0][0]:
             heapq.heappop(self._due)
         return self._due[0][0] if self._due else None

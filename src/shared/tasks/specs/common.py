@@ -196,7 +196,7 @@ class TaskSpecStrictBase(StrictBaseModel, RetiredFieldsModel):
     _hydrated_artifacts: dict[tuple[str, str], str] = PrivateAttr(default_factory=dict)
 
     def hydrated_artifact(self, task_id: str, path: str) -> str | None:
-        """The local path of task ``task_id``'s artifact ``path``, once hydrated."""
+        """Return the local path of task ``task_id``'s hydrated artifact ``path``."""
         return self._hydrated_artifacts.get((task_id, path))
 
     def record_hydrated_artifacts(self, paths: dict[tuple[str, str], str]) -> None:

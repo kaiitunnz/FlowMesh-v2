@@ -168,7 +168,7 @@ class ResponsesFacade:
             self._held_egress.close(task_id, ctx.token)
 
     def has_captured_group(self, task_id: str) -> bool:
-        """Whether a facade group was captured on this episode's last turn."""
+        """Return whether a facade group was captured on this episode's last turn."""
         with self._lock:
             return task_id in self._captured
 

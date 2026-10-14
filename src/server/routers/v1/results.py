@@ -648,8 +648,8 @@ class ArtifactResponse(Response):
         self.init_headers(headers)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        # A send after the client is gone does not fail, so the response stops on the
-        # disconnect itself rather than reading the rest of the object for no one.
+        # A send after the client is gone does not fail, so the response watches for
+        # the disconnect and stops reading the object.
         try:
             async with create_task_group() as group:
 

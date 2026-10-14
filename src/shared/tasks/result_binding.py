@@ -67,7 +67,7 @@ class ResultBinding(BaseModel):
         )
 
     def producers(self) -> set[str]:
-        """Every task whose stored result the value reads, its members' included."""
+        """Return every task whose stored result the value reads, members included."""
         found = {self.task_id} if self.task_id is not None else set()
         for member in self.members:
             if member.binding is not None:

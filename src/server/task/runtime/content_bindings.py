@@ -397,7 +397,7 @@ class ContentBindings:
     def artifact_refusal_locked(
         self, record: TaskRecord, bindings: Sequence[ArtifactBinding] | None
     ) -> str | None:
-        """Why a task's reported publications cannot be accepted whole, or None.
+        """Return why a task's reported publications cannot be accepted whole, or None.
 
         A report that does not parse, a publication outside the task's scope, and an
         archive over no tree of its revision are refused; a revision and name already
@@ -483,7 +483,7 @@ class ContentBindings:
     def consumed_inputs_locked(
         self, record: TaskRecord, references: Sequence[ContentReference]
     ) -> tuple[ContentReference, ...]:
-        """The named objects the task consumes, each once: a bound input, or an
+        """Return the named objects the task consumes, each once: a bound input, or an
         object its dispatch's artifact inputs name or hold. Every named object counts
         while a restored dispatch's tree members are still being read."""
         return tuple(

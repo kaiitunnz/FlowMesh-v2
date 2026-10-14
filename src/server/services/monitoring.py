@@ -1139,8 +1139,8 @@ class EventMonitor:
                     )
 
     def _refuse_hydration(self, worker_id: str, request_id: int) -> None:
-        """Refuse a peer hydration at once while control runs no content cache, so
-        the worker reads the store instead of waiting out its transfer."""
+        """Refuse a peer hydration at once while control has the content cache off,
+        so the worker goes straight to the store."""
         if worker_id not in self._warned_cache_off:
             self._warned_cache_off.add(worker_id)
             self._logger.warning(

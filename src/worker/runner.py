@@ -756,8 +756,8 @@ class Runner:
         return stop_pending
 
     def _task_ending(self, task_id: str) -> bool:
-        """Whether a cancel, a revoke of the task's dispatch, or the worker's shutdown
-        has ended the task's run."""
+        """Return whether a cancel, a revoke of the task's dispatch, or the worker's
+        shutdown has ended the task's run."""
         with self._cancel_lock:
             dispatch_id = self._current_dispatch_id
             return (
@@ -873,10 +873,8 @@ class Runner:
                 return executor.run(msg, out_dir)
 
     def _clear_working_dirs(self) -> None:
-        """Remove the working directories a task run leaves only while it runs, which
-        this worker left behind when it crashed mid-task. A task directory another
-        worker sharing the results directory last ran in, or one no worker marked,
-        keeps them."""
+        """Remove the working directories this worker's crashed runs left in the task
+        directories it last marked."""
         if not self._owner:
             return
         try:

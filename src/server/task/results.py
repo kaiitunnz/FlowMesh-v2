@@ -95,7 +95,7 @@ class ResultReader:
         )
 
     def read_manifest(self, reference: ContentReference) -> TreeManifest:
-        """The tree manifest a stored object reads as."""
+        """Return the tree manifest a stored object reads as."""
         try:
             return TreeManifest.decode(self._hydrate(reference))
         except TreeManifestError as exc:
@@ -104,7 +104,7 @@ class ResultReader:
             ) from exc
 
     def tree_members(self, reference: ContentReference) -> frozenset[ObjectIdentity]:
-        """The identities of a stored tree's member objects.
+        """Return the identities of a stored tree's member objects.
 
         A tree is decoded once and kept for the most recently read trees, or alone as
         the most recent one too large to share the cache, so a check against its
@@ -136,7 +136,7 @@ class ResultReader:
         return members
 
     def open(self, reference: ContentReference) -> Iterator[bytes]:
-        """An object's bytes in chunks, raising before the last one unless they
+        """Return an object's bytes in chunks, raising before the last one unless they
         verify. Raises ``ResultUnavailable`` while the store cannot be reached and
         ``ResultUnreadable`` for an object that is missing or corrupt."""
         return _classified(partial(self._store.open, reference))
@@ -144,7 +144,7 @@ class ResultReader:
     def open_range(
         self, reference: ContentReference, start: int, length: int
     ) -> Iterator[bytes]:
-        """``length`` unverified bytes of an object from ``start``, in chunks."""
+        """Return ``length`` unverified bytes of an object from ``start``, in chunks."""
         return _classified(partial(self._store.open_range, reference, start, length))
 
     def verify(self, reference: ContentReference) -> None:

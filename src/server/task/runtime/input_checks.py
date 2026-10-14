@@ -22,8 +22,8 @@ class _InputCheck:
     worker_id: str
     dispatch_id: str | None
     references: tuple[ContentReference, ...]
-    # The artifact members among them, which control checks are stored at their size
-    # rather than reading through: their worker's verified read judges their bytes.
+    # The artifact members among them, which control checks for presence and size
+    # only; their worker's verified read judges their bytes.
     members: frozenset[ContentReference] = frozenset()
     # Why control found an input unreadable, once it has; the task then fails as a
     # report of the dispatch that could not read it.
@@ -144,8 +144,8 @@ class InputChecks:
         return pending is not None and pending.report == INPUT_VERDICT_REPORT
 
     def verify_inputs(self, check: _InputCheck) -> ResultUnreadable | Exception | None:
-        """Why control cannot read a check's objects either, or None when it reads
-        them."""
+        """Return why control cannot read a check's objects either, or None when it
+        reads them."""
         pending: Exception | None = None
         for reference in check.references:
             try:

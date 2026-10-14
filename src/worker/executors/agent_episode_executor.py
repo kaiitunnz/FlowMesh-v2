@@ -533,8 +533,8 @@ def _attachment(dispatch: AgentEpisodeDispatch) -> PrivateStateAttachment:
 def _export(
     exports: Sequence[AgentExport], state: MaterializedState, out_dir: Path
 ) -> ExportFailure | None:
-    """Copy the exports out of the quiesced workspace into the task's artifacts; the
-    failure, if they cannot be, which leaves the task no artifacts to publish."""
+    """Copy the exports out of the quiesced workspace into the task's artifacts,
+    returning the failure when they cannot be copied."""
     try:
         spool_exports(state.workspace, exports, out_dir / ARTIFACTS_DIR)
     except ExportFailed as exc:

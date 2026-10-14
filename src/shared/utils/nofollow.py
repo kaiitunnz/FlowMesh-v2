@@ -139,7 +139,7 @@ def private_dir(base_dir: Path, create: bool = True) -> Iterator[Path]:
 
 
 def fd_path(fd: int) -> Path:
-    """A path that names the file the descriptor ``fd`` holds open."""
+    """Return a path that names the file the descriptor ``fd`` holds open."""
     return Path(f"/proc/self/fd/{fd}")
 
 

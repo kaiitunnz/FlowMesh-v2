@@ -221,7 +221,7 @@ class FilesystemObjectBacking:
         length: int,
         chunk_bytes: int = STREAM_CHUNK_BYTES,
     ) -> Iterator[bytes]:
-        """``length`` unverified bytes of the object from ``start``, in chunks."""
+        """Yield ``length`` unverified bytes of the object from ``start``, in chunks."""
         check_range(reference, start, length)
         fh = self.open_object(reference.authorization_scope, reference.content_digest)
 

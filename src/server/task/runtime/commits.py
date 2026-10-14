@@ -505,9 +505,8 @@ class TransitionCommitter:
         """Report each committed resident task that ended, file the completion notice
         of a terminal, and release the worker of each dispatch the commit ended.
 
-        A settled task binds nothing more, so only its final set stays in memory; its
-        checkpoints are read from its stored catalog. It reads nothing more either, so
-        what its last dispatch lent a peer read is dropped.
+        A settled task keeps only its final set in memory and drops what its last
+        dispatch lent a peer read.
         """
         self._observe_resident_locked(records)
         for persisted in records:

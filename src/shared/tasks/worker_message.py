@@ -167,7 +167,7 @@ class WorkerTaskMessage(BaseModel):
         self._staged_inputs = dict(staged)
 
     def staged_input(self, task_id: str) -> str | None:
-        """The local directory an upstream task's artifacts were staged in, if any."""
+        """Return the directory an upstream task's artifacts were staged in, or None."""
         return self._staged_inputs.get(task_id)
 
     def upstream_envelope(self, stage: str) -> bytes | None:

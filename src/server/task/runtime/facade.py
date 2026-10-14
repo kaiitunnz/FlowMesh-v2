@@ -1158,14 +1158,12 @@ class TaskRuntime:
                     record.artifacts = bindings
 
     async def _restore_dispatched_objects(self, workflow_ids: Sequence[str]) -> None:
-        """Lend each restored dispatch the objects its artifact inputs name, at once,
-        and their tree members once those read, off the startup path.
+        """Lend each restored dispatch the objects its artifact inputs name at once,
+        and their tree members off the startup path.
 
-        A restart never waits on the store: members are read on at most
-        ``_RESTORE_MEMBER_READERS`` threads, and those of a dispatch that did not all
-        read are read again every ``_RESTORE_MEMBER_RETRY_SEC`` while it holds its
-        task. Until all of a dispatch's are, an input its worker reports unreadable is
-        checked rather than charged to the worker.
+        Members that did not read are read again every ``_RESTORE_MEMBER_RETRY_SEC``.
+        Until all of a dispatch's members read, an input its worker reports unreadable
+        is checked at control before it is charged to the worker.
         """
         with self._lock:
             restored = [
@@ -2328,7 +2326,7 @@ class TaskRuntime:
             return None
 
     def held_back(self, task_id: str) -> bool:
-        """Whether a queued task is held back until a time of its own."""
+        """Return whether a queued task is held back until a time of its own."""
         with self._cv:
             return task_id in self._ready.not_before
 
@@ -3284,8 +3282,8 @@ class TaskRuntime:
         self.originate_facade_turn_group(task_id, group)
 
     def artifact_refusal(self, task_id: str, payload: dict[str, Any]) -> str | None:
-        """Why a success's own reported publications cannot be accepted whole, or None
-        when they can or the task is not held here."""
+        """Return why a success's own reported publications cannot be accepted whole, or
+        None when they can or the task is not held here."""
         own = reported_artifacts(payload.get("artifacts"))
         with self._lock:
             if (record := self._tasks.get(task_id)) is None:
@@ -3295,9 +3293,8 @@ class TaskRuntime:
     def without_unaccepted_children(
         self, task_id: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
-        """A merged success without the children whose publications cannot be
-        accepted whole, which then run again alone, where those publications settle
-        them as they would have unmerged."""
+        """Return a merged success without the children whose publications cannot be
+        accepted whole; those children run again alone."""
         children = reported_child_artifacts(payload)
         with self._lock:
             unaccepted = {
@@ -3672,9 +3669,10 @@ class TaskRuntime:
     def artifact_bindings(
         self, task_id: str, revision: str | None = None
     ) -> ArtifactBindings | None:
-        """A task's published artifacts by revision and name, or only ``revision`` of
-        them; None for a task this runtime neither holds nor has stored. A settled task
-        holds only its final set, so the rest is read from its stored catalog."""
+        """Return a task's published artifacts by revision and name, or only
+        ``revision`` of them; None for a task this runtime neither holds nor has stored.
+        A settled task holds only its final set, so the rest is read from its stored
+        catalog."""
         held: ArtifactBindings | None = None
         with self._lock:
             if (record := self._tasks.get(task_id)) is not None:
@@ -3701,8 +3699,9 @@ class TaskRuntime:
     def artifact_binding(
         self, task_id: str, revision: str, name: str
     ) -> ArtifactBinding | None:
-        """A task's published artifact ``name`` at ``revision``, or None when it has
-        none; a settled task's checkpoints are read from its stored catalog alone."""
+        """Return a task's published artifact ``name`` at ``revision``, or None when it
+        has none; a settled task's checkpoints are read from its stored catalog alone.
+        """
         with self._lock:
             if (record := self._tasks.get(task_id)) is not None:
                 if (binding := record.artifacts.get((revision, name))) is not None:
@@ -3721,7 +3720,7 @@ class TaskRuntime:
         return self._workflow_registry.artifact_binding(task_id, revision, name)
 
     def final_artifacts(self, task_id: str) -> ArtifactBindings:
-        """A task's final set by revision and name, empty for a task that has none."""
+        """Return a task's final set by revision and name, empty when it has none."""
         with self._lock:
             if (record := self._tasks.get(task_id)) is not None:
                 return final_set(record.artifacts)
@@ -3792,14 +3791,13 @@ class TaskRuntime:
         named: Sequence[ArtifactBinding],
         lent: Sequence[ArtifactBinding] = (),
     ) -> tuple[frozenset[ObjectIdentity], ...]:
-        """Every object a dispatch's artifact inputs name, a tree's members included.
+        """Return every object a dispatch's artifact inputs name, a tree's members
+        included.
 
-        A ``named`` tree is one the task's spec loads, so its members must be known:
-        raises ``ResultUnavailable`` while its manifest cannot be read from the store
-        and ``ResultUnreadable`` for one that is missing or corrupt. A ``lent`` tree is
-        one an upstream value reaches, which lends its members only when its manifest
-        reads now, and otherwise only its own object; once the store cannot be
-        reached, no further lent manifest is read.
+        A ``named`` tree's manifest must read: raises ``ResultUnavailable`` while the
+        store is unreachable and ``ResultUnreadable`` for a missing or corrupt one. A
+        ``lent`` tree adds its members only when its manifest reads now, and none is
+        read once the store proves unreachable.
         """
         objects = frozenset(binding.reference.identity for binding in (*named, *lent))
         required = _trees(named)

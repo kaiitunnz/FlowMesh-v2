@@ -39,7 +39,7 @@ class WorkerConfig(BaseModel):
     log_level: str = env.LOG_LEVEL
     """Logging level for the worker"""
     flowmesh_url: str = env.FLOWMESH_BASE_URL
-    """FlowMesh HTTP base URL required to build artifact download links"""
+    """FlowMesh HTTP base URL workers upload traces and resolve finalizations through"""
     worker_cost_per_hour: float | None = None
     """Hourly cost in USD"""
     model_cleanup_after_upload: bool = env.MODEL_CLEANUP_AFTER_UPLOAD

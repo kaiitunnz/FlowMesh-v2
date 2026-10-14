@@ -369,8 +369,8 @@ class TaskLogArchiver:
     def _finalize_logs(
         self, task_id: str, state: _TaskArchiveState, now: float
     ) -> bool:
-        """Leave the task's log file in place and drop its stream checkpoint; return
-        False to try again later, the checkpoint kept so a restart finalizes it too."""
+        """Ensure the task's log file exists and drop its stream checkpoint; return
+        False to retry later, keeping the checkpoint so a restart finalizes it too."""
         base_dir = self._base_dir(task_id)
         self._ensure_checkpointed(task_id, state)
         try:

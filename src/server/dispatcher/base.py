@@ -1436,17 +1436,12 @@ class Dispatcher:
         self, task_id: str, now: float, waitable: Callable[[], set[str]]
     ) -> bool:
         """Return whether the task should wait for the worker that just finished one
-        of its producers, which holds a copy of what that producer published.
+        of its producers and holds a copy of what it published.
 
-        The worker must be one ``waitable`` names, a worker the task can be placed
-        on; live, uncordoned, on the incarnation that holds the copy, and reserved
-        for no other dispatch; and the producer's success must have committed under
-        ``HOLDER_GRACE_SEC`` before ``now``, both on this process's monotonic clock.
-        A consumer waits at most ``HOLDER_GRACE_SEC`` from its first wait for one
-        producer settle, and once its wait ends, when none of that producer's
-        artifacts is still settling on the worker, it never waits for that settle
-        again. Only one consumer at a time waits for one holder of one settle; the
-        others are placed at once.
+        The holder must be a live, uncordoned worker the task can be placed on,
+        reserved for no other dispatch, whose producer succeeded under
+        ``HOLDER_GRACE_SEC`` ago. A consumer waits at most ``HOLDER_GRACE_SEC`` per
+        producer settle, never twice for one, and only one consumer waits per holder.
         """
         if self._content_holders is None:
             return False
@@ -1511,7 +1506,7 @@ class Dispatcher:
         return False
 
     def _waiting(self, key: tuple[str, str, str], now: float) -> bool:
-        """Whether the grace under ``key`` is open: neither ended nor closed."""
+        """Return whether the grace under ``key`` is open: neither ended nor closed."""
         grace = self._holder_graces.get(key)
         return grace is not None and not grace[1] and now < grace[0]
 
@@ -1539,8 +1534,9 @@ class Dispatcher:
         failed_ids: set[str],
         relays_only: bool,
     ) -> set[str]:
-        """The workers a task can be placed on once free: its private state's owner
-        when it has one, else every eligible worker it has not failed or avoided."""
+        """Return the workers a task can be placed on once free: its private state's
+        owner when it has one, else every eligible worker it has not failed or avoided.
+        """
         if owner is not None:
             return {owner.worker_id}
         eligible = self.eligible_worker_ids(record, relay=relays_only) - failed_ids
@@ -1589,7 +1585,7 @@ class Dispatcher:
         dispatch_id: str | None,
         waited: bool,
     ) -> str | None:
-        """Why ``worker_id`` is no settling holder of ``reference``; None if it is."""
+        """Return why ``worker_id`` is no settling holder of ``reference``, or None."""
         assert self._content_holders is not None
         held = [
             h

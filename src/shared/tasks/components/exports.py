@@ -87,7 +87,7 @@ class ExportFailureKind(StrEnum):
 
 
 class ExportFailure(BaseModel):
-    """Why a completing agent's exports could not be published."""
+    """A completing agent's export failure: its kind and message."""
 
     model_config = ConfigDict(frozen=True)
 

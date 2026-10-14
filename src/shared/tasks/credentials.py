@@ -90,7 +90,7 @@ def spec_value(spec: BaseModel, pointer: str) -> Any:
 
 
 def holds_pointer(spec: BaseModel, pointer: str) -> bool:
-    """Whether ``spec`` has a value at ``pointer``."""
+    """Return whether ``spec`` has a value at ``pointer``."""
     try:
         spec_value(spec, pointer)
     except _UNHELD:

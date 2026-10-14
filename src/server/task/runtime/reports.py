@@ -31,7 +31,7 @@ def reported_reference(raw: Any) -> ContentReference | None:
 
 
 def reported_artifacts(raw: Any) -> list[ArtifactBinding] | None:
-    """The artifacts a worker reported publishing, or None for a report that does
+    """Return the artifacts a worker reported publishing, or None for a report that does
     not parse."""
     if raw is None:
         return []
@@ -44,7 +44,7 @@ def reported_artifacts(raw: Any) -> list[ArtifactBinding] | None:
 
 
 def export_failure(payload: dict[str, Any]) -> ExportFailure | None:
-    """Why a completing agent could not copy out the exports it declared, if it
+    """Return why a completing agent could not copy out the exports it declared, if it
     could not; a report that does not parse reads as a refusal."""
     if (raw := payload.get("agent_export_failure")) is None:
         return None
@@ -59,7 +59,7 @@ def export_failure(payload: dict[str, Any]) -> ExportFailure | None:
 def reported_child_artifacts(
     payload: dict[str, Any],
 ) -> dict[str, list[ArtifactBinding] | None]:
-    """The artifacts a merged dispatch reported for its children, by child."""
+    """Return the artifacts a merged dispatch reported for its children, by child."""
     raw = payload.get("child_artifacts") or {}
     if not isinstance(raw, dict):
         return {}

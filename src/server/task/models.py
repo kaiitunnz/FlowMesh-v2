@@ -336,8 +336,7 @@ class TaskRecord(BaseModel):
     )
     artifacts: dict[tuple[str, str], ArtifactBinding] = Field(
         default_factory=dict,
-        description="The task's published artifacts by revision and name, as its "
-        "catalog holds them.",
+        description="The task's published artifacts by revision and name.",
         exclude=True,
     )
     dispatched_artifacts: tuple[ArtifactBinding, ...] = Field(
@@ -353,14 +352,12 @@ class TaskRecord(BaseModel):
     )
     dispatched_objects: tuple[frozenset[tuple[str, str, str]], ...] = Field(
         default=(),
-        description="The identities of every object the dispatched artifacts name or "
-        "hold as tree members.",
+        description="Identities of every object the dispatched artifacts hold.",
         exclude=True,
     )
     avoided_worker: str | None = Field(
         default=None,
-        description="A worker that reported it could not reach an input the task "
-        "consumes, which its next placement passes over while another is eligible.",
+        description="Worker that could not reach an input; placement passes it over.",
         exclude=True,
     )
     succeeded_monotonic: float | None = Field(
@@ -371,9 +368,7 @@ class TaskRecord(BaseModel):
     )
     members_pending: bool = Field(
         default=False,
-        description="Whether a restored dispatch's tree members are still being read, "
-        "so an input it reports unreadable is checked rather than charged to its "
-        "worker.",
+        description="Whether a restored dispatch's tree members are still being read.",
         exclude=True,
     )
     unwritten_artifacts: list[ArtifactBinding] = Field(

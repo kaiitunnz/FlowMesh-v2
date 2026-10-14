@@ -25,12 +25,9 @@ _POLL_SEC = 0.5
 class CheckpointSpool(TrainerCallback):
     """Snapshots each checkpoint once every rank has written it.
 
-    Every rank waits at the save's barrier, so a distributed save is whole before the
-    first rank snapshots it, and only that rank does. Before that barrier every rank
-    waits while ``max_pending`` snapshots wait to publish, so the spool's disk stays
-    bounded and no rank sits in a collective while the uploader catches up. Once a
-    checkpoint could not be published, every rank stops training at the same save, on
-    the first rank's reading.
+    Before a save's barrier every rank waits while ``max_pending`` snapshots are
+    publishing, which bounds the spool's disk outside any collective; once a checkpoint
+    could not be published, every rank stops at the same save.
     """
 
     def __init__(

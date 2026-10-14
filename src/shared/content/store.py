@@ -236,8 +236,8 @@ class FabricObjectStore(ABC):
         return verify_content(reference, self.fetch(reference))
 
     def stored_size(self, reference: ContentReference) -> int:
-        """The size of the object stored under a reference, read without its bytes
-        where the backend can.
+        """Return the size of the object stored under a reference, read without its
+        bytes where the backend can.
 
         Raises ``ContentHydrationError`` when nothing is stored there and
         ``ContentUnavailable`` when the store cannot be reached.
@@ -280,7 +280,7 @@ class FabricObjectStore(ABC):
         *,
         chunk_bytes: int = STREAM_CHUNK_BYTES,
     ) -> Iterator[bytes]:
-        """``length`` bytes of a reference's object from ``start``, in chunks.
+        """Yield ``length`` bytes of a reference's object from ``start``, in chunks.
 
         A slice cannot be checked against the digest naming the whole object, so these
         bytes are unverified: a reader that needs verified bytes reads them all.

@@ -466,7 +466,7 @@ def _with_upstream_spec[S: TaskSpecStrictBase](
 def _as_dispatched[M: BaseModel](
     model: M, artifact_paths: dict[str, str] | None = None, scope: str = ""
 ) -> M:
-    """The model as an inline dispatch delivers it to this worker, each artifact
+    """Return the model as an inline dispatch delivers it to this worker, each artifact
     token of its dispatch's ``scope`` replaced by the artifact's local path."""
     wire = model.model_dump(mode="json", exclude_none=True, by_alias=True)
     if artifact_paths:
