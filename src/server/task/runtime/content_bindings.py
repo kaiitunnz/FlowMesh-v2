@@ -395,34 +395,24 @@ class ContentBindings:
         return accepted
 
     def artifact_refusal_locked(
-        self,
-        record: TaskRecord,
-        bindings: Sequence[ArtifactBinding] | None,
-        children: dict[str, Sequence[ArtifactBinding] | None],
+        self, record: TaskRecord, bindings: Sequence[ArtifactBinding] | None
     ) -> str | None:
-        """Why a success's reported publications cannot be accepted whole, or None.
+        """Why a task's reported publications cannot be accepted whole, or None.
 
         A report that does not parse, a publication outside the task's scope, and an
         archive over no tree of its revision are refused; a revision and name already
         accepted is not, since its first publication stands.
         """
-        reports: list[tuple[TaskRecord, Sequence[ArtifactBinding] | None]] = [
-            (record, bindings)
-        ]
-        for child_id, child_bindings in children.items():
-            if (child := self._tasks.get(child_id)) is not None:
-                reports.append((child, child_bindings))
-        for owner, reported in reports:
-            if reported is None:
-                return f"task {owner.task_id} reported artifacts that do not parse"
-            trees = {
-                binding.key: binding
-                for binding in reported
-                if binding.kind is ArtifactKind.TREE
-            }
-            for binding in reported:
-                if (reason := self._refusal(owner, binding, trees)) is not None:
-                    return reason
+        if bindings is None:
+            return f"task {record.task_id} reported artifacts that do not parse"
+        trees = {
+            binding.key: binding
+            for binding in bindings
+            if binding.kind is ArtifactKind.TREE
+        }
+        for binding in bindings:
+            if (reason := self._refusal(record, binding, trees)) is not None:
+                return reason
         return None
 
     def _refusal(

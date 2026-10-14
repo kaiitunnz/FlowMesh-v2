@@ -566,6 +566,10 @@ class EventMonitor:
                 # Count only a settling success; one that yields the lane back would
                 # tally several times for one task.
                 settles = self._runtime.success_settles_task(event.task_id, payload)
+                if settles:
+                    payload = self._runtime.without_unaccepted_children(
+                        event.task_id, payload
+                    )
                 if settles and (
                     refusal := self._runtime.artifact_refusal(event.task_id, payload)
                 ):

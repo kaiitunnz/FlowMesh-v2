@@ -3253,16 +3253,48 @@ class TaskRuntime:
         self.originate_facade_turn_group(task_id, group)
 
     def artifact_refusal(self, task_id: str, payload: dict[str, Any]) -> str | None:
-        """Why a success's reported publications cannot be accepted whole, or None
+        """Why a success's own reported publications cannot be accepted whole, or None
         when they can or the task is not held here."""
         own = reported_artifacts(payload.get("artifacts"))
-        children = reported_child_artifacts(payload)
         with self._lock:
             if (record := self._tasks.get(task_id)) is None:
                 return None
-            return self._content_bindings.artifact_refusal_locked(
-                record, own, dict(children)
-            )
+            return self._content_bindings.artifact_refusal_locked(record, own)
+
+    def without_unaccepted_children(
+        self, task_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """A merged success without the children whose publications cannot be
+        accepted whole, which then run again alone, where those publications settle
+        them as they would have unmerged."""
+        children = reported_child_artifacts(payload)
+        with self._lock:
+            unaccepted = {
+                child_id
+                for child_id, bindings in children.items()
+                if (child := self._tasks.get(child_id)) is not None
+                and self._content_bindings.artifact_refusal_locked(child, bindings)
+                is not None
+            }
+        if not unaccepted:
+            return payload
+        self._logger.warning(
+            "Task %s: merged children %s published artifacts that cannot be "
+            "accepted; they run again alone",
+            task_id,
+            sorted(unaccepted),
+        )
+        return {
+            **payload,
+            **{
+                key: {
+                    child_id: value
+                    for child_id, value in (payload.get(key) or {}).items()
+                    if child_id not in unaccepted
+                }
+                for key in ("child_result_references", "child_artifacts")
+            },
+        }
 
     def success_settles_task(self, task_id: str, payload: dict[str, Any]) -> bool:
         """Whether a worker success ends its task or yields the lane back to run again.

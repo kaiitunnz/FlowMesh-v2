@@ -1026,3 +1026,33 @@ async def test_planning_a_merge_adds_no_bucket_for_a_worker_it_looked_up() -> No
         assert runtime.plan_merge(a, 8, worker_id) == []
 
     assert runtime._ready.merge_buckets == before
+
+
+@pytest.mark.anyio
+async def test_a_childs_unaccepted_publication_runs_it_alone_not_its_parent() -> None:
+    registry = _Registry()
+    runtime = _runtime(registry)
+    ids = await _dispatch_merged(runtime)
+    a, b, c = ids["a"], ids["b"], ids["c"]
+    payload = _merged_success(runtime, a, b, c)
+    elsewhere = ArtifactBinding(
+        name="final_model",
+        kind=ArtifactKind.TREE,
+        reference=reference_for("another-org", b"tree", media_type=TREE_MEDIA_TYPE),
+        size_bytes=4,
+    )
+    payload["child_artifacts"] = {c: [elsewhere.model_dump(mode="json")]}
+
+    _monitor(runtime).handle_task_event(
+        TaskEvent(
+            type="TASK_SUCCEEDED",
+            task_id=a,
+            worker_id="wkr-1",
+            payload=payload,
+            ts=_TS,
+        )
+    )
+
+    assert runtime._tasks[a].status == TaskStatus.DONE
+    assert runtime._tasks[b].status == TaskStatus.DONE
+    _assert_returned(runtime, registry, c)
