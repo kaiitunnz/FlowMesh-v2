@@ -611,7 +611,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   just finished the producing task. A task waits once per producer finish, only for a
   live, uncordoned holder it can be placed on and reserved for no other dispatch, and
   spends no attempt and no part of `TASK_NO_WORKER_GRACE_SEC` waiting, nor holds up any
-  other task; otherwise it places as usual. A task
+  other task; otherwise it places as usual. One task at a time waits for a holder, and
+  the producer's other consumers place as usual. A task
   pinned to workers is placed among them alone. Holders are known only with the
   worker content cache on (`CONTENT_HYDRATION_ENABLED`).
 - **Context reuse.** Workers report cached models/datasets in their
