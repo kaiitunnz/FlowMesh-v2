@@ -455,6 +455,46 @@ async def test_bundles_past_the_cap_are_refused_until_one_ends(
     assert results_router._STREAMS._held == 0
 
 
+@pytest.mark.anyio
+async def test_a_bundle_refused_at_the_cap_reads_nothing(
+    runtime: _Runtime,
+    published: dict[str, ArtifactBinding],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    held = [await _bundle(runtime, []) for _ in range(results_router._STREAM_SLOTS)]
+    built: list[str] = []
+
+    def building(files: Any, task_id: str) -> Any:
+        built.append(task_id)
+        raise AssertionError("a refused bundle started its stream")
+
+    monkeypatch.setattr(results_router, "BundleStream", building)
+
+    with pytest.raises(HTTPException) as raised:
+        await _bundle(runtime, [])
+    assert raised.value.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+    assert built == []
+    for response in held:
+        await serve(response)
+    assert results_router._STREAMS._held == 0
+
+
+@pytest.mark.anyio
+async def test_a_bundle_that_cannot_start_gives_its_slot_back(
+    runtime: _Runtime,
+    published: dict[str, ArtifactBinding],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def broken(files: Any, task_id: str) -> Any:
+        raise RuntimeError("no thread")
+
+    monkeypatch.setattr(results_router, "BundleStream", broken)
+
+    with pytest.raises(RuntimeError):
+        await _bundle(runtime, [])
+    assert results_router._STREAMS._held == 0
+
+
 async def _bundle(
     runtime: _Runtime,
     include: list[str],

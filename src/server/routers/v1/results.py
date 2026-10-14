@@ -342,11 +342,11 @@ async def download_result_bundle(
             elif section == "logs":
                 yield from _disk_files(base_dir, LOGS_DIR, f"{task_id}/{LOGS_DIR}")
 
-    chunks = BundleStream(files, task_id)
+    release = _STREAMS.take()
     try:
-        release = _STREAMS.take()
-    except HTTPException:
-        chunks.close()
+        chunks = BundleStream(files, task_id)
+    except BaseException:
+        release()
         raise
     try:
         first = await asyncio.to_thread(next, chunks, b"")
