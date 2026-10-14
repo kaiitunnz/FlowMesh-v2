@@ -3,6 +3,7 @@
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import click
 import typer
 from flowmesh.exceptions import FlowMeshError
 from flowmesh.models import (
@@ -247,7 +248,7 @@ class TestResultArtifacts:
         )
 
         assert result.exit_code == 2
-        assert "--revision" in result.stderr
+        assert "--revision" in click.unstyle(result.stderr)
         mock_hc.assert_not_called()
 
     @patch("flowmesh_cli.commands.result.FlowMesh")
