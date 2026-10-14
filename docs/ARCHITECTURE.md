@@ -528,9 +528,10 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   copy that turns out not to be the object ends the transfer refused and is dropped. A
   worker keeps a copy of whatever it reads from a peer or the store. The cache and its
   transfers run wherever the network plane does; `CONTENT_HYDRATION_ENABLED=false` turns
-  them off, and turning them on requires the network plane. Each worker reports every
-  copy it holds once a minute, at a cost that grows with the number of copies. See
-  [`NETWORK_PLANE.md`](NETWORK_PLANE.md).
+  them off, and turning them on requires the network plane. Each process resolves this
+  from its own environment, and a worker with the cache on under a control with it off
+  reads from the store. Each worker reports every copy it holds once a minute, at a cost
+  that grows with the number of copies. See [`NETWORK_PLANE.md`](NETWORK_PLANE.md).
 - **Task results.** A task's result lives in the shared content store: its worker writes
   the result envelope there under the task's store access before it reports success, and
   the success binds that reference once, at the commit that settles the task, so a retry,

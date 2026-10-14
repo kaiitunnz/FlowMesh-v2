@@ -15,7 +15,7 @@ from shared.resident.reports import (
     ResidentOpOutcome,
     ResidentRouteObservation,
 )
-from shared.schemas.command import InterruptMessage
+from shared.schemas.command import InterruptMessage, MediatedOpMessage
 from shared.schemas.event import (
     Event,
     NodeEvent,
@@ -40,7 +40,7 @@ from ..clients.redis import (
     task_log_closed_key,
     task_log_stream_key,
 )
-from ..content import ContentAccessBroker, ContentHydrationAuthority
+from ..content import ContentAccessBroker, ContentHydrationAuthority, HydrationDenial
 from ..dispatcher import Dispatcher
 from ..hooks import (
     RESOURCE_REGISTRARS,
@@ -165,6 +165,7 @@ class EventMonitor:
         self._server_base_url = self._validate_server_base_url(server_base_url)
         self._content_authority = content_authority
         self._content_access = content_access
+        self._warned_cache_off: set[str] = set()
         self._finalizer = WorkflowFinalizer(
             redis_client=redis_client,
             runtime=runtime,
@@ -1024,6 +1025,8 @@ class EventMonitor:
                     request_id=int(event.payload["request_id"]),
                     peer_only=bool(event.payload.get("peer_only")),
                 )
+            case "CONTENT_HYDRATION_REQUEST":
+                self._refuse_hydration(worker_id, int(event.payload["request_id"]))
             case "CONTENT_ROUTE_OBSERVATION" if self._content_authority is not None:
                 self._content_authority.on_route_observation(
                     worker_id,
@@ -1134,6 +1137,30 @@ class EventMonitor:
                         dispatch_id,
                         task_id,
                     )
+
+    def _refuse_hydration(self, worker_id: str, request_id: int) -> None:
+        """Refuse a peer hydration at once while control runs no content cache, so
+        the worker reads the store instead of waiting out its transfer."""
+        if worker_id not in self._warned_cache_off:
+            self._warned_cache_off.add(worker_id)
+            self._logger.warning(
+                "Worker %s runs the content cache but control does not; its reads "
+                "go to the store",
+                worker_id,
+            )
+        if (worker := self._worker_registry.get_worker(worker_id)) is None:
+            return
+        self._worker_registry.publish_mediated_op(
+            worker,
+            MediatedOpMessage(
+                worker_id=worker_id,
+                frame_kind="content_grant_denied",
+                payload={
+                    "request_id": request_id,
+                    "reason": HydrationDenial.CACHE_OFF.value,
+                },
+            ),
+        )
 
     def _revoke_orphan_run(self, worker_id: str, event: WorkerEvent) -> None:
         """Revoke a dispatch a worker reports running that control does not hold, once

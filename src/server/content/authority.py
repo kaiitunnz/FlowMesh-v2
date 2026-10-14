@@ -70,6 +70,8 @@ class HydrationDenial(StrEnum):
     HOLDER_UNAVAILABLE = "holder_unavailable"
     # The read asked for a peer transport only, and no holder is reached over one.
     NO_PEER_ROUTE = "no_peer_route"
+    # Control runs no worker content cache, so it resolves no holder for anyone.
+    CACHE_OFF = "cache_off"
 
 
 @dataclass(frozen=True)
