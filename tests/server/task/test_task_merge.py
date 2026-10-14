@@ -3,6 +3,7 @@
 import logging
 from collections import defaultdict
 from collections.abc import Callable, Sequence
+from functools import partial
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
@@ -15,8 +16,9 @@ from server.registries.workflow import PersistedTask, WorkflowSched
 from server.services.monitoring import EventMonitor
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime, TransitionNotDurable
+from shared.content import TREE_MEDIA_TYPE, reference_for
 from shared.schemas.event import TaskEvent, WorkerEvent
-from shared.tasks.artifact_binding import ArtifactInputs
+from shared.tasks.artifact_binding import ArtifactBinding, ArtifactInputs, ArtifactKind
 from shared.tasks.specs.common import ConditionSpec
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
@@ -193,20 +195,25 @@ def _render(
     condition_actual: Callable[[Any, Any], Any] | None = None,
 ) -> list[str]:
     """Render a parent's merged children as the dispatcher does before publishing."""
-    dispatcher = cast(
-        Dispatcher,
-        SimpleNamespace(
-            _runtime=runtime,
-            _logger=logging.getLogger("task-merge"),
-            _resolve_stage_references=lambda *args: (resolve(*args[:3]), None),
-            _build_stage_context=lambda record: record,
-            _condition_actual=condition_actual,
-        ),
+    namespace = SimpleNamespace(
+        _runtime=runtime,
+        _logger=logging.getLogger("task-merge"),
+        _resolve_stage_references=lambda *args: (resolve(*args[:3]), None),
+        _build_stage_context=lambda record: record,
+        _condition_actual=condition_actual,
     )
+    dispatcher = cast(Dispatcher, namespace)
+    namespace._render_checkpoint_load = partial(
+        Dispatcher._render_checkpoint_load, dispatcher
+    )
+    namespace._producer_model = partial(Dispatcher._producer_model, dispatcher)
     record = runtime._tasks[parent]
-    parent_spec = resolve(parent, record.task, record).spec
+    inputs = ArtifactInputs()
+    parent_spec = dispatcher._render_checkpoint_load(
+        record, resolve(parent, record.task, record), inputs
+    ).spec
     rendered = Dispatcher._render_merged_children(
-        dispatcher, parent, record, parent_spec, ArtifactInputs()
+        dispatcher, parent, record, parent_spec, inputs
     )
     return [child.task_id for child in rendered or []]
 
@@ -728,6 +735,28 @@ def _rendering_other_model(*task_ids: str) -> Callable[[str, Any, Any], Any]:
         return task.model_copy(update={"spec": spec})
 
     return _resolve
+
+
+@pytest.mark.anyio
+async def test_children_loading_one_checkpoint_by_task_stay_merged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(_Registry())
+    ids = await _dispatch_merged(runtime, dispatch=False)
+    tree = ArtifactBinding(
+        name="final_model",
+        kind=ArtifactKind.TREE,
+        reference=reference_for("org", b"model", media_type=TREE_MEDIA_TYPE),
+        size_bytes=5,
+    )
+    monkeypatch.setattr(runtime, "final_artifacts", lambda task_id: {tree.key: tree})
+
+    def _resolve(task_id: str, task: Any, record: Any) -> Any:
+        load = {"task_id": "tsk-train", "filename": "final_model"}
+        spec = task.spec.model_copy(update={"checkpoint": {"load": load}})
+        return task.model_copy(update={"spec": spec})
+
+    assert _render(runtime, ids["a"], _resolve) == [ids["b"], ids["c"]]
 
 
 @pytest.mark.anyio

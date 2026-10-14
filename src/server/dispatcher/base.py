@@ -1060,6 +1060,9 @@ class Dispatcher:
                     None,
                     artifact_inputs,
                 )
+                resolved = self._render_checkpoint_load(
+                    child_record, resolved, artifact_inputs
+                )
                 resolved.spec.validate_dispatchable()
                 if (condition := resolved.spec.condition) is not None and str(
                     self._condition_actual(child_record, condition)
