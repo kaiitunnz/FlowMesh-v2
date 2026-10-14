@@ -88,7 +88,7 @@ def test_vllm_starts_from_a_hydrated_checkpoint(
     [
         {"type": "local", "path": "/nonexistent/checkpoint"},
         {"type": "local", "task_id": "tsk-train"},
-        {"type": "http", "url": "flowmesh-artifact:dsp-1.0"},
+        {"type": "http", "url": "flowmesh-artifact:[dsp-1.0]"},
     ],
 )
 def test_vllm_fails_rather_than_serve_the_base_model(load: dict[str, Any]) -> None:

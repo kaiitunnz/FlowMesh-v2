@@ -641,7 +641,7 @@ async def test_an_artifact_ref_in_a_part_of_a_result_names_one_published_artifac
         project_expression("img.image", context), context, "img"
     )
     key = "dsp-1.0"
-    assert spec["data"]["items"] == [f"flowmesh-artifact:{key}"]
+    assert spec["data"]["items"] == [f"flowmesh-artifact:[{key}]"]
     assert message.artifact_inputs is not None
     assert message.artifact_inputs[key].reference == image.reference
     assert worker == (producer, "img.png")

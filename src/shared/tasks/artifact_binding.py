@@ -233,7 +233,8 @@ def model_artifact(bindings: ArtifactBindings, producer: str) -> ArtifactBinding
 
 
 ARTIFACT_REF_SCHEME = "flowmesh-artifact:"
-_TOKEN = re.compile(r"flowmesh-artifact:([A-Za-z0-9-]+\.[0-9]+)")
+# The key is bracketed, so no text written right after a token can extend it.
+_TOKEN = re.compile(r"flowmesh-artifact:\[([A-Za-z0-9-]+\.[0-9]+)\]")
 
 
 class UnknownArtifactToken(ValueError):
@@ -263,9 +264,9 @@ class ArtifactInputs:
             key = self._keys[identity] = f"{self.scope}.{len(self._keys)}"
             self.bindings[key] = binding
         return (
-            f"{ARTIFACT_REF_SCHEME}{key}/{inner}"
+            f"{ARTIFACT_REF_SCHEME}[{key}]/{inner}"
             if inner
-            else f"{ARTIFACT_REF_SCHEME}{key}"
+            else f"{ARTIFACT_REF_SCHEME}[{key}]"
         )
 
 

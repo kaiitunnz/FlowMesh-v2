@@ -73,7 +73,7 @@ def _train(run: _Run, name: str, **extra: Any) -> str:
 
 
 def _token(n: int) -> str:
-    return f"flowmesh-artifact:dsp-1.{n}"
+    return f"flowmesh-artifact:[dsp-1.{n}]"
 
 
 def _tokens(message: Any) -> list[ArtifactBinding]:

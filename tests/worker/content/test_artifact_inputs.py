@@ -19,7 +19,12 @@ from shared.content import (
 )
 from shared.schemas.event import TaskFailureKind
 from shared.tasks import TaskType
-from shared.tasks.artifact_binding import ArchiveFacts, ArtifactBinding, ArtifactKind
+from shared.tasks.artifact_binding import (
+    ArchiveFacts,
+    ArtifactBinding,
+    ArtifactKind,
+    substitute_artifact_tokens,
+)
 from shared.tasks.result_binding import ResultBinding
 from shared.tasks.specs import EchoSpecStrict, SSHSpecStrict
 from tests.worker.content.test_plane_routing import _Access, _Lane
@@ -116,9 +121,9 @@ def test_the_spec_names_each_artifacts_local_path(tmp_path: Path) -> None:
     tree, notes = _publish_tree(store), _publish_file(store)
     msg = _message(
         [
-            "flowmesh-artifact:dsp-1.0",
-            "flowmesh-artifact:dsp-1.0/config.json",
-            "flowmesh-artifact:dsp-1.1",
+            "flowmesh-artifact:[dsp-1.0]",
+            "flowmesh-artifact:[dsp-1.0]/config.json",
+            "flowmesh-artifact:[dsp-1.1]",
         ],
         {"dsp-1.0": tree, "dsp-1.1": notes},
     )
@@ -141,8 +146,9 @@ def test_text_that_only_looks_like_a_token_is_left_alone(tmp_path: Path) -> None
     msg = _message(
         [
             "flowmesh-artifact:0",
-            "flowmesh-artifact:dsp-9.0",
+            "flowmesh-artifact:[dsp-9.0]",
             "flowmesh-artifact:dsp-1.0",
+            "flowmesh-artifact:[dsp-1.0]",
         ],
         {"dsp-1.0": notes},
     )
@@ -151,17 +157,30 @@ def test_text_that_only_looks_like_a_token_is_left_alone(tmp_path: Path) -> None
         msg, tmp_path / "in"
     )
 
-    assert msg.task.spec.data["items"][:2] == [
+    assert msg.task.spec.data["items"][:3] == [
         "flowmesh-artifact:0",
-        "flowmesh-artifact:dsp-9.0",
+        "flowmesh-artifact:[dsp-9.0]",
+        "flowmesh-artifact:dsp-1.0",
     ]
-    assert msg.task.spec.data["items"][2].endswith("/notes.txt")
+    assert msg.task.spec.data["items"][3].endswith("/notes.txt")
+
+
+@pytest.mark.parametrize("after", ["5", "_v2", ".1", "/x"])
+def test_text_written_right_after_a_token_follows_its_path(after: str) -> None:
+    scope = "dsp-0123456789abcdef"
+    paths = {f"{scope}.0": "/r/t/.artifact-inputs/abc"}
+
+    rendered = substitute_artifact_tokens(
+        f"run_flowmesh-artifact:[{scope}.0]{after}", paths, scope
+    )
+
+    assert rendered == f"run_/r/t/.artifact-inputs/abc{after}"
 
 
 def test_a_token_of_its_dispatch_naming_no_input_is_unreadable(tmp_path: Path) -> None:
     store = SharedFilesystemObjectStore(tmp_path / "shared")
     notes = _publish_file(store)
-    msg = _message(["flowmesh-artifact:dsp-1.7"], {"dsp-1.0": notes})
+    msg = _message(["flowmesh-artifact:[dsp-1.7]"], {"dsp-1.0": notes})
 
     with pytest.raises(ExecutionError, match="input_unreadable") as raised:
         TaskInputHydrator(cast(Any, FakeContentPlane(store))).install_artifacts(
@@ -180,7 +199,7 @@ def test_an_artifact_outside_the_tasks_scope_is_refused(tmp_path: Path) -> None:
             )
         }
     )
-    msg = _message(["flowmesh-artifact:dsp-1.0"], {"dsp-1.0": elsewhere})
+    msg = _message(["flowmesh-artifact:[dsp-1.0]"], {"dsp-1.0": elsewhere})
 
     with pytest.raises(ExecutionError, match="input_unreadable") as raised:
         TaskInputHydrator(cast(Any, FakeContentPlane(store))).install_artifacts(
@@ -202,7 +221,7 @@ def test_an_outage_mid_tree_names_its_input_and_leaves_no_partial_tree(
             plane.error = ContentUnavailable("store down")
 
     plane.on_read = fail_after_manifest
-    msg = _message(["flowmesh-artifact:dsp-1.0"], {"dsp-1.0": tree})
+    msg = _message(["flowmesh-artifact:[dsp-1.0]"], {"dsp-1.0": tree})
 
     with pytest.raises(ExecutionError) as raised:
         TaskInputHydrator(cast(Any, plane)).install_artifacts(msg, tmp_path / "in")
@@ -221,7 +240,7 @@ def test_an_outage_mid_tree_names_its_input_and_leaves_no_partial_tree(
 def test_a_tree_whose_manifest_is_not_one_is_unreadable(tmp_path: Path) -> None:
     store = SharedFilesystemObjectStore(tmp_path / "shared")
     bogus = _publish_file(store).model_copy(update={"kind": ArtifactKind.TREE})
-    msg = _message(["flowmesh-artifact:dsp-1.0"], {"dsp-1.0": bogus})
+    msg = _message(["flowmesh-artifact:[dsp-1.0]"], {"dsp-1.0": bogus})
 
     with pytest.raises(ExecutionError, match="input_unreadable"):
         TaskInputHydrator(cast(Any, FakeContentPlane(store))).install_artifacts(
@@ -395,7 +414,7 @@ def test_a_task_that_ends_stops_reading_its_artifact_inputs(tmp_path: Path) -> N
         ended = True
 
     plane.on_read = end_after_manifest
-    msg = _message(["flowmesh-artifact:dsp-1.0"], {"dsp-1.0": tree})
+    msg = _message(["flowmesh-artifact:[dsp-1.0]"], {"dsp-1.0": tree})
 
     with pytest.raises(TaskCancelledError):
         TaskInputHydrator(
@@ -419,7 +438,7 @@ def test_a_link_or_foreign_dir_in_place_of_the_inputs_root_is_refused(
     else:
         root.mkdir()
         monkeypatch.setattr(os, "geteuid", lambda: os.getuid() + 1)
-    msg = _message(["flowmesh-artifact:dsp-1.0"], {"dsp-1.0": tree})
+    msg = _message(["flowmesh-artifact:[dsp-1.0]"], {"dsp-1.0": tree})
 
     with pytest.raises(ExecutionError) as raised:
         TaskInputHydrator(cast(Any, FakeContentPlane(store))).install_artifacts(

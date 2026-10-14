@@ -87,7 +87,7 @@ def test_a_checkpoint_named_by_task_and_file_loads_the_published_tree(
 ) -> None:
     load, inputs = _render({**source, key: "tsk-train", "filename": filename})
 
-    assert load == {"url": f"{ARTIFACT_REF_SCHEME}dsp-1.0"}
+    assert load == {"url": f"{ARTIFACT_REF_SCHEME}[dsp-1.0]"}
     assert list(inputs.bindings.values()) == [_TREE]
 
 
@@ -99,7 +99,7 @@ def test_a_checkpoint_named_by_task_alone_loads_its_model(
 ) -> None:
     load, inputs = _render({"taskId": producer, "subdir": "x"})
 
-    assert load == {"url": f"{ARTIFACT_REF_SCHEME}dsp-1.0", "subdir": "x"}
+    assert load == {"url": f"{ARTIFACT_REF_SCHEME}[dsp-1.0]", "subdir": "x"}
     assert list(inputs.bindings.values()) == [model]
 
 
@@ -168,7 +168,7 @@ def test_a_lora_adapter_named_by_task_loads_its_published_adapter() -> None:
     adapters = rendered.spec.adapters
     assert adapters is not None
     assert [(a.url, a.task_id) for a in adapters] == [
-        (f"{ARTIFACT_REF_SCHEME}dsp-1.0", None),
+        (f"{ARTIFACT_REF_SCHEME}[dsp-1.0]", None),
         ("https://e/b.tar.gz", None),
     ]
     assert list(inputs.bindings.values()) == [_LORA]

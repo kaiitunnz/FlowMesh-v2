@@ -404,6 +404,6 @@ def test_stage_reference_renders_the_producers_published_artifact() -> None:
         "old.final_lora_archive", {"old": records["old"]}, inputs
     )
 
-    assert rendered == "flowmesh-artifact:dsp-1.0"
+    assert rendered == "flowmesh-artifact:[dsp-1.0]"
     assert inputs.bindings == {"dsp-1.0": tree}
     assert pre_upgrade == {"path": "final_lora.tar.gz"}

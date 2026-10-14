@@ -97,7 +97,7 @@ def test_an_archive_ref_renders_as_the_tree_it_archives() -> None:
     rendered = _dispatcher()._render_artifact_ref(
         result.final_lora_archive, result.artifacts_, inputs
     )
-    assert rendered == "flowmesh-artifact:dsp-1.0"
+    assert rendered == "flowmesh-artifact:[dsp-1.0]"
     assert inputs.bindings == {"dsp-1.0": _TREE}
 
 
@@ -111,8 +111,8 @@ def test_a_path_inside_a_tree_renders_under_its_token() -> None:
     member = dispatcher._render_artifact_ref(
         {"path": "final_lora/adapter_config.json"}, result.artifacts_, inputs
     )
-    assert whole == "flowmesh-artifact:dsp-1.0"
-    assert member == "flowmesh-artifact:dsp-1.0/adapter_config.json"
+    assert whole == "flowmesh-artifact:[dsp-1.0]"
+    assert member == "flowmesh-artifact:[dsp-1.0]/adapter_config.json"
     assert list(inputs.bindings.values()) == [_TREE]
 
 
@@ -121,7 +121,7 @@ def test_a_file_artifact_renders_its_own_token() -> None:
     rendered = _dispatcher()._render_artifact_ref(
         {"path": "x.bin"}, _result().artifacts_, inputs
     )
-    assert rendered == "flowmesh-artifact:dsp-1.0"
+    assert rendered == "flowmesh-artifact:[dsp-1.0]"
     assert inputs.bindings == {"dsp-1.0": _FILE}
 
 
@@ -155,7 +155,7 @@ def test_a_checkpoints_ref_renders_as_the_last_checkpoint_published() -> None:
         ArtifactContext(task_id="tsk-abc", checkpoints="step-20"),
         inputs,
     )
-    assert rendered == "flowmesh-artifact:dsp-1.0"
+    assert rendered == "flowmesh-artifact:[dsp-1.0]"
     assert inputs.bindings == {"dsp-1.0": _STEP}
 
 
