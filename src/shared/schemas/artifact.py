@@ -16,17 +16,16 @@ class ArtifactContext(BaseModel):
     task_id: str | None = Field(
         default=None, description="The task whose artifacts the refs name."
     )
-    checkpoints: str | None = Field(
-        default=None,
-        exclude_if=lambda value: value is None,
-        description="Revision of the last checkpoint the task published.",
+    revisions: dict[str, str] = Field(
+        default_factory=dict,
+        exclude_if=lambda value: not value,
+        description="The revision each named artifact's refs resolve at; any other "
+        "name resolves at `final`.",
     )
 
     def revision_of(self, path: str) -> str | None:
         """Return the revision a ref to ``path`` names, or None for the final set."""
-        if path.split("/", 1)[0] == CHECKPOINTS_ARTIFACT:
-            return self.checkpoints
-        return None
+        return self.revisions.get(path.split("/", 1)[0])
 
 
 def artifact_download_path(task_id: str, path: str, revision: str | None = None) -> str:

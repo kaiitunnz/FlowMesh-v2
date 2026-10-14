@@ -8,7 +8,7 @@ from urllib.parse import quote, urljoin, urlparse
 
 import requests
 
-from shared.schemas.artifact import ArtifactContext
+from shared.schemas.artifact import CHECKPOINTS_ARTIFACT, ArtifactContext
 from shared.schemas.result import BaseExecutorResult, ResultEnvelope
 from shared.tasks.specs import TaskSpecStrictBase
 from shared.telemetry.propagation import inject_ambient_traceparent
@@ -252,7 +252,10 @@ def write_executor_result(
     ``checkpoints`` is the revision of the last checkpoint the task published.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    result.artifacts_ = ArtifactContext(task_id=task_id, checkpoints=checkpoints)
+    result.artifacts_ = ArtifactContext(
+        task_id=task_id,
+        revisions={CHECKPOINTS_ARTIFACT: checkpoints} if checkpoints else {},
+    )
     # A model identifier may be a URL whose credential the dispatch restored.
     if isinstance(model := getattr(result, "model", None), str):
         setattr(result, "model", redact_url(model))

@@ -161,7 +161,7 @@ def test_a_checkpoints_ref_renders_as_the_last_checkpoint_published() -> None:
     inputs = ArtifactInputs("dsp-1")
     rendered = _dispatcher()._render_artifact_ref(
         {"path": "checkpoints"},
-        ArtifactContext(task_id="tsk-abc", checkpoints="step-20"),
+        ArtifactContext(task_id="tsk-abc", revisions={"checkpoints": "step-20"}),
         inputs,
     )
     assert rendered == "flowmesh-artifact:[dsp-1.0]"
@@ -176,7 +176,7 @@ def test_a_checkpoints_ref_of_a_task_that_published_none_fails_the_render() -> N
 
 
 def test_a_checkpoints_ref_reads_as_its_revisions_download_path() -> None:
-    context = ArtifactContext(task_id="tsk-abc", checkpoints="step-20")
+    context = ArtifactContext(task_id="tsk-abc", revisions={"checkpoints": "step-20"})
     assert (
         artifact_download_path(
             "tsk-abc", "checkpoints", context.revision_of("checkpoints")

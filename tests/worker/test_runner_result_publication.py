@@ -305,7 +305,7 @@ def test_a_training_task_reports_its_checkpoints_as_it_runs_and_at_success(
         )
     )
     assert envelope.result.artifacts_ is not None
-    assert envelope.result.artifacts_.checkpoints == "step-5"
+    assert envelope.result.artifacts_.revisions == {"checkpoints": "step-5"}
     updates = [
         call.args[1]
         for call in lifecycle.notify_task_update.call_args_list

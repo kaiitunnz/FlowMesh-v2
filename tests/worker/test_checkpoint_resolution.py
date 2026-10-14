@@ -98,7 +98,9 @@ def test_vllm_fails_rather_than_serve_the_base_model(load: dict[str, Any]) -> No
 
 def test_a_checkpoints_ref_in_data_reads_as_its_revisions_download_path() -> None:
     upstream = BaseExecutorResult(
-        _artifacts=ArtifactContext(task_id="tsk-train", checkpoints="step-30")
+        _artifacts=ArtifactContext(
+            task_id="tsk-train", revisions={"checkpoints": "step-30"}
+        )
     )
 
     assert (
