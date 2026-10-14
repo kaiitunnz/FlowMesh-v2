@@ -54,7 +54,6 @@ class ArtifactDownload:
     media_type: str | None
     whole: Callable[[], Iterator[bytes]]
     part: Callable[[int, int], Iterator[bytes]]
-    is_view: bool = False
 
     @property
     def etag(self) -> str:
@@ -151,7 +150,6 @@ def _archive_download(
         part=lambda start, length: archive.chunks(
             part_member, crc32=facts.crc32, start=start, end=start + length
         ),
-        is_view=True,
     )
 
 

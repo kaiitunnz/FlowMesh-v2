@@ -80,3 +80,33 @@ def test_identical_publications_match_and_stamps_do_not_count() -> None:
     assert not first.same_publication(
         _binding("a", reference=_REF.model_copy(update={"content_digest": "cd" * 32}))
     )
+
+
+_FACTS = {"sha256": "cd" * 32, "crc32": 7, "size_bytes": 30, "top": "model"}
+
+
+@pytest.mark.parametrize(
+    "facts",
+    [
+        {"sha256": "x" * 64},
+        {"sha256": "AB" * 32},
+        {"sha256": "ab" * 31},
+        {"crc32": -1},
+        {"crc32": 1 << 32},
+        {"size_bytes": -1},
+        {"top": "../../x"},
+        {"top": "a/b"},
+        {"top": ".."},
+        {"top": ""},
+    ],
+)
+def test_forged_archive_facts_are_refused(facts: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        ArchiveFacts.model_validate({**_FACTS, **facts})
+
+
+@pytest.mark.parametrize("field", ["reference", "largest"])
+def test_a_reference_whose_digest_is_not_sha256_hex_is_refused(field: str) -> None:
+    forged = _REF.model_copy(update={"content_digest": "../not-a-digest"})
+    with pytest.raises(ValidationError):
+        _binding("a", "final", **{field: forged})

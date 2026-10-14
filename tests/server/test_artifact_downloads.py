@@ -390,25 +390,21 @@ async def test_an_unreachable_store_answers_503_with_a_retry(
 
 
 @pytest.mark.anyio
-async def test_archive_views_and_bundles_past_the_cap_are_refused_until_one_ends(
+async def test_bundles_past_the_cap_are_refused_until_one_ends(
     runtime: _Runtime, published: dict[str, ArtifactBinding]
 ) -> None:
-    held = [
-        await _download(runtime, "final_model.tar.gz")
-        for _ in range(results_router._STREAM_SLOTS)
-    ]
+    held = [await _bundle(runtime, []) for _ in range(results_router._STREAM_SLOTS)]
 
     with pytest.raises(HTTPException) as raised:
-        await _download(runtime, "final_model.tar.gz")
+        await _bundle(runtime, [])
     assert raised.value.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
     assert raised.value.headers == {"Retry-After": "5"}
-    with pytest.raises(HTTPException):
-        await _bundle(runtime, [])
+    assert (await serve(await _download(runtime, "final_model.tar.gz"))).status == 200
     assert (await serve(await _download(runtime, "notes.txt"))).status == 200
 
     with pytest.raises(ClientGone):
         await serve(held.pop(), abort_after_chunks=0)
-    assert (await serve(await _download(runtime, "final_model.tar.gz"))).status == 200
+    assert (await serve(await _bundle(runtime, []))).status == 200
     for response in held:
         await serve(response)
     assert results_router._STREAMS._held == 0

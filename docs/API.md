@@ -79,8 +79,8 @@ single `Range`, optionally conditioned by `If-Range`, is answered `206`; a reque
 naming several ranges is answered whole, an unsatisfiable range `416`. A download that
 fails before its first byte answers `503` with `Retry-After` while the store is
 unreachable. Archive views and bundles are built as they stream, and the server
-streams a bounded number of them at once: past that, a request answers `503` with
-`Retry-After`.
+compresses a bounded number of bundles at once: past that, a bundle request answers
+`503` with `Retry-After`.
 
 ## Content
 

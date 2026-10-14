@@ -13,9 +13,10 @@ from collections.abc import Iterable
 from enum import StrEnum
 from typing import Annotated, Self
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
 from shared.content import ContentReference, is_member_path
+from shared.utils.nofollow import is_plain_segment
 
 FINAL_REVISION = "final"
 _STEP = re.compile(r"step-(0|[1-9][0-9]*)")
@@ -73,15 +74,39 @@ class ArtifactKind(StrEnum):
     """A stored-block ``.tar.gz`` view of the tree ``of`` names."""
 
 
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
+def _sha256(value: str) -> str:
+    if _SHA256.fullmatch(value) is None:
+        raise ValueError(f"{value!r} is not a SHA-256 hex digest")
+    return value
+
+
+def _segment(value: str) -> str:
+    if not is_plain_segment(value):
+        raise ValueError(f"{value!r} is not one plain path segment")
+    return value
+
+
+def _digested(reference: ContentReference) -> ContentReference:
+    _sha256(reference.content_digest)
+    return reference
+
+
+type Sha256 = Annotated[str, AfterValidator(_sha256)]
+type DigestedReference = Annotated[ContentReference, AfterValidator(_digested)]
+
+
 class ArchiveFacts(BaseModel):
     """What a whole archive view checks against, computed when it was published."""
 
     model_config = ConfigDict(frozen=True)
 
-    sha256: str
-    crc32: int
-    size_bytes: int
-    top: str
+    sha256: Sha256
+    crc32: int = Field(ge=0, lt=1 << 32)
+    size_bytes: int = Field(ge=0)
+    top: Annotated[str, AfterValidator(_segment)]
 
 
 class ArtifactBinding(BaseModel):
@@ -97,10 +122,10 @@ class ArtifactBinding(BaseModel):
     name: ArtifactName
     revision: Revision = FINAL_REVISION
     kind: ArtifactKind
-    reference: ContentReference
-    size_bytes: int
-    files: int = 1
-    largest: ContentReference | None = None
+    reference: DigestedReference
+    size_bytes: int = Field(ge=0)
+    files: int = Field(default=1, ge=0)
+    largest: DigestedReference | None = None
     of: str | None = None
     archive: ArchiveFacts | None = None
     dispatch_id: str | None = None

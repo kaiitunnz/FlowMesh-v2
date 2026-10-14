@@ -79,7 +79,7 @@ _BUNDLE_SECTIONS_CONCRETE = ("results", "artifacts", "logs")
 _BUNDLE_SECTIONS_ACCEPTED = (*_BUNDLE_SECTIONS_CONCRETE, "all")
 _BUNDLE_SECTIONS_DEFAULT = ("results", "artifacts")
 _LOGS_NAME = "logs.jsonl"
-# Archive views and bundles streaming at once; each holds a thread.
+# Bundles streaming at once; each holds a thread and a compressor.
 _STREAM_SLOTS = 4
 _RETRY_AFTER_SEC = 5
 
@@ -195,8 +195,7 @@ async def download_result_file(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to read artifact: {exc}",
         ) from exc
-    release = _STREAMS.take() if download.is_view else None
-    return ArtifactResponse(download, release)
+    return ArtifactResponse(download)
 
 
 @router.get(
@@ -276,8 +275,12 @@ async def download_result_bundle(
             elif section == "logs":
                 yield from _disk_files(base_dir, LOGS_DIR, f"{task_id}/{LOGS_DIR}")
 
-    release = _STREAMS.take()
     chunks = BundleStream(files, task_id)
+    try:
+        release = _STREAMS.take()
+    except HTTPException:
+        chunks.close()
+        raise
     try:
         first = await asyncio.to_thread(next, chunks, b"")
     except BaseException as exc:
@@ -486,10 +489,10 @@ def _store_unavailable(exc: Exception) -> HTTPException:
 
 
 class _StreamSlots:
-    """A fixed number of archive views and bundles the root streams at once.
+    """A fixed number of bundles the root streams at once.
 
-    Each holds a thread and, for a bundle, a compressor, so a request past the cap
-    is refused with ``503`` and a ``Retry-After`` rather than queued behind them.
+    Each holds a thread and a compressor, so a request past the cap is refused with
+    ``503`` and a ``Retry-After`` rather than queued behind them.
     """
 
     def __init__(self, capacity: int) -> None:
@@ -503,7 +506,7 @@ class _StreamSlots:
             if self._held >= self._capacity:
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail="too many archive and bundle downloads in flight",
+                    detail="too many bundle downloads in flight",
                     headers={"Retry-After": str(_RETRY_AFTER_SEC)},
                 )
             self._held += 1
@@ -551,12 +554,9 @@ class ArtifactResponse(Response):
     after it ends the response short.
     """
 
-    def __init__(
-        self, download: ArtifactDownload, release: Callable[[], None] | None = None
-    ) -> None:
+    def __init__(self, download: ArtifactDownload) -> None:
         super().__init__()
         self._download = download
-        self._release = release
         headers = {
             "etag": download.etag,
             "repr-digest": download.repr_digest,
@@ -587,9 +587,6 @@ class ArtifactResponse(Response):
             if len(failed.exceptions) == 1:
                 raise failed.exceptions[0] from None
             raise
-        finally:
-            if self._release is not None:
-                self._release()
 
     async def _respond(self, scope: Scope, receive: Receive, send: Send) -> None:
         download = self._download
