@@ -2,6 +2,7 @@
 
 import logging
 import threading
+import time
 from dataclasses import dataclass, replace
 
 from shared.content import ContentReference
@@ -30,6 +31,9 @@ class _InputCheck:
 
 
 INPUT_VERDICT_REPORT = "TASK_FAILED:input_unreadable"
+# A task whose inputs read fine at control is placed again no sooner than this, so a
+# worker that keeps failing to read them is not handed the task in a tight loop.
+INPUT_RECHECK_PACE_SEC = 1.0
 
 
 def _input_verdict(task_id: str, check: _InputCheck) -> TaskEvent:
@@ -117,7 +121,11 @@ class InputChecks:
                 "Task %s runs again: control reads the inputs its worker could not",
                 task_id,
             )
-            if self._ready.enqueue_ready_locked(task_id, front=False):
+            if self._ready.enqueue_ready_locked(
+                task_id,
+                front=False,
+                not_before=time.monotonic() + INPUT_RECHECK_PACE_SEC,
+            ):
                 self._cv.notify_all()
             self._committer.commit_locked(task_id)
             del self.input_checks[task_id]

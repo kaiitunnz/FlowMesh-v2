@@ -246,3 +246,60 @@ def test_a_worker_that_could_not_reach_an_input_is_passed_over() -> None:
     dispatcher.dispatch_once(b)
 
     assert registry.publish_task.call_args[0][0].id == "wkr-2"
+
+
+def _avoiding(
+    idle: list[str], eligible: list[str]
+) -> tuple[TaskRuntime, str, mock.Mock, CapturingDispatcher]:
+    """A task whose input wkr-1 could not reach, with ``idle`` workers idle and
+    ``eligible`` able to run it."""
+    reader = make_result_reader()
+    runtime = TaskRuntime(
+        cast(Any, FakeRegistry()),
+        cast(Any, mock.Mock()),
+        OrchestrationConfig(),
+        reader,
+        logging.getLogger("result-availability"),
+        credential_vault=InMemoryCredentialVault(),
+    )
+    _wf, results = asyncio.run(runtime.register("owner", "org", _DAG, format="native"))
+    a, b = (r.task_id for r in results)
+    record_dispatch(runtime, a, cast(Any, _worker()))
+    payload = result_payload(reader, a, {"items": [{"output": "alpha"}]}, "org")
+    runtime.mark_succeeded(a, "wkr-1", payload, "t")
+    registry = mock.Mock()
+    registry.idle_satisfying_pool.return_value = [
+        _worker().model_copy(update={"id": w}) for w in idle
+    ]
+    registry.satisfying_workers.return_value = [
+        _worker().model_copy(update={"id": w}) for w in eligible
+    ]
+    registry.publish_task.return_value = 1
+    dispatcher = CapturingDispatcher(
+        runtime=runtime,
+        worker_registry=registry,
+        logger=logging.getLogger("dispatch"),
+        worker_selection_strategy="first_fit",
+    )
+    record = runtime.get_record(b)
+    assert record is not None
+    record.avoided_worker = "wkr-1"
+    return runtime, b, registry, dispatcher
+
+
+def test_a_task_waits_for_another_eligible_worker_rather_than_its_reporter() -> None:
+    runtime, b, registry, dispatcher = _avoiding(["wkr-1"], ["wkr-1", "wkr-2"])
+
+    assert dispatcher.dispatch_once(b) is False
+
+    registry.publish_task.assert_not_called()
+    record = runtime.get_record(b)
+    assert record is not None and record.attempts == 0
+
+
+def test_a_task_returns_to_its_reporter_when_no_other_worker_can_run_it() -> None:
+    _, b, registry, dispatcher = _avoiding(["wkr-1"], ["wkr-1"])
+
+    assert dispatcher.dispatch_once(b) is True
+
+    assert registry.publish_task.call_args[0][0].id == "wkr-1"

@@ -5,7 +5,9 @@ reads the inputs the task consumes itself before the task runs again or fails.
 """
 
 import logging
+import time
 from typing import Any, cast
+from unittest import mock
 from unittest.mock import MagicMock
 
 import pytest
@@ -16,7 +18,8 @@ from server.services.task_events import TaskEventPublisher
 from server.task.models import TaskStatus
 from server.task.redrive import StoreRedriveScheduler
 from server.task.results import ResultUnavailable, ResultUnreadable
-from server.task.runtime import TaskRuntime, TransitionNotDurable
+from server.task.runtime import TaskRuntime, TransitionNotDurable, scheduling
+from server.task.runtime.input_checks import INPUT_RECHECK_PACE_SEC
 from shared.content import ContentReference, reference_for
 from shared.schemas.event import TaskEvent, TaskFailureKind
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
@@ -279,6 +282,12 @@ class _Attributing:
         with self.runtime._cv:
             return self.runtime._ready.pop_ready_locked()
 
+    def ready_once_paced(self) -> str | None:
+        """The next ready task once a re-read input's pacing has passed."""
+        paced = time.monotonic() + INPUT_RECHECK_PACE_SEC
+        with mock.patch.object(scheduling.time, "monotonic", return_value=paced):
+            return self.ready()
+
 
 @pytest.mark.anyio
 async def test_an_unreachable_input_returns_the_task_without_spending_an_attempt() -> (
@@ -348,7 +357,8 @@ async def test_input_control_reads_fine_runs_again_blaming_no_worker() -> None:
     assert record.attempts == 0
     assert record.failed_workers == []
     assert task_id not in runtime._inputs.input_checks
-    assert fixture.ready() == task_id
+    assert runtime.held_back(task_id) and fixture.ready() is None
+    assert fixture.ready_once_paced() == task_id
 
 
 @pytest.mark.anyio
@@ -441,7 +451,7 @@ async def test_a_store_control_cannot_reach_either_holds_the_task() -> None:
     record = runtime._tasks[task_id]
     assert record.failed_workers == []
     assert record.attempts == 0
-    assert fixture.ready() == task_id
+    assert fixture.ready_once_paced() == task_id
 
 
 @pytest.mark.anyio
@@ -460,7 +470,7 @@ async def test_an_unexpected_read_error_holds_the_task_for_another_drive() -> No
 
     fixture.probe.error = None
     fixture.scheduler.run_due()
-    assert fixture.ready() == task_id
+    assert fixture.ready_once_paced() == task_id
 
 
 @pytest.mark.anyio
