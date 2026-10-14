@@ -13,7 +13,7 @@ import pytest
 from server.content.directory import ContentHolderRecord
 from server.registries.artifacts import final_set
 from server.registries.worker import Worker
-from shared.content import ContentReference
+from shared.content import TREE_MEDIA_TYPE, ContentReference, TreeManifest, TreeMember
 from shared.tasks.artifact_binding import ArtifactBinding, ArtifactKind
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.dispatcher.helpers import (
@@ -168,7 +168,13 @@ def _dispatch_use(enabled: bool, holders: Any) -> tuple[Any, mock.Mock, dict, An
     record_dispatch(runtime, train, "wkr-1", "dsp-1")
     runtime.mark_started(train, "wkr-1", {}, _TS)
     payload = result_payload(runtime._results, train, {"ok": True}, "org")
-    model = _tree("model", _WEIGHTS)
+    manifest = TreeManifest.of(
+        [TreeMember("w.bin", _WEIGHTS.content_digest, _WEIGHTS.size_bytes)]
+    )
+    stored = runtime._results._store.write(
+        "org", manifest.encode(), media_type=TREE_MEDIA_TYPE
+    )
+    model = _tree("model", _WEIGHTS).model_copy(update={"reference": stored})
     payload["artifacts"] = [model.model_dump(mode="json")]
     runtime.mark_succeeded(train, "wkr-1", payload, _TS, "dsp-1")
     use = ids["use"]
