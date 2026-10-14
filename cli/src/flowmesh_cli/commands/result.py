@@ -23,9 +23,7 @@ def fetch(
 ) -> None:
     """Download task result JSON and optionally save it to a local file."""
     if revision is not None and output is None:
-        raise typer.BadParameter(
-            "selects the artifacts --output writes", param_hint="--revision"
-        )
+        raise typer.BadParameter("requires --output", param_hint="--revision")
     client = FlowMesh()
     if output:
         try:
@@ -36,7 +34,7 @@ def fetch(
             logging.error(str(exc))
             raise typer.Exit(code=1)
         if downloaded:
-            logging.log(f"Downloaded artifacts to {output / f'{task_id}-artifacts'}")
+            logging.log(f"Downloaded artifacts to {output / task_id / 'artifacts'}")
         logging.log(f"Wrote result to {target}")
         return
 

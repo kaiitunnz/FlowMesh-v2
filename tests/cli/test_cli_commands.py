@@ -248,7 +248,8 @@ class TestResultArtifacts:
         )
 
         assert result.exit_code == 2
-        assert "--revision" in click.unstyle(result.stderr)
+        message = click.unstyle(result.stderr)
+        assert "--revision" in message and "requires --output" in message
         mock_hc.assert_not_called()
 
     @patch("flowmesh_cli.commands.result.FlowMesh")
