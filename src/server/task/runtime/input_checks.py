@@ -178,12 +178,14 @@ class InputChecks:
         references: tuple[ContentReference, ...],
         members: frozenset[ContentReference] = frozenset(),
         awaiting: frozenset[str] = frozenset(),
+        lost: str | None = None,
     ) -> None:
         """Keep a returned task out of the queue until control has read its inputs,
-        or, while uploads it reads are still owed in ``awaiting``, until they settle."""
+        or, while uploads it reads are still owed in ``awaiting``, until they settle.
+        ``lost`` says what uploads it reads already lost."""
         self._ready.remove_from_ready_locked(record.task_id)
         self.input_checks[record.task_id] = _InputCheck(
-            worker_id, dispatch_id, references, members, awaiting=awaiting
+            worker_id, dispatch_id, references, members, awaiting=awaiting, lost=lost
         )
         if not awaiting:
             self._redrive.drive_now(record.workflow_id)

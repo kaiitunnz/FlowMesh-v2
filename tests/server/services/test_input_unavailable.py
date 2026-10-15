@@ -800,6 +800,25 @@ async def test_an_input_whose_upload_was_lost_fails_its_reader_as_lost() -> None
 
 
 @pytest.mark.anyio
+async def test_a_reader_of_an_upload_lost_before_it_read_fails_as_lost() -> None:
+    fixture = _Attributing()
+    runtime = fixture.runtime
+    task_id, producer, member = await _consumer_of_staged(fixture)
+    fixture.stored.error = ResultUnreadable("no content")
+    runtime.artifact_owner_lost("wkr-0")
+    runtime._reconciler.check(producer)
+    upload = runtime._tasks[producer].artifact_upload
+    assert upload is not None and upload.lost
+
+    fixture.report(_unavailable(task_id, [member]))
+    fixture.scheduler.run_due()
+
+    record = runtime._tasks[task_id]
+    assert record.status == TaskStatus.FAILED
+    assert record.error is not None and "artifact_lost" in record.error
+
+
+@pytest.mark.anyio
 async def test_a_waiting_reader_is_placed_again_when_its_producer_is_heard() -> None:
     fixture = _Attributing()
     runtime = fixture.runtime

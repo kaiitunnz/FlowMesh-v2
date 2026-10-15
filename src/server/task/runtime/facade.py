@@ -4035,6 +4035,27 @@ class TaskRuntime:
             pending.update(self._pending_publisher_locked(binding))
         return frozenset(pending)
 
+    def _lost_inputs_locked(self, record: TaskRecord) -> str | None:
+        """What the settled uploads of the artifacts a task reads lost, if any did."""
+        dispatches = {binding.dispatch_id for binding in record.dispatched_artifacts}
+        producers = set(record.dispatched_producers)
+        if dispatches:
+            producers.update(
+                upstream.task_id
+                for upstream in self._tasks.values()
+                if upstream.workflow_id == record.workflow_id
+                and upstream.artifact_upload is not None
+                and upstream.artifact_upload.dispatch_id in dispatches
+            )
+        failures = [
+            upload.failure(producer)
+            for producer in sorted(producers)
+            if (upstream := self._tasks.get(producer)) is not None
+            and (upload := upstream.artifact_upload) is not None
+            and upload.lost
+        ]
+        return "; ".join(failures) or None
+
     def pending_artifact_digests(
         self, bindings: Iterable[ArtifactBinding]
     ) -> list[str] | None:
@@ -5667,6 +5688,7 @@ class TaskRuntime:
                 ):
                     held_dispatch = record.dispatch_id
                     awaiting = self._pending_producers_locked(task_id)
+                    lost = self._lost_inputs_locked(record)
                     members = frozenset(
                         reference
                         for reference in consumed
@@ -5677,7 +5699,13 @@ class TaskRuntime:
                     )
                     record.avoided_worker = worker_id
                     self._inputs.hold_for_input_check_locked(
-                        record, worker_id, held_dispatch, consumed, members, awaiting
+                        record,
+                        worker_id,
+                        held_dispatch,
+                        consumed,
+                        members,
+                        awaiting,
+                        lost,
                     )
                     return FailureOutcome(end, record.attempts, [], [])
                 self._logger.warning(
