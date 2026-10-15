@@ -5,12 +5,12 @@ from pathlib import Path
 
 from pydantic import SecretStr
 
-from shared.content import content_hydration_enabled
 from shared.content.config import (
     DEFAULT_PART_BYTES,
     DEFAULT_RELAY_TRANSFER_MAX_BYTES,
     DEFAULT_TRANSFER_WINDOW_BYTES,
     DEFAULT_UPLOAD_CONCURRENCY,
+    content_hydration_enabled,
 )
 from shared.network.peer_dial import connect_budget
 from shared.schemas.worker import SSHBackendName

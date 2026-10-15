@@ -13,11 +13,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from shared.content import content_hydration_enabled
 from shared.content.config import (
     DEFAULT_RELAY_TRANSFER_MAX_BYTES,
     DEFAULT_TRANSFER_WINDOW_BYTES,
     ObjectStoreConfig,
+    content_hydration_enabled,
 )
 from shared.content.wire import CHUNK_BYTES
 from shared.network.peer_dial import connect_budget

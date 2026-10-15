@@ -5,8 +5,11 @@ from pathlib import Path
 
 from pydantic import SecretStr
 
-from shared.content import ObjectStoreConfig, content_hydration_enabled
-from shared.content.config import DEFAULT_TRANSFER_WINDOW_BYTES
+from shared.content.config import (
+    DEFAULT_TRANSFER_WINDOW_BYTES,
+    ObjectStoreConfig,
+    content_hydration_enabled,
+)
 from shared.content.wire import CHUNK_BYTES
 from shared.network.peer_dial import connect_budget
 from shared.tasks.specs import ModelBindingMode
