@@ -131,6 +131,9 @@ class _WorkerStub:
     """Records the frames control relays and applies each reap to one worker's egress
     store, which the dispatched steps capture into."""
 
+    async def get_workers_heard_async(self, ids: list[str]) -> list[Any]:
+        return [(self.get_worker(i), False) for i in ids]
+
     def __init__(self) -> None:
         self.frames: list[tuple[str, str, dict[str, Any]]] = []
         self.egress = PendingEgressRequestStore()

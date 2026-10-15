@@ -7,7 +7,7 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 
-from shared.content import ContentReference
+from shared.content import ContentReference, HeldCopy
 from shared.schemas.event import TaskEvent, TaskFailureKind
 from shared.tasks.artifact_binding import ArtifactBinding
 
@@ -41,6 +41,18 @@ class _InputCheck:
     def checkable(self) -> bool:
         """Whether control reads the check's inputs now."""
         return not self.awaiting
+
+
+def _awaits(
+    check: _InputCheck, producer_ids: set[str], copies: set[HeldCopy] | None
+) -> bool:
+    return bool(check.awaiting & producer_ids) and (
+        copies is None
+        or any(
+            (reference.authorization_scope, reference.content_digest) in copies
+            for reference in check.references
+        )
+    )
 
 
 INPUT_VERDICT_REPORT = "TASK_FAILED:input_unreadable"
@@ -211,13 +223,24 @@ class InputChecks:
             if check.checkable and (record := self._tasks.get(task_id)) is not None:
                 self._redrive.drive_now(record.workflow_id)
 
-    def retry_awaiting_locked(self, producer_ids: set[str]) -> None:
+    def awaits_any_locked(
+        self, producer_ids: set[str], copies: set[HeldCopy] | None = None
+    ) -> bool:
+        """Return whether a check waits on one of these tasks' uploads, for one of
+        ``copies`` when given."""
+        return any(
+            _awaits(check, producer_ids, copies) for check in self.input_checks.values()
+        )
+
+    def retry_awaiting_locked(
+        self, producer_ids: set[str], copies: set[HeldCopy] | None = None
+    ) -> None:
         """Place again each task waiting on one of these tasks' uploads, as a holder
-        can serve it before the upload lands; it waits again if the read still
-        misses."""
+        can serve it before the upload lands, and when ``copies`` is given only one
+        that missed one of them; it waits again if the read still misses."""
         retried: dict[str, list[str]] = defaultdict(list)
         for task_id, check in list(self.input_checks.items()):
-            if not check.awaiting & producer_ids:
+            if not _awaits(check, producer_ids, copies):
                 continue
             record = self._tasks.get(task_id)
             if record is None or record.status != TaskStatus.PENDING:

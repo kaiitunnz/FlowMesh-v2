@@ -70,7 +70,7 @@ def test_a_nodes_unregister_of_its_own_worker_settles_the_uploads_it_owed() -> N
 
     monitor._handle_worker_event(_unregister("box-a"))
 
-    runtime.artifact_owner_lost.assert_called_once_with(_WORKER)
+    runtime.artifact_owner_lost.assert_called_once_with(_WORKER, departed=True)
 
 
 def test_an_unregister_another_node_holds_leaves_its_uploads_owed() -> None:

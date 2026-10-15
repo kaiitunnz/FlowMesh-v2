@@ -858,9 +858,11 @@ async def test_a_waiting_reader_is_placed_again_when_its_producer_holds_copies()
     runtime = fixture.runtime
     task_id, _, member = await _consumer_of_staged(fixture)
     fixture.report(_unavailable(task_id, [member]))
+    missed = (member.authorization_scope, member.content_digest)
 
-    runtime.artifact_owner_holds("wkr-1")
+    runtime.artifact_owner_holds("wkr-1", [missed])
+    runtime.artifact_owner_holds("wkr-0", [("org", "0" * 64)])
     assert task_id in runtime._inputs.input_checks
-    runtime.artifact_owner_holds("wkr-0")
+    runtime.artifact_owner_holds("wkr-0", [("org", "0" * 64), missed])
 
     assert task_id not in runtime._inputs.input_checks

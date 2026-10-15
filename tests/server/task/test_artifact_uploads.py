@@ -576,6 +576,14 @@ def _merged(parent_owes: bool) -> tuple[_Setup, str, str]:
     return setup, a, b
 
 
+def test_a_merged_childs_upload_renews_once_the_dispatchs_task_is_freed() -> None:
+    setup, a, b = _merged(parent_owes=False)
+    with setup.runtime._lock:
+        setup.runtime._tasks.pop(a)
+
+    assert setup.runtime.renewable_content_scope(a, "wkr-1", "dsp-m") == "org"
+
+
 @pytest.mark.parametrize("parent_owes", [True, False], ids=["parent-settled", "none"])
 def test_a_merged_childs_upload_renews_under_the_dispatchs_task(
     parent_owes: bool,
@@ -664,7 +672,33 @@ def test_an_owner_declared_lost_renews_nothing_and_settles_nothing() -> None:
     setup.runtime._reconciler.check(setup.train)
     upload = setup.record(setup.train).artifact_upload
     assert upload is not None and upload.state is ArtifactDurability.LOST
-    assert not setup.runtime._uploads.fenced_locked("wkr-1")
+    assert not setup.runtime._uploads.fenced_locked(setup.train)
+
+
+def test_an_owner_heard_again_after_its_loss_settles_its_later_uploads() -> None:
+    setup = _dispatched()
+    setup.succeed([setup.tree(stored=False)])
+    setup.runtime.artifact_owner_lost("wkr-1")
+    renew = setup.runtime.renewable_content_scope
+
+    record_dispatch(setup.runtime, setup.use, "wkr-1", dispatch_id="dsp-2")
+    payload = result_payload(setup.reader, setup.use, {"ok": True}, "org")
+    payload["artifacts"] = [
+        setup.file(b"later", "later.bin", stored=False).model_dump(mode="json")
+    ]
+    payload[ARTIFACTS_PENDING] = True
+    setup.runtime.mark_succeeded(setup.use, "wkr-1", payload, _TS, "dsp-2")
+
+    assert renew(setup.use, "wkr-1", "dsp-2") == "org"
+    assert renew(setup.train, "wkr-1", "dsp-1") is None
+    setup.runtime.record_artifact_upload(
+        setup.use, "wkr-1", "dsp-2", UploadReport.UPLOADED
+    )
+    later = setup.record(setup.use).artifact_upload
+    assert later is not None and later.state is ArtifactDurability.DURABLE
+    setup.report(UploadReport.UPLOADED)
+    upload = setup.record(setup.train).artifact_upload
+    assert upload is not None and upload.pending
 
 
 def test_a_staged_success_for_a_task_no_longer_held_is_answered() -> None:
@@ -706,12 +740,29 @@ def test_a_freed_tasks_upload_is_answered_from_its_stored_record() -> None:
 
 def test_a_success_accepted_for_an_owner_that_left_is_settled_from_the_store() -> None:
     setup = _dispatched()
-    setup.workers.registered.discard("wkr-1")
+    setup.runtime.artifact_owner_lost("wkr-1", departed=True)
 
-    setup.succeed([setup.tree(stored=True)])
+    with mock.patch.object(setup.workers, "get_worker", side_effect=AssertionError):
+        setup.succeed([setup.tree(stored=True)])
 
     assert setup.train in setup.runtime._reconciler._queued
     assert setup.runtime.renewable_content_scope(setup.train, "wkr-1", "dsp-1") is None
+
+
+def test_a_replayed_success_of_a_departed_owner_is_settled_from_the_store() -> None:
+    setup = _dispatched()
+    setup.workers.registered.discard("wkr-1")
+    restarted = _runtime(setup.registry, setup.workers, setup.reader)
+    asyncio.run(restarted.rehydrate([setup.workflow_id]))
+    payload = result_payload(setup.reader, setup.train, {"ok": True}, "org")
+    payload["artifacts"] = [setup.tree(stored=True).model_dump(mode="json")]
+    payload[ARTIFACTS_PENDING] = True
+
+    restarted.mark_succeeded(setup.train, "wkr-1", payload, _TS, "dsp-1")
+
+    upload = restarted.get_record(setup.train)
+    assert upload is not None and upload.artifact_upload is not None
+    assert setup.train in restarted._reconciler._queued
 
 
 def test_a_store_check_remembers_the_objects_it_found_across_retries() -> None:

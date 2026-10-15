@@ -20,7 +20,7 @@ from server.telemetry.tracing import (
     ControlPlaneTracer,
     format_traceparent,
 )
-from shared.content import ContentReference
+from shared.content import ContentReference, HeldCopy
 from shared.harness import (
     AgentEpisodeDispatch,
     BoundaryEventKind,
@@ -1193,15 +1193,23 @@ class TaskRuntime:
             self._uploads.track_locked(record)
 
     async def _reconcile_departed_owners(self) -> None:
-        """Settle from the store the uploads owed by worker registrations that ended
-        while this root was down; one still registered keeps its upload."""
-        owners = sorted(self.artifact_upload_owners())
-        if not owners:
+        """Note the worker registrations that ended while this root was down, among
+        those owing uploads or holding a dispatch whose success may yet replay, and
+        settle from the store the uploads they owed; one still registered keeps its
+        upload."""
+        with self._lock:
+            workers = self._uploads.owners_locked() | {
+                record.assigned_worker
+                for record in self._tasks.values()
+                if record.status == TaskStatus.DISPATCHED and record.assigned_worker
+            }
+        candidates = sorted(workers)
+        if not candidates:
             return
-        workers = await self._worker_registry.get_workers_heard_async(owners)
-        for owner, (worker, _) in zip(owners, workers, strict=True):
+        found = await self._worker_registry.get_workers_heard_async(candidates)
+        for worker_id, (worker, _) in zip(candidates, found, strict=True):
             if worker is None:
-                self.artifact_owner_lost(owner)
+                self.artifact_owner_lost(worker_id, departed=True)
 
     async def _restore_artifacts(self, workflow_ids: Sequence[str]) -> None:
         """Load the artifact catalog of each restored task that published one: all of
@@ -3776,6 +3784,9 @@ class TaskRuntime:
         if not payload.get(ARTIFACTS_PENDING) or not worker_id or not dispatch_id:
             return
         now = time.time()
+        # A success replayed after its registration ended owes what only the store
+        # can settle.
+        departed = self._uploads.departed_locked(worker_id)
         for record in records:
             receipt, record.early_upload_receipt = record.early_upload_receipt, None
             if not any(
@@ -3796,6 +3807,9 @@ class TaskRuntime:
                         self._unuploadable_locked(record.task_id, worker_id, receipt)
             record.artifact_upload = upload
             self._uploads.track_locked(record)
+            if departed and upload.pending:
+                self._uploads.fence_locked(record.task_id)
+                self._reconciler.request(record.task_id)
 
     def _unuploadable_locked(
         self, task_id: str, worker_id: str, receipt: EarlyUploadReceipt | None = None
@@ -3983,7 +3997,7 @@ class TaskRuntime:
             self._committer.close_locked(record.workflow_id)
             return
         owner = worker_id == upload.owner_id and not self._uploads.fenced_locked(
-            worker_id
+            task_id
         )
         match report:
             case UploadReport.UPLOADED if owner:
@@ -4048,12 +4062,15 @@ class TaskRuntime:
         self._committer.settle_if_done_locked(record.workflow_id)
         self._cv.notify_all()
 
-    def artifact_owner_lost(self, worker_id: str) -> None:
-        """Fence a departed worker registration and settle from the store every upload
-        it owed."""
+    def artifact_owner_lost(self, worker_id: str, departed: bool = False) -> None:
+        """Fence the uploads a worker registration declared lost owes and settle each
+        from the store; one that ``departed`` for good owes nothing it reports
+        later."""
         with self._lock:
             owed = self._uploads.owed_by_locked(worker_id)
-            self._uploads.fence_locked(worker_id)
+            self._uploads.fence_locked(*owed)
+            if departed:
+                self._uploads.depart_locked(worker_id)
         if owed:
             self._logger.info(
                 "Worker %s left owing %d artifact upload(s); checking the store",
@@ -4073,18 +4090,25 @@ class TaskRuntime:
                 return
         self._retry_awaiting(worker_id)
 
-    def artifact_owner_holds(self, worker_id: str) -> None:
-        """Place again the tasks waiting on uploads a worker owes, once it reports
-        holding new copies, so they read from it before the uploads land."""
+    def artifact_owner_holds(self, worker_id: str, added: Collection[HeldCopy]) -> None:
+        """Place again the tasks waiting on uploads a worker owes whose missed inputs it
+        now reports holding, so they read from it before the uploads land."""
+        copies = set(added)
         with self._lock:
-            if not self._uploads.owes_locked(worker_id):
+            if not self._uploads.owes_locked(worker_id) or not (
+                self._inputs.awaits_any_locked(
+                    set(self._uploads.owed_by_locked(worker_id)), copies
+                )
+            ):
                 return
-        self._retry_awaiting(worker_id)
+        self._retry_awaiting(worker_id, copies)
 
-    def _retry_awaiting(self, worker_id: str) -> None:
+    def _retry_awaiting(
+        self, worker_id: str, copies: set[HeldCopy] | None = None
+    ) -> None:
         with self._transition():
             self._inputs.retry_awaiting_locked(
-                set(self._uploads.owed_by_locked(worker_id))
+                set(self._uploads.owed_by_locked(worker_id)), copies
             )
 
     def artifact_upload_owners(self) -> set[str]:
@@ -4301,12 +4325,10 @@ class TaskRuntime:
         """
         with self._lock:
             record = self._tasks.get(task_id)
-            if record is None:
-                return None
-            if self._fence.dispatch_live_locked(record, worker_id, dispatch_id):
+            if record is not None and self._fence.dispatch_live_locked(
+                record, worker_id, dispatch_id
+            ):
                 return record.org_id
-            if self._uploads.fenced_locked(worker_id):
-                return None
             for owing_id in self._uploads.owed_for_dispatch_locked(dispatch_id):
                 owing = self._tasks.get(owing_id)
                 if (
@@ -4314,8 +4336,9 @@ class TaskRuntime:
                     and (upload := owing.artifact_upload) is not None
                     and upload.owner_id == worker_id
                     and upload.dispatch_task_id == task_id
+                    and not self._uploads.fenced_locked(owing_id)
                 ):
-                    return record.org_id
+                    return owing.org_id
             return None
 
     def content_binding_authorizes(
@@ -5390,20 +5413,7 @@ class TaskRuntime:
             )
         if outcome.status is None:
             self._answer_unheld_success(task_id, worker_id, payload, dispatch_id)
-        elif payload.get(ARTIFACTS_PENDING) and worker_id is not None:
-            self._check_owner_registered(worker_id)
         return outcome
-
-    def _check_owner_registered(self, worker_id: str) -> None:
-        """Settle from the store the uploads a worker registration owes once it is no
-        longer registered, as when its success is replayed after it left."""
-        with self._lock:
-            if not self._uploads.owes_locked(worker_id) or self._uploads.fenced_locked(
-                worker_id
-            ):
-                return
-        if self._worker_registry.get_worker(worker_id) is None:
-            self.artifact_owner_lost(worker_id)
 
     def _apply_success(
         self,

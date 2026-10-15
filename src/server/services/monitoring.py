@@ -1037,7 +1037,7 @@ class EventMonitor:
                 else:
                     self._content_authority.on_holding(worker_id, holding)
                     if holding.added:
-                        self._runtime.artifact_owner_holds(worker_id)
+                        self._runtime.artifact_owner_holds(worker_id, holding.added)
             case "CONTENT_ACCESS_REQUEST" if self._content_access is not None:
                 task_id = str(event.payload["task_id"])
                 dispatch_id = event.payload.get("dispatch_id")
@@ -1100,7 +1100,7 @@ class EventMonitor:
                     self._schedule_deregister(
                         ResourceKind.WORKER, worker_id, self._actor_from_event(event)
                     )
-                    self._runtime.artifact_owner_lost(worker_id)
+                    self._runtime.artifact_owner_lost(worker_id, departed=True)
                     if self._watchdog.enabled and self._watchdog.is_marked_dead(
                         worker_id
                     ):

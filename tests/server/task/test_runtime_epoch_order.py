@@ -45,6 +45,9 @@ class _WorkflowRegistryStub:
 
 
 class _WorkerRegistryStub:
+    async def get_workers_heard_async(self, ids: list[str]) -> list[Any]:
+        return [(self.get_worker(i), False) for i in ids]
+
     def __init__(self) -> None:
         self.published_interrupts: list[tuple[Any, Any]] = []
 

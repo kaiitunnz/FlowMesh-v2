@@ -20,6 +20,7 @@ from dataclasses import dataclass
 
 from shared.content import ContentReference
 from shared.tasks.artifact_binding import ArtifactBinding, ArtifactKind
+from shared.utils.recent import RecentSet
 
 from ..artifact_durability import ArtifactLoss, ArtifactUpload, binding_key
 from ..models import TaskRecord
@@ -27,6 +28,9 @@ from ..results import ResultReader, ResultUnavailable, ResultUnreadable
 
 # How long an upload whose store could not be asked waits to be checked again.
 RECONCILE_RETRY_SEC = 30.0
+# How many ended registrations are remembered, for a success one reported before it
+# ended that arrives after.
+_DEPARTED_KEPT = 4096
 
 
 class ArtifactUploads:
@@ -40,8 +44,12 @@ class ArtifactUploads:
         self._last_settled: dict[str, float] = {}
         self._lost_by_dispatch: dict[str, set[str]] = defaultdict(set)
         self._lost_of: dict[str, str] = {}
-        # The owners declared lost, whose uploads only the store settles now.
+        # The uploads owed when their owner was declared lost, which only the store
+        # settles; an upload accepted from that owner later is its own.
         self._fenced: set[str] = set()
+        # The registrations known to have ended, whose successes arriving later owe
+        # uploads they can no longer make.
+        self._departed: RecentSet[str] = RecentSet(_DEPARTED_KEPT)
         # When each owner was last heard from.
         self._heard: dict[str, float] = {}
 
@@ -68,6 +76,7 @@ class ArtifactUploads:
                 self._lost_of[task_id] = upload.dispatch_id
 
     def _untrack(self, task_id: str) -> None:
+        self._fenced.discard(task_id)
         if (dispatch_id := self._lost_of.pop(task_id, None)) is not None:
             _discard(self._lost_by_dispatch, dispatch_id, task_id)
         if (owner := self._owners.pop(task_id, None)) is not None:
@@ -76,7 +85,6 @@ class ArtifactUploads:
             _discard(self._owned, worker_id, task_id)
             _discard(self._by_dispatch, dispatch_id, task_id)
             if worker_id not in self._owned:
-                self._fenced.discard(worker_id)
                 self._heard.pop(worker_id, None)
 
     def owed_for_dispatch_locked(self, dispatch_id: str | None) -> set[str]:
@@ -100,20 +108,28 @@ class ArtifactUploads:
         """Return whether a worker registration owes any upload."""
         return worker_id in self._owned
 
-    def fence_locked(self, worker_id: str) -> None:
-        """Fence an owner declared lost: it renews nothing and settles nothing."""
-        if worker_id in self._owned:
-            self._fenced.add(worker_id)
-        self._heard.pop(worker_id, None)
+    def fence_locked(self, *task_ids: str) -> None:
+        """Fence owed uploads whose owner was declared lost: it renews nothing for them
+        and settles none of them."""
+        self._fenced.update(task_id for task_id in task_ids if task_id in self._owners)
 
-    def fenced_locked(self, worker_id: str) -> bool:
-        """Return whether an owner was declared lost."""
-        return worker_id in self._fenced
+    def fenced_locked(self, task_id: str) -> bool:
+        """Return whether an upload was owed when its owner was declared lost."""
+        return task_id in self._fenced
+
+    def depart_locked(self, worker_id: str) -> None:
+        """Note a registration that ended."""
+        self._departed.add(worker_id)
+
+    def departed_locked(self, worker_id: str) -> bool:
+        """Return whether a registration is known to have ended."""
+        return worker_id in self._departed
 
     def heard_locked(self, worker_id: str, now: float, unheard_after: float) -> bool:
         """Note an owner heard from, and return whether it had gone unheard for
         ``unheard_after``."""
-        if worker_id not in self._owned or worker_id in self._fenced:
+        if self._fenced.issuperset(self._owned.get(worker_id, ())):
+            self._heard.pop(worker_id, None)
             return False
         last = self._heard.get(worker_id)
         self._heard[worker_id] = now
