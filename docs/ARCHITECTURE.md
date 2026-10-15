@@ -485,8 +485,7 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   the reference naming it, so a reference that reaches any binding names bytes that
   already outlive their producer; a task's `final` artifacts upload after the success
   that reports them (see Task artifacts). Every write is conditional on its digest key
-  being free, so a stored object is never replaced and a
-  repeated write settles on it; every read verifies size and digest before releasing its
+  being free, so a stored object is never replaced and a repeated write settles on it; every read verifies size and digest before releasing its
   last bytes. Files and peer transfers move through bounded buffers. An S3-compatible
   store must support conditional writes (`If-None-Match`) and SHA-256 part checksums,
   and a filesystem backend hard links. The outcome-finalization index lives on the
@@ -513,11 +512,10 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   how long a copy goes unused and by disk, least recently used first, and leaves both
   unbounded by default. A copy of an artifact still uploading stays until its upload
   settles, whichever worker on the node staged it. A worker reports each copy it keeps
-  or drops, and its whole
-  holding when it registers; control keeps a worker's records while it is registered,
-  and grants a read from a holder only while its heartbeat is current. A read tries the
-  local copy, then another worker's copy, then
-  the store itself. For a peer's copy the control plane checks that the requesting
+  or drops, and its whole holding when it registers; control keeps a worker's records
+  while it is registered, and grants a read from a holder only while its heartbeat is
+  current. A read tries the local copy, then another worker's copy, then the store
+  itself. For a peer's copy the control plane checks that the requesting
   worker is running the task and that it is bound to exactly that reference as an input
   or delivered outcome, resolves a live holder and a route to it, and mints one
   short-lived `chg-` grant it hands to both ends: the holder serves only a grant it was
@@ -530,8 +528,7 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   bridges opaque frames and never holds, assembles, or resolves the payload, and an
   object of `CONTENT_RELAY_TRANSFER_MAX_BYTES` or more is read from the store first
   unless the store cannot be reached or the object is still uploading. A refused,
-  expired, or replayed grant, an evicted
-  copy, a holder that is gone, or a transfer that breaks costs a read from the shared
+  expired, or replayed grant, an evicted copy, a holder that is gone, or a transfer that breaks costs a read from the shared
   store, not a failure. A transfer holds a window of the object, never the whole, and a
   copy that turns out not to be the object ends the transfer refused and is dropped. A
   worker keeps a copy of whatever it reads from a peer or the store. The cache and its
@@ -738,8 +735,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
 - **Workflow completion.** A workflow closes once, through one serialized finalizer:
   its log stream is sealed and its `flowmesh.workflow` span emitted when every task has
   durably settled and its artifacts have uploaded or been lost. The span's end is the
-  last durable finish among its tasks and their uploads, so a workflow that
-  closes again after a restart closes the same way it did the first time.
+  last durable finish among its tasks and their uploads, so a workflow that closes
+  again after a restart closes the same way it did the first time.
 - **Settled workflows leave memory.** Once a workflow has settled, is closed, has its
   logs archived and its side effects delivered, and every resident invocation it raised
   has retired, the root stores a certified copy of what its reads derive from and frees
