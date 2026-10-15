@@ -13,6 +13,8 @@ from ._constants import API_VERSION_PREFIX, DEFAULT_BASE_URL, STREAM_TIMEOUT, US
 from .config import DEFAULT_CONFIG_PATH, FlowMeshConfig
 from .exceptions import (
     APIError,
+    ArtifactLostError,
+    ArtifactPendingError,
     AuthenticationError,
     ConfigNotFoundError,
     ContentUnavailableError,
@@ -43,6 +45,8 @@ _CODED_ERRORS: dict[str, type[APIError]] = {
     "output_pending": OutputPendingError,
     "content_unavailable": ContentUnavailableError,
     "output_unreadable": OutputUnreadableError,
+    "artifact_pending": ArtifactPendingError,
+    "artifact_lost": ArtifactLostError,
 }
 
 

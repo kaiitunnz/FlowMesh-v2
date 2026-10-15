@@ -18,6 +18,7 @@ from fastapi import FastAPI, HTTPException, status
 
 from server.routers.v1 import results as results_router
 from server.task import artifact_reads
+from server.task.artifact_durability import ArtifactLoss, ArtifactUpload
 from server.task.results import ResultReader, ResultUnavailable, ResultUnreadable
 from shared.content import (
     ContentReference,
@@ -48,6 +49,7 @@ class _Runtime:
         self.result_reader = ResultReader(self.store)
         self.bindings: dict[str, dict[tuple[str, str], ArtifactBinding]] = {}
         self.results: dict[str, bytes] = {}
+        self.uploads: dict[str, ArtifactUpload] = {}
 
     def artifact_bindings(
         self, task_id: str, revision: str | None = None
@@ -59,6 +61,9 @@ class _Runtime:
             for key, binding in bindings.items()
             if revision is None or key[0] == revision
         }
+
+    def artifact_upload_of(self, task_id: str) -> ArtifactUpload | None:
+        return self.uploads.get(task_id)
 
     def read_result_bytes(self, task_id: str) -> bytes | None:
         return self.results.get(task_id)
@@ -704,3 +709,98 @@ def test_the_download_routes_declare_their_binary_responses() -> None:
     for operation in (files, bundle):
         (revision,) = (p for p in operation["parameters"] if p["name"] == "revision")
         assert revision["schema"]["pattern"] == "^(final|step-(0|[1-9][0-9]*))$"
+
+
+def _owed(runtime: _Runtime, lost: dict[str, ArtifactLoss] | None = None) -> None:
+    upload = ArtifactUpload(dispatch_id="dsp-1", owner_id="wkr-1")
+    runtime.uploads["tsk-1"] = upload if lost is None else upload.settle(lost, 1.0)
+
+
+async def _listed(runtime: _Runtime) -> dict[str, Any]:
+    page = await results_router.list_result_artifacts(
+        task_id="tsk-1",
+        revision=None,
+        principal=cast(Any, None),
+        runtime=cast(Any, runtime),
+        logger=_LOGGER,
+    )
+    return {
+        f"{a.revision}/{a.name}": (a.durability.value, a.durability_error)
+        for a in page.artifacts
+    }
+
+
+@pytest.mark.anyio
+async def test_the_listing_says_where_each_artifact_stands(
+    runtime: _Runtime, published: dict[str, ArtifactBinding]
+) -> None:
+    assert {d for d, _ in (await _listed(runtime)).values()} == {"durable"}
+
+    _owed(runtime)
+    pending = await _listed(runtime)
+    assert pending["step-2/checkpoints"] == ("durable", None)
+    assert {pending[k][0] for k in pending if k.startswith("final/")} == {"pending"}
+
+    loss = ArtifactLoss(message="final_model is gone")
+    _owed(runtime, {"final\0final_model": loss})
+    lost = await _listed(runtime)
+    assert lost["final/final_model"][0] == "lost"
+    assert lost["final/final_model.tar.gz"][0] == "lost"
+    assert lost["final/final_model"][1].code == "artifact_lost"
+    assert lost["final/notes.txt"] == ("durable", None)
+
+
+@pytest.mark.anyio
+async def test_a_pending_artifact_answers_503_and_a_lost_one_410(
+    runtime: _Runtime, published: dict[str, ArtifactBinding]
+) -> None:
+    _owed(runtime)
+    for name in ("final_model/config.json", "final_model.tar.gz", "notes.txt"):
+        with pytest.raises(HTTPException) as raised:
+            await _download(runtime, name)
+        assert raised.value.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+        assert _code(raised.value) == "artifact_pending"
+        assert raised.value.headers and "Retry-After" in raised.value.headers
+    step = await serve(
+        await _download(
+            runtime, "checkpoints/checkpoint-2/trainer_state.json", "step-2"
+        )
+    )
+    assert step.status == 200
+
+    _owed(runtime, {"final\0final_model": ArtifactLoss(message="gone")})
+    for name in ("final_model/config.json", "final_model.tar.gz"):
+        with pytest.raises(HTTPException) as raised:
+            await _download(runtime, name)
+        assert raised.value.status_code == status.HTTP_410_GONE
+        assert _code(raised.value) == "artifact_lost"
+    assert (await serve(await _download(runtime, "notes.txt"))).status == 200
+    with pytest.raises(HTTPException) as raised:
+        await _download(runtime, "final_model/absent.json")
+    assert raised.value.status_code == status.HTTP_410_GONE
+
+
+@pytest.mark.anyio
+async def test_a_bundle_refuses_pending_or_lost_artifacts_before_any_byte(
+    tmp_path: Path, runtime: _Runtime, published: dict[str, ArtifactBinding]
+) -> None:
+    _owed(runtime)
+    with pytest.raises(HTTPException) as raised:
+        await _bundle(runtime, ["artifacts"])
+    assert raised.value.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+    results_only = await serve(await _bundle(runtime, ["results"]))
+    assert set(_bundled(results_only.body)) == {"tsk-1/results.json"}
+    assert (
+        await serve(await _bundle(runtime, ["artifacts"], revision="step-2"))
+    ).status == 200
+
+    _owed(runtime, {"final\0final_model": ArtifactLoss(message="gone")})
+    with pytest.raises(HTTPException) as raised:
+        await _bundle(runtime, ["artifacts"])
+    assert raised.value.status_code == status.HTTP_410_GONE
+
+
+def _code(error: HTTPException) -> str:
+    detail: Any = error.detail
+    assert isinstance(detail, dict)
+    return detail["code"]

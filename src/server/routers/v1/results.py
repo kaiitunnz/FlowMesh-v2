@@ -4,7 +4,7 @@ import logging
 import mimetypes
 import os
 import threading
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from functools import partial
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -34,8 +34,10 @@ from shared.tasks.artifact_binding import (
     ArtifactBindings,
     ArtifactKind,
     is_revision,
+    resolve_artifact_path,
     revision_step,
 )
+from shared.tasks.artifact_upload import ArtifactDurability
 from shared.utils.atomic import is_atomic_temp
 from shared.utils.nofollow import (
     PathRefused,
@@ -63,7 +65,17 @@ from ...auth.security import (
     require_permission,
 )
 from ...hooks import ResourceAction, ResourceKind
-from ...schemas.artifacts import PublishedArtifact, PublishedArtifactList
+from ...schemas.artifacts import (
+    DurabilityError,
+    PublishedArtifact,
+    PublishedArtifactList,
+)
+from ...task.artifact_durability import (
+    ARTIFACT_LOST,
+    ARTIFACT_PENDING,
+    ArtifactLoss,
+    ArtifactUpload,
+)
 from ...task.artifact_reads import (
     ArtifactDownload,
     ArtifactNotFound,
@@ -154,8 +166,10 @@ _DOWNLOAD_RESPONSES: dict[int | str, dict[str, Any]] = {
         "description": "The range lies outside the object.",
         "headers": {"Content-Range": _header("The whole object's size.")},
     },
+    410: {"description": "The artifact was lost before its upload finished."},
     503: {
-        "description": "The content store is unreachable.",
+        "description": "The content store is unreachable, or the artifact's upload "
+        "to it is still in progress.",
         "headers": _RETRY_AFTER,
     },
 }
@@ -164,8 +178,10 @@ _BUNDLE_RESPONSES: dict[int | str, dict[str, Any]] = {
         "description": "A gzip-compressed tar of the bundled sections.",
         "content": {"application/gzip": _BINARY},
     },
+    410: {"description": "An artifact it bundles was lost before its upload finished."},
     503: {
-        "description": "The content store is unreachable, or too many bundles stream.",
+        "description": "The content store is unreachable, an artifact it bundles is "
+        "still uploading to it, or too many bundles stream.",
         "headers": _RETRY_AFTER,
     },
 }
@@ -194,10 +210,11 @@ async def list_result_artifacts(
     if revision is not None:
         _check_revision(revision)
     bindings = await _artifact_bindings(runtime, task_id, revision)
+    upload = await _artifact_upload(runtime, task_id)
     return PublishedArtifactList(
         task_id=task_id,
         artifacts=[
-            _published(binding)
+            _published(binding, upload)
             for _, binding in sorted(bindings.items(), key=_listing_order)
         ],
     )
@@ -235,6 +252,8 @@ async def download_result_file(
             await _read_result_bytes(runtime, task_id), media_type=RESULT_MEDIA_TYPE
         )
     bindings = await _artifact_bindings(runtime, task_id, revision)
+    if (found := resolve_artifact_path(bindings, revision, filename)) is not None:
+        _check_available([found[0]], await _artifact_upload(runtime, task_id), filename)
     try:
         download = await asyncio.to_thread(
             resolve_download, runtime.result_reader, bindings, revision, filename
@@ -326,6 +345,12 @@ async def download_result_bundle(
     if result is None and not bindings and not has_logs:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="result bundle not found"
+        )
+    if "artifacts" in sections:
+        _check_available(
+            [binding for (rev, _), binding in bindings.items() if rev == revision],
+            await _artifact_upload(runtime, task_id),
+            f"the artifacts at {revision}",
         )
     reader = runtime.result_reader
 
@@ -539,7 +564,54 @@ def _listing_order(item: tuple[tuple[str, str], ArtifactBinding]) -> tuple[Any, 
     return (step is None, step or 0, name)
 
 
-def _published(binding: ArtifactBinding) -> PublishedArtifact:
+async def _artifact_upload(runtime: TaskRuntime, task_id: str) -> ArtifactUpload | None:
+    try:
+        return await asyncio.to_thread(runtime.artifact_upload_of, task_id)
+    except ResultUnavailable as exc:
+        raise _store_unavailable(exc) from exc
+
+
+def _durability(
+    binding: ArtifactBinding, upload: ArtifactUpload | None
+) -> tuple[ArtifactDurability, ArtifactLoss | None]:
+    """Where an artifact's bytes are: a ``final`` artifact stands with its task's
+    upload, and anything else was stored before it was published."""
+    if upload is None or binding.revision != FINAL_REVISION:
+        return ArtifactDurability.DURABLE, None
+    return upload.durability(binding)
+
+
+def _check_available(
+    selected: Sequence[ArtifactBinding], upload: ArtifactUpload | None, what: str
+) -> None:
+    """Refuse to serve artifacts that are lost, or not yet in the store, before any
+    byte of them is read."""
+    standing = [_durability(binding, upload) for binding in selected]
+    for durability, loss in standing:
+        if durability is ArtifactDurability.LOST:
+            raise HTTPException(
+                status_code=status.HTTP_410_GONE,
+                detail={
+                    "code": ARTIFACT_LOST,
+                    "message": loss.message if loss is not None else f"{what} is lost",
+                },
+            )
+    if any(durability is ArtifactDurability.PENDING for durability, _ in standing):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": ARTIFACT_PENDING,
+                "message": f"{what} is not in the shared store yet; its upload "
+                "is still in progress",
+            },
+            headers={"Retry-After": str(_RETRY_AFTER_SEC)},
+        )
+
+
+def _published(
+    binding: ArtifactBinding, upload: ArtifactUpload | None
+) -> PublishedArtifact:
+    durability, loss = _durability(binding, upload)
     sha256 = None
     if binding.kind is ArtifactKind.FILE:
         sha256 = binding.reference.content_digest
@@ -553,6 +625,12 @@ def _published(binding: ArtifactBinding) -> PublishedArtifact:
         files=binding.files,
         sha256=sha256,
         archive_of=binding.of,
+        durability=durability,
+        durability_error=(
+            DurabilityError(code=loss.code, message=loss.message)
+            if loss is not None
+            else None
+        ),
         published_at=binding.published_at,
     )
 

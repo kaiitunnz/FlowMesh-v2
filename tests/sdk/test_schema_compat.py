@@ -14,6 +14,7 @@ from flowmesh.models import (
     BaseExecutorResult,
     CPUInfo,
     Diagnostic,
+    DurabilityError,
     GpuInfo,
     GpuPlatformInfo,
     HostInfo,
@@ -79,6 +80,7 @@ from server.registries.worker import Worker as SrvWorker
 from server.registries.worker import WorkerInfo as SrvWorkerInfo
 from server.registries.workflow import Workflow as SrvWorkflow
 from server.registries.workflow import WorkflowStatus as SrvWorkflowStatus
+from server.schemas.artifacts import DurabilityError as SrvDurabilityError
 from server.schemas.artifacts import PublishedArtifact as SrvPublishedArtifact
 from server.schemas.artifacts import PublishedArtifactList as SrvPublishedArtifactList
 from server.schemas.common import OkResponse as SrvOkResponse
@@ -262,6 +264,7 @@ MODEL_PAIRS = [
     (SrvArtifactContext, ArtifactContext),
     (SrvArtifactRef, ArtifactRef),
     (SrvPublishedArtifact, PublishedArtifact),
+    (SrvDurabilityError, DurabilityError),
     (SrvPublishedArtifactList, PublishedArtifactList),
     # Telemetry queries
     (SrvTraceSpanNode, TraceSpanNode),

@@ -55,6 +55,14 @@ class OutputUnreadableError(APIError):
     """Raised when a published output's bound content is missing or corrupt."""
 
 
+class ArtifactPendingError(APIError):
+    """Raised when an artifact is still uploading (503); retry after ``Retry-After``."""
+
+
+class ArtifactLostError(APIError):
+    """Raised when an artifact's producer was lost before its upload finished (410)."""
+
+
 class FlowMeshConnectionError(FlowMeshError):
     """Raised when the SDK cannot connect to the FlowMesh server."""
 
