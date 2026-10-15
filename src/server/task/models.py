@@ -374,7 +374,7 @@ class TaskRecord(BaseModel):
     )
     artifact_upload: ArtifactUpload | None = Field(
         default=None,
-        description="The owed upload of the final artifacts its success accepted.",
+        description="The upload of the final artifacts its success accepted.",
         exclude=True,
     )
     early_upload_receipt: EarlyUploadReceipt | None = Field(

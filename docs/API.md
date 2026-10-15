@@ -7,8 +7,8 @@ Workflow and task statuses (used in payloads and filters):
 `PENDING`, `DISPATCHED`, `FAILED`, `CANCELLED`, `DONE`. A workflow that failed
 outside any of its tasks, as a loop past its iteration budget does, carries the
 typed reason as its `failure`. A workflow whose tasks are all `DONE` or `CANCELLED`
-reads `PENDING` or `DISPATCHED` while their artifacts upload, and
-`pending_artifact_uploads` counts the tasks still uploading. Worker statuses:
+reads `PENDING` while their artifacts upload, and `pending_artifact_uploads` counts
+the tasks still uploading. Worker statuses:
 `STARTING`, `IDLE`, `BUSY`, `STOPPING`, `STOPPED`.
 
 ## Authentication

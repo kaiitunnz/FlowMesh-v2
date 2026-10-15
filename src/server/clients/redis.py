@@ -112,7 +112,7 @@ def workflow_cancelled_tasks_key(workflow_id: str) -> str:
 
 
 def workflow_uploads_key(workflow_id: str) -> str:
-    """Return the key of the set of a workflow's tasks whose artifacts still upload."""
+    """Return the key of the set of a workflow's tasks still uploading artifacts."""
     return f"workflow:{workflow_id}:uploads"
 
 

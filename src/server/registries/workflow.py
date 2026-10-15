@@ -198,7 +198,7 @@ class Workflow(BaseModel):
     )
     pending_artifact_uploads: int = Field(
         default=0,
-        description="How many of its tasks' artifacts are still uploading.",
+        description="How many of its tasks are still uploading artifacts.",
     )
 
 

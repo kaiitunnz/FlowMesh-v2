@@ -481,11 +481,12 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   session a worker reaches content under covers one scope's prefix rather than the
   bucket. Its credential also needs list access on the bucket for a missing object to
   read as missing. It is a service beside the fabric, never the root process: the root
-  and its supervisors hold no payload. A worker writes an object there before it reports
-  the reference naming it, so a reference that reaches any binding names bytes that
-  already outlive their producer; a task's `final` artifacts upload after the success
-  that reports them (see Task artifacts). Every write is conditional on its digest key
-  being free, so a stored object is never replaced and a repeated write settles on it; every read verifies size and digest before releasing its
+  and its supervisors hold no payload. Apart from a task's `final` artifacts, which
+  upload after the success that reports them (see Task artifacts), a worker writes an
+  object there before it reports the reference naming it, so a reference that reaches
+  any other binding names bytes that already outlive their producer. Every write is
+  conditional on its digest key being free, so a stored object is never replaced and a
+  repeated write settles on it; every read verifies size and digest before releasing its
   last bytes. Files and peer transfers move through bounded buffers. An S3-compatible
   store must support conditional writes (`If-None-Match`) and SHA-256 part checksums,
   and a filesystem backend hard links. The outcome-finalization index lives on the
@@ -515,12 +516,12 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   or drops, and its whole holding when it registers; control keeps a worker's records
   while it is registered, and grants a read from a holder only while its heartbeat is
   current. A read tries the local copy, then another worker's copy, then the store
-  itself. For a peer's copy the control plane checks that the requesting
-  worker is running the task and that it is bound to exactly that reference as an input
-  or delivered outcome, resolves a live holder and a route to it, and mints one
-  short-lived `chg-` grant it hands to both ends: the holder serves only a grant it was
-  handed, once, for that exact object, and the requester verifies the digest and size
-  before anything reads the bytes. With trusted peer transports enabled
+  itself. For a peer's copy the control plane checks that the requesting worker is
+  running the task and that it is bound to exactly that reference as an input or
+  delivered outcome, resolves a live holder and a route to it, and mints one short-lived
+  `chg-` grant it hands to both ends: the holder serves only a grant it was handed,
+  once, for that exact object, and the requester verifies the digest and size before
+  anything reads the bytes. With trusted peer transports enabled
   (`NETWORK_PLANE_PEER_ENABLED`, off by default), the requester dials the holder's node
   (`node_relay`), or the holder itself where workers are declared routable
   (`worker_direct`), bypassing the root, and reads such a holder before the store at any
@@ -528,13 +529,13 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   bridges opaque frames and never holds, assembles, or resolves the payload, and an
   object of `CONTENT_RELAY_TRANSFER_MAX_BYTES` or more is read from the store first
   unless the store cannot be reached or the object is still uploading. A refused,
-  expired, or replayed grant, an evicted copy, a holder that is gone, or a transfer that breaks costs a read from the shared
-  store, not a failure. A transfer holds a window of the object, never the whole, and a
-  copy that turns out not to be the object ends the transfer refused and is dropped. A
-  worker keeps a copy of whatever it reads from a peer or the store. The cache and its
-  transfers are on wherever the network plane is; `CONTENT_HYDRATION_ENABLED=false` turns
-  them off. A worker with the cache on under a control with it off reads from the store.
-  See [`NETWORK_PLANE.md`](NETWORK_PLANE.md).
+  expired, or replayed grant, an evicted copy, a holder that is gone, or a transfer that
+  breaks costs a read from the shared store, not a failure. A transfer holds a window of
+  the object, never the whole, and a copy that turns out not to be the object ends the
+  transfer refused and is dropped. A worker keeps a copy of whatever it reads from a
+  peer or the store. The cache and its transfers are on wherever the network plane is;
+  `CONTENT_HYDRATION_ENABLED=false` turns them off. A worker with the cache on under a
+  control with it off reads from the store. See [`NETWORK_PLANE.md`](NETWORK_PLANE.md).
 - **Task results.** A task's result lives in the shared content store: its worker writes
   the result envelope there under the task's store access before it reports success, and
   the success binds that reference once, at the commit that settles the task, so a retry,
@@ -550,22 +551,23 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   its artifacts directory, a file as one object, a directory as a tree manifest naming
   its files, and each model archive its result declares as a `.tar.gz` view the root
   builds from the tree on download. A training run publishes each checkpoint it saves as
-  `step-<n>` while it runs. The worker reports success once it has hashed the `final`
-  files and stored each tree's manifest, and uploads the files afterwards, so the task is
-  `DONE` while its workflow stays open until every upload settles. An upload whose worker
-  registration ends before finishing it settles from what the store holds: an artifact
-  with a file missing is lost, its task stays `DONE`, and its workflow fails with an
-  `artifact_lost` reason while its other work runs on. Each name is published once per
-  revision and its first publication stands, so a retry never replaces what an earlier
-  attempt published. The catalog is stored with the task's record, so a freed workflow's
-  artifacts list and download too. A consumer's worker hydrates each upstream artifact
-  its task reads before the task runs, as it does any consumed value, from a holder's
-  copy while it is still uploading; a model archive loads as the directory it archives.
-  A read that finds no copy waits, spending no attempt, until the upload settles, and a
-  reader of a lost artifact fails as `input_unreadable`, naming it. A dispatch waits out
-  a store outage for a tree its spec loads, and fails on a missing one. A training run's
-  save waits while two checkpoints are publishing, and a run whose checkpoint cannot be
-  published stops at its next save and fails.
+  `step-<n>` into the shared content store while it runs. The worker reports success
+  once it has hashed the `final` files and stored each tree's manifest, and uploads the
+  files afterwards, so the task is `DONE` while its workflow does not finish until every
+  upload settles. An upload whose worker registration ends before finishing it settles
+  from what the store holds: an artifact with a file missing is lost, its task stays
+  `DONE`, and its workflow fails with an `artifact_lost` reason while its other work
+  runs on. Each name is published once per revision and its first publication stands, so
+  a retry never replaces what an earlier attempt published. The catalog is stored with
+  the task's record, so a freed workflow's artifacts list and download too. A consumer's
+  worker hydrates each upstream artifact its task reads before the task runs, as it does
+  any consumed value, from a holder's copy while it is still uploading; a model archive
+  loads as the directory it archives. A read that finds no copy waits, spending no
+  attempt, until the upload settles, and a reader of a lost artifact fails as
+  `input_unreadable`, naming it. A dispatch waits out a store outage for a tree its spec
+  loads, and fails on a missing one. A training run's save waits while two checkpoints
+  are publishing, and a run whose checkpoint cannot be published stops at its next save
+  and fails.
 - **Agent exports.** An agent declares workspace paths to publish as `exports`. When the
   agent completes, its worker copies them out of the quiesced workspace into the task's
   artifacts, which publish like any other. A missing export fails the agent unless it is
@@ -576,9 +578,10 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   before anything validates or runs the task. A worker that cannot reach the store names
   the inputs it could not read. Control re-reads each named input the task consumes with
   its own store access: it holds the task while it cannot reach the store either, fails
-  it when the content is missing or corrupt, and otherwise queues it again, in every case
-  without spending an attempt or blaming the worker. Its next placement passes over that
-  worker while another idle worker can take it.
+  it when the content is missing or corrupt, holds it while an artifact it reads is
+  still uploading, and otherwise queues it again, in every case without spending an
+  attempt or blaming the worker. Its next placement passes over that worker while
+  another idle worker can take it.
 - **Published outputs.** A leaf declares `result: {visibility: published}` to publish its
   value, and a spawn region declares it to publish its children's results as a collection
   keyed by child index within each spawning scope. A spawn whose input failed publishes
