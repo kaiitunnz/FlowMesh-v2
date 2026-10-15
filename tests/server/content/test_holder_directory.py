@@ -12,7 +12,6 @@ from server.clients.redis import (
     CONTENT_HELD_WORKERS_KEY,
     WORKERS_SET_KEY,
     content_held_key,
-    content_holders_key,
 )
 from server.content import ContentHolderDirectory
 from server.content import directory as directory_module
@@ -52,17 +51,6 @@ def test_a_report_for_a_worker_no_longer_registered_writes_nothing() -> None:
     assert directory.holders(*_A) == []
     assert not client.sync.exists(content_held_key("wkr-9"))
     assert directory.applied_seq("wkr-9") == 0
-
-
-def test_a_kept_copy_s_record_does_not_inherit_an_expiring_key() -> None:
-    directory, client = _directory("wkr-1")
-    key = content_holders_key(*_A)
-    client.sync.hash_set(key, {"wkr-0": "{}"})
-    client.sync.expire(key, 600)
-
-    directory.apply("wkr-1", node_id="nde-1", generation=1, added=[_A])
-
-    assert client.sync.ttl(key) == -1
 
 
 def test_dropping_a_copy_removes_its_record_and_notes_the_report() -> None:

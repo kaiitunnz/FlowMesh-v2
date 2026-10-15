@@ -37,8 +37,7 @@ _CHUNK = 256
 
 # Applies one chunk of a registered worker's holding changes, and its report number.
 # A worker that is no longer registered gets nothing written, so a late report cannot
-# bring back records its sweep removed. An object key written before records stopped
-# expiring may still carry a TTL, which a kept copy's record must not inherit.
+# bring back records its sweep removed.
 _APPLY = """
 if redis.call('SISMEMBER', KEYS[1], ARGV[1]) == 0 then
     return 0
@@ -49,7 +48,6 @@ for i = 5, #KEYS do
     local member = ARGV[2 * (i - 5) + 5]
     if op == '+' then
         redis.call('HSET', KEYS[i], ARGV[1], ARGV[2])
-        redis.call('PERSIST', KEYS[i])
         redis.call('SADD', KEYS[3], member)
     else
         redis.call('HDEL', KEYS[i], ARGV[1])

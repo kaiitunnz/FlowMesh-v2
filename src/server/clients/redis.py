@@ -298,7 +298,7 @@ SSH_RELAY_ROOT_CURSOR_KEY = "sh:root:up_cursor"
 
 
 def content_holders_key(scope: str, digest: str) -> str:
-    return f"ct:holders:{scope}:{digest}"
+    return f"ct:object-holders:{scope}:{digest}"
 
 
 def content_held_key(worker_id: str) -> str:
