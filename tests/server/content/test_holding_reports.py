@@ -369,3 +369,21 @@ def test_a_late_report_for_an_unregistered_worker_keeps_nothing_here() -> None:
     )
 
     assert authority._tracked() == set()
+
+
+def test_a_restarted_root_asks_again_for_a_gap_whose_request_it_forgot() -> None:
+    redis = fake_redis_client(fakeredis.FakeServer())
+    before, _, _ = _setup("wkr-1", redis=redis)
+    asyncio.run(
+        before.record_holding("wkr-1", HoldingReport(seq=1, added=(_A,), whole=True))
+    )
+    asyncio.run(before.record_holding("wkr-1", HoldingReport(seq=3, added=(_B,))))
+
+    after, workers, directory = _setup("wkr-1", redis=redis)
+    for _ in range(2):
+        asyncio.run(after.check_holding("wkr-1", 3))
+
+    # The gap's changes landed, and the number before the gap stays applied.
+    assert _held(directory, _B) == ["wkr-1"]
+    assert directory.applied_seq("wkr-1") == 1
+    assert workers.resyncs() == ["wkr-1"]

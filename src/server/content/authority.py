@@ -233,8 +233,8 @@ class ContentHydrationAuthority:
 
         A report already applied, or one ahead of the worker's first whole report,
         changes nothing. A whole report replaces the worker's records whatever its
-        number; any other that skips a number is applied and the worker is asked for
-        its whole holding.
+        number; any other that skips a number is applied, its number left unapplied
+        until a whole report, and the worker is asked for its whole holding.
         """
         async with self._serial_for(worker_id):
             worker = await self._workers.get_worker_async(worker_id)
@@ -247,6 +247,10 @@ class ContentHydrationAuthority:
             # was numbered under the registration before and its whole report covers it.
             if not report.whole and (applied == 0 or report.seq <= applied):
                 return
+            # A report past a missing one is applied but not noted as applied, so the
+            # gap stays visible to a heartbeat until a whole report closes it, even
+            # across a restart that forgets the request for it.
+            contiguous = report.whole or report.seq == applied + 1
             if report.whole:
                 recorded = await self._directory.replace_async(
                     worker_id,
@@ -262,15 +266,16 @@ class ContentHydrationAuthority:
                     generation=worker.incarnation,
                     added=report.added,
                     dropped=report.dropped,
-                    seq=report.seq,
+                    seq=report.seq if contiguous else None,
                 )
             if not recorded:
                 return
-            self._applied[worker_id] = report.seq
-            self._behind.pop(worker_id, None)
+            if contiguous:
+                self._applied[worker_id] = report.seq
+                self._behind.pop(worker_id, None)
             if report.whole:
                 self._asked.pop(worker_id, None)
-            elif report.seq != applied + 1:
+            elif not contiguous:
                 await self._request_holding(
                     worker, f"report {report.seq} followed {applied}"
                 )
