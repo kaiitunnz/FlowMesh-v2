@@ -125,6 +125,9 @@ class _Workers:
     def registered(self) -> list[str]:
         return list(self._live)
 
+    async def get_worker_ids_async(self) -> set[str]:
+        return set(self._live)
+
     def restart(self, worker_id: str) -> None:
         self._live[worker_id] = self._live[worker_id] + 1
 

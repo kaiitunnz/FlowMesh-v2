@@ -86,9 +86,9 @@ class WorkerContentPlane:
         )
 
     @property
-    def holding_seq(self) -> int:
-        """The number of the last holding report this worker sent, 0 without a cache."""
-        return self._lane.store.holding_seq if self._lane is not None else 0
+    def holding_seq(self) -> int | None:
+        """The number of this worker's last holding report, None without a cache."""
+        return self._lane.store.holding_seq if self._lane is not None else None
 
     def flush_holding(self) -> None:
         """Send the holding changes this worker's cache is collecting."""

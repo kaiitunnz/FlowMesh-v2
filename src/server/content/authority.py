@@ -33,7 +33,7 @@ from enum import StrEnum
 from typing import Any
 
 from shared.content import (
-    HOLDING_RESYNC_FRAME,
+    HOLDING_RESYNC_FRAME_KIND,
     ContentCarriagePlan,
     ContentHydrationGrant,
     ContentPeerRoute,
@@ -66,8 +66,8 @@ BindingCheck = Callable[[str, str, ContentReference], bool]
 
 _PEER_TRANSPORTS = frozenset({Transport.WORKER_DIRECT, Transport.NODE_RELAY})
 
-# How often the records of workers no longer registered are swept.
-HOLDER_RECONCILE_SEC = 60.0
+# How often the records of unregistered workers are swept.
+_SWEEP_INTERVAL_SEC = 60.0
 
 # Heartbeats in a row naming a holding report not yet applied before the worker is
 # asked for its whole holding; a heartbeat can overtake a report still being applied.
@@ -148,19 +148,24 @@ class ContentHydrationAuthority:
         # When each worker was asked for a whole holding it has not reported yet.
         self._asked: dict[str, float] = {}
         self._serial: dict[str, asyncio.Lock] = {}
-        self._serial_loop: asyncio.AbstractEventLoop | None = None
-        self._reconcile: asyncio.Task[None] | None = None
+        self._sweeping: asyncio.Task[None] | None = None
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
-        """Handle every request on ``loop``, the server's own, and sweep there the
-        records of workers that are no longer registered."""
+        """Handle every request on ``loop``, the server's own."""
         self._loop = loop
-        self._reconcile = loop.create_task(self._keep_holders_registered())
+
+    def start(self) -> None:
+        """Sweep the records of unregistered workers on the bound loop, now and on a
+        cadence."""
+        if self._loop is None or self._sweeping is not None:
+            return
+        self._sweeping = self._loop.create_task(self._sweep_on_cadence())
 
     def shutdown(self) -> None:
         """Stop sweeping."""
-        if self._reconcile is not None and self._loop is not None:
-            self._loop.call_soon_threadsafe(self._reconcile.cancel)
+        if self._sweeping is not None:
+            self._sweeping.cancel()
+            self._sweeping = None
 
     def on_holding(self, worker_id: str, report: HoldingReport) -> None:
         """Take a worker's holding report off the calling thread."""
@@ -234,6 +239,8 @@ class ContentHydrationAuthority:
         async with self._serial_for(worker_id):
             worker = await self._workers.get_worker_async(worker_id)
             if worker is None:
+                # Keeps nothing for a worker its sweep may already have forgotten.
+                self._forget(worker_id)
                 return
             applied = await self._applied_seq(worker_id)
             # A registration reports its whole holding first, so a report before that
@@ -297,26 +304,36 @@ class ContentHydrationAuthority:
                 )
 
     async def sweep_unregistered(self) -> int:
-        """Remove the records of every worker no longer registered, and return how
-        many workers that was."""
+        """Remove the records of every unregistered worker, and what is kept here for
+        it, and return how many workers had records."""
         retired = await self._directory.unregistered_async()
         for worker_id in retired:
             async with self._serial_for(worker_id):
                 swept = await self._directory.sweep_async(worker_id)
-            self._applied.pop(worker_id, None)
-            self._behind.pop(worker_id, None)
-            self._asked.pop(worker_id, None)
-            self._serial.pop(worker_id, None)
+            self._forget(worker_id)
             self._logger.info("swept %d content holder records of %s", swept, worker_id)
+        if tracked := self._tracked():
+            registered = await self._workers.get_worker_ids_async()
+            for worker_id in tracked - registered:
+                self._forget(worker_id)
         return len(retired)
 
-    async def _keep_holders_registered(self) -> None:
+    async def _sweep_on_cadence(self) -> None:
         while True:
             try:
                 await self.sweep_unregistered()
             except Exception:
                 self._logger.exception("sweeping content holder records failed")
-            await asyncio.sleep(HOLDER_RECONCILE_SEC)
+            await asyncio.sleep(_SWEEP_INTERVAL_SEC)
+
+    def _tracked(self) -> set[str]:
+        return {*self._applied, *self._behind, *self._asked, *self._serial}
+
+    def _forget(self, worker_id: str) -> None:
+        self._applied.pop(worker_id, None)
+        self._behind.pop(worker_id, None)
+        self._asked.pop(worker_id, None)
+        self._serial.pop(worker_id, None)
 
     async def _applied_seq(self, worker_id: str) -> int:
         if (applied := self._applied.get(worker_id)) is None:
@@ -325,11 +342,7 @@ class ContentHydrationAuthority:
         return applied
 
     def _serial_for(self, worker_id: str) -> asyncio.Lock:
-        """The lock ordering one worker's holding work, on the loop running it."""
-        loop = asyncio.get_running_loop()
-        if loop is not self._serial_loop:
-            self._serial = {}
-            self._serial_loop = loop
+        """The lock ordering one worker's holding work."""
         return self._serial.setdefault(worker_id, asyncio.Lock())
 
     async def _request_holding(self, worker: Worker, reason: str) -> None:
@@ -339,7 +352,7 @@ class ContentHydrationAuthority:
         self._logger.info(
             "asking %s for its whole content holding: %s", worker.id, reason
         )
-        await self._relay(worker, HOLDING_RESYNC_FRAME, {})
+        await self._relay(worker, HOLDING_RESYNC_FRAME_KIND, {})
 
     async def authorize(
         self,

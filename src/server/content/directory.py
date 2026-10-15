@@ -2,12 +2,11 @@
 
 Location evidence, and only that. A holder record says a worker reported keeping a copy
 of an object; it is not a binding, does not keep the object alive, and confers no right
-to read it — a reader still needs a grant, which is minted against the consumer binding
-rather than against this. A worker reports a copy when it keeps it and when it drops
-it, so a record stays while the worker that reported it is registered. A reader still
-checks that worker's liveness, and the records of a worker that is no longer registered
-are swept: each worker's records are indexed under it, so they leave without a walk of
-every object.
+to read it — a reader needs a grant, which is minted against the consumer binding. A
+worker reports a copy when it keeps it and when it drops it, and its records last while
+it is registered: a reader checks the holder's registration, and the records of an
+unregistered worker are swept. Each worker's records are indexed under it, so a sweep
+walks only that worker's copies.
 
 An object may have several holders: a reference names bytes, and the same bytes written
 in the same scope on two workers are the same object, so resolving one holder is a
@@ -32,12 +31,12 @@ from ..clients.redis import (
 )
 
 # Copies per scripted round trip: the loop serving every content request runs other
-# work between chunks, so a large holding never holds it for long.
+# work between chunks, so a large holding never blocks it for long.
 _CHUNK = 256
 
 # Applies one chunk of a registered worker's holding changes, and its report number.
-# A worker that is no longer registered gets nothing written, so a late report cannot
-# bring back records its sweep removed.
+# An unregistered worker gets nothing written, so a late report cannot bring back
+# records its sweep removed.
 _APPLY = """
 if redis.call('SISMEMBER', KEYS[1], ARGV[1]) == 0 then
     return 0
@@ -60,7 +59,8 @@ end
 return 1
 """
 
-# Deletes a holder's field only while it still records the given incarnation.
+# Deletes a holder's field, and its entry in the worker's index, only while the field
+# records the given incarnation.
 _FORGET_GENERATION = """
 local value = redis.call('HGET', KEYS[1], ARGV[1])
 if not value then
@@ -89,8 +89,7 @@ class ContentHolderRecord:
 
 
 class ContentHolderDirectory:
-    """The holders each object was reported on, kept per object and indexed per
-    worker."""
+    """Each object's reported holders, indexed per worker."""
 
     def __init__(self, redis: RedisClient) -> None:
         self._rds = redis
@@ -204,34 +203,28 @@ class ContentHolderDirectory:
         Only the report of that worker incarnation goes.
         """
         self._rds.sync.eval(
-            _FORGET_GENERATION, *_forget_args(scope, digest, worker_id, generation)
+            _FORGET_GENERATION, 2, *_forget_args(scope, digest, worker_id, generation)
         )
 
     async def forget_async(
         self, scope: str, digest: str, worker_id: str, generation: int
     ) -> None:
         await self._rds.asyncio.eval(
-            _FORGET_GENERATION, *_forget_args(scope, digest, worker_id, generation)
+            _FORGET_GENERATION, 2, *_forget_args(scope, digest, worker_id, generation)
         )
 
     def unregistered(self) -> list[str]:
-        """The workers with records indexed that are no longer registered."""
-        roster = sorted(self._rds.sync.set_members(CONTENT_HELD_WORKERS_KEY))
-        if not roster:
-            return []
-        with self._rds.sync.control_pipeline(transaction=False) as pipe:
-            pipe.smismember(WORKERS_SET_KEY, roster)
-            (registered,) = pipe.execute()
-        return _absent(roster, registered)
+        """The unregistered workers with records indexed."""
+        return sorted(
+            self._rds.sync.set_difference(CONTENT_HELD_WORKERS_KEY, WORKERS_SET_KEY)
+        )
 
     async def unregistered_async(self) -> list[str]:
-        roster = sorted(await self._rds.asyncio.set_members(CONTENT_HELD_WORKERS_KEY))
-        if not roster:
-            return []
-        async with self._rds.asyncio.control_pipeline(transaction=False) as pipe:
-            pipe.smismember(WORKERS_SET_KEY, roster)
-            (registered,) = await pipe.execute()
-        return _absent(roster, registered)
+        return sorted(
+            await self._rds.asyncio.set_difference(
+                CONTENT_HELD_WORKERS_KEY, WORKERS_SET_KEY
+            )
+        )
 
     def sweep(self, worker_id: str) -> int:
         """Remove every record a worker left, and return how many went."""
@@ -249,11 +242,7 @@ class ContentHolderDirectory:
             if cursor == 0:
                 break
         with self._rds.sync.control_pipeline() as pipe:
-            for key, removed in _swept_keys(worker_id):
-                if removed is None:
-                    pipe.delete(key)
-                else:
-                    pipe.srem(key, removed)
+            _queue_sweep_tail(pipe, worker_id)
             pipe.execute()
         return swept
 
@@ -274,11 +263,7 @@ class ContentHolderDirectory:
             if cursor == 0:
                 break
         async with self._rds.asyncio.control_pipeline() as pipe:
-            for key, removed in _swept_keys(worker_id):
-                if removed is None:
-                    pipe.delete(key)
-                else:
-                    pipe.srem(key, removed)
+            _queue_sweep_tail(pipe, worker_id)
             await pipe.execute()
         return swept
 
@@ -363,9 +348,8 @@ def _scripts(
 
 def _forget_args(
     scope: str, digest: str, worker_id: str, generation: int
-) -> tuple[Any, ...]:
+) -> tuple[str, ...]:
     return (
-        2,
         content_holders_key(scope, digest),
         content_held_key(worker_id),
         worker_id,
@@ -374,16 +358,10 @@ def _forget_args(
     )
 
 
-def _swept_keys(worker_id: str) -> list[tuple[str, str | None]]:
-    return [
-        (content_held_key(worker_id), None),
-        (content_held_seq_key(worker_id), None),
-        (CONTENT_HELD_WORKERS_KEY, worker_id),
-    ]
-
-
-def _absent(roster: list[str], registered: Sequence[Any]) -> list[str]:
-    return [worker_id for worker_id, is_in in zip(roster, registered) if not is_in]
+def _queue_sweep_tail(pipe: Any, worker_id: str) -> None:
+    """Queue the removal of a swept worker's index, report number and roster entry."""
+    pipe.delete(content_held_key(worker_id), content_held_seq_key(worker_id))
+    pipe.srem(CONTENT_HELD_WORKERS_KEY, worker_id)
 
 
 def _records(raw: dict[str, Any]) -> list[ContentHolderRecord]:

@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from shared.content import (
-    HOLDING_RESYNC_FRAME,
+    HOLDING_RESYNC_FRAME_KIND,
     OCTET_STREAM,
     ContentCarriagePlan,
     ContentHydrationError,
@@ -375,7 +375,7 @@ class ContentLaneHost:
             self._loop.call_soon_threadsafe(self._on_serve_grant, frame)
         elif frame_kind == CONTENT_FRAME_KIND:
             asyncio.run_coroutine_threadsafe(self._on_frame(frame), self._loop)
-        elif frame_kind == HOLDING_RESYNC_FRAME:
+        elif frame_kind == HOLDING_RESYNC_FRAME_KIND:
             with self._whole_lock:
                 # A walk already queued or under way reports what this one would.
                 if self._whole_queued:

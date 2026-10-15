@@ -4,11 +4,17 @@ is asked, and each copy it keeps or drops, in numbered reports that follow the d
 import threading
 import time
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
-from shared.content import HOLDING_RESYNC_FRAME, HoldingReport
-from worker.content import ContentLaneHost, HoldingReporter, WorkerContentCache
+from shared.content import HOLDING_RESYNC_FRAME_KIND, HoldingReport
+from worker.content import (
+    ContentLaneHost,
+    HoldingReporter,
+    WorkerContentCache,
+    WorkerContentPlane,
+)
 
 
 class _Reports:
@@ -168,7 +174,7 @@ def test_control_asking_for_the_whole_holding_gets_it(tmp_path: Path) -> None:
     lane = _lane(cache)
     lane.start()
     try:
-        assert lane.route(HOLDING_RESYNC_FRAME, {})
+        assert lane.route(HOLDING_RESYNC_FRAME_KIND, {})
         assert reports.arrived.wait(5.0)
     finally:
         lane.stop()
@@ -195,9 +201,9 @@ def test_requests_for_the_whole_holding_in_flight_together_walk_the_cache_once(
     lane = _lane(cache)
     lane.start()
     try:
-        assert lane.route(HOLDING_RESYNC_FRAME, {})
+        assert lane.route(HOLDING_RESYNC_FRAME_KIND, {})
         assert walking.wait(5.0)
-        assert lane.route(HOLDING_RESYNC_FRAME, {})
+        assert lane.route(HOLDING_RESYNC_FRAME_KIND, {})
         release.set()
         assert reports.arrived.wait(5.0)
         time.sleep(0.2)
@@ -205,3 +211,10 @@ def test_requests_for_the_whole_holding_in_flight_together_walk_the_cache_once(
         lane.stop()
 
     assert [report.whole for report in reports.reports] == [True]
+
+
+def test_a_worker_without_a_reporting_cache_names_no_holding_report(
+    tmp_path: Path,
+) -> None:
+    assert WorkerContentPlane(None, cast(Any, None)).holding_seq is None
+    assert WorkerContentCache(tmp_path / "content").holding_seq is None

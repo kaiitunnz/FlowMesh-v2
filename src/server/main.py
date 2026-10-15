@@ -726,6 +726,7 @@ async def _lifespan(_: FastAPI):
                 NETWORK_PLANE.bind_loop(asyncio.get_running_loop())
             if CONTENT_AUTHORITY is not None:
                 CONTENT_AUTHORITY.bind_loop(asyncio.get_running_loop())
+                CONTENT_AUTHORITY.start()
             if CONTENT_BRIDGE is not None and NODE_REGISTRY is not None:
                 app.state.content_bridge_task = start_relay_bridge_pump(
                     CONTENT_BRIDGE, NODE_REGISTRY, logger

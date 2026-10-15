@@ -9,8 +9,8 @@ holding again.
 
 from pydantic import BaseModel, ConfigDict
 
-# The control frame asking a worker to report its whole holding.
-HOLDING_RESYNC_FRAME = "content_holding_resync"
+# The kind of the control frame asking a worker to report its whole holding.
+HOLDING_RESYNC_FRAME_KIND = "content_holding_resync"
 
 type HeldCopy = tuple[str, str]
 """One copy, as the scope and digest naming its object."""

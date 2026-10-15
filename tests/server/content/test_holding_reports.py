@@ -16,7 +16,7 @@ from server.content import (
     ContentTransferSessions,
 )
 from server.content import authority as authority_module
-from shared.content import HOLDING_RESYNC_FRAME, HoldingReport
+from shared.content import HOLDING_RESYNC_FRAME_KIND, HoldingReport
 from tests.server.redis_helpers import fake_redis_client
 
 _A = ("org", "a" * 64)
@@ -43,6 +43,9 @@ class _Workers:
             return None
         return SimpleNamespace(id=worker_id, node_id="nde-1", incarnation=1)
 
+    async def get_worker_ids_async(self) -> set[str]:
+        return set(self._live)
+
     async def publish_mediated_op_async(self, worker: Any, payload: Any) -> int:
         self.frames.append((worker.id, payload.frame_kind))
         return 0
@@ -56,7 +59,7 @@ class _Workers:
         self._redis.sync.srem(WORKERS_SET_KEY, worker_id)
 
     def resyncs(self) -> list[str]:
-        return [w for w, kind in self.frames if kind == HOLDING_RESYNC_FRAME]
+        return [w for w, kind in self.frames if kind == HOLDING_RESYNC_FRAME_KIND]
 
 
 def _setup(
@@ -329,6 +332,7 @@ def test_binding_the_loop_sweeps_at_once() -> None:
 
     async def run() -> None:
         authority.bind_loop(asyncio.get_running_loop())
+        authority.start()
         for _ in range(100):
             if not _held(directory, _A):
                 return
@@ -337,3 +341,31 @@ def test_binding_the_loop_sweeps_at_once() -> None:
     asyncio.run(run())
 
     assert _held(directory, _A) == []
+
+
+def test_the_sweep_forgets_what_it_kept_for_unregistered_workers() -> None:
+    """Including a worker with no records, whose heartbeat alone left state here."""
+    authority, workers, _ = _setup("wkr-1", "wkr-2")
+    asyncio.run(
+        authority.record_holding("wkr-1", HoldingReport(seq=1, added=(_A,), whole=True))
+    )
+    asyncio.run(authority.record_holding("wkr-1", HoldingReport(seq=3, added=(_B,))))
+    for _ in range(2):
+        asyncio.run(authority.check_holding("wkr-2", 4))
+    workers.unregister("wkr-1")
+    workers.unregister("wkr-2")
+
+    asyncio.run(authority.sweep_unregistered())
+
+    assert authority._tracked() == set()
+
+
+def test_a_late_report_for_an_unregistered_worker_keeps_nothing_here() -> None:
+    authority, workers, _ = _setup("wkr-1")
+    workers.unregister("wkr-1")
+
+    asyncio.run(
+        authority.record_holding("wkr-1", HoldingReport(seq=1, added=(_A,), whole=True))
+    )
+
+    assert authority._tracked() == set()

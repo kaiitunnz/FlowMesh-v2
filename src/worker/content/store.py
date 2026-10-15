@@ -65,9 +65,9 @@ class WorkerContentCache(FabricObjectStore):
         )
 
     @property
-    def holding_seq(self) -> int:
-        """The number of the last holding report, 0 without a reporter."""
-        return self._holding.seq if self._holding is not None else 0
+    def holding_seq(self) -> int | None:
+        """The number of the last holding report, None without a reporter."""
+        return self._holding.seq if self._holding is not None else None
 
     def start_reporting(self) -> None:
         """Send the holding changes on a cadence from here on."""
