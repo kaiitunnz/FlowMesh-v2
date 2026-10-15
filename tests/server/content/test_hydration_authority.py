@@ -171,7 +171,7 @@ def _authority(
 
 
 def _holding(*held: tuple[str, str]) -> HoldingReport:
-    return HoldingReport(1, held, whole=True)
+    return HoldingReport(seq=1, added=held, whole=True)
 
 
 def _granted(workers: _Workers) -> ContentHydrationGrant:

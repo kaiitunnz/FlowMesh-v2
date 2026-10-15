@@ -96,8 +96,8 @@ def test_reports_apply_in_the_order_the_worker_sent_them() -> None:
     async def run() -> None:
         loop = asyncio.get_running_loop()
         authority.bind_loop(loop)
-        authority.on_holding("wkr-1", HoldingReport(1, added=(_A,)))
-        authority.on_holding("wkr-1", HoldingReport(2, dropped=(_A,)))
+        authority.on_holding("wkr-1", HoldingReport(seq=1, added=(_A,)))
+        authority.on_holding("wkr-1", HoldingReport(seq=2, dropped=(_A,)))
         await asyncio.sleep(0.3)
 
     asyncio.run(run())
@@ -109,10 +109,10 @@ def test_reports_apply_in_the_order_the_worker_sent_them() -> None:
 
 def test_a_report_already_applied_changes_nothing() -> None:
     authority, workers, directory = _setup("wkr-1")
-    asyncio.run(authority.record_holding("wkr-1", HoldingReport(1, added=(_A,))))
-    asyncio.run(authority.record_holding("wkr-1", HoldingReport(2, dropped=(_A,))))
+    asyncio.run(authority.record_holding("wkr-1", HoldingReport(seq=1, added=(_A,))))
+    asyncio.run(authority.record_holding("wkr-1", HoldingReport(seq=2, dropped=(_A,))))
 
-    asyncio.run(authority.record_holding("wkr-1", HoldingReport(1, added=(_A,))))
+    asyncio.run(authority.record_holding("wkr-1", HoldingReport(seq=1, added=(_A,))))
 
     assert _held(directory, _A) == []
     assert workers.resyncs() == []
@@ -120,9 +120,9 @@ def test_a_report_already_applied_changes_nothing() -> None:
 
 def test_a_skipped_report_is_applied_and_the_whole_holding_asked_for() -> None:
     authority, workers, directory = _setup("wkr-1")
-    asyncio.run(authority.record_holding("wkr-1", HoldingReport(1, added=(_A,))))
+    asyncio.run(authority.record_holding("wkr-1", HoldingReport(seq=1, added=(_A,))))
 
-    asyncio.run(authority.record_holding("wkr-1", HoldingReport(3, added=(_B,))))
+    asyncio.run(authority.record_holding("wkr-1", HoldingReport(seq=3, added=(_B,))))
 
     assert _held(directory, _B) == ["wkr-1"]
     assert workers.resyncs() == ["wkr-1"]
@@ -130,12 +130,12 @@ def test_a_skipped_report_is_applied_and_the_whole_holding_asked_for() -> None:
 
 def test_a_whole_report_replaces_the_records_whatever_its_number() -> None:
     authority, workers, directory = _setup("wkr-1")
-    asyncio.run(authority.record_holding("wkr-1", HoldingReport(7, added=(_A,))))
+    asyncio.run(authority.record_holding("wkr-1", HoldingReport(seq=7, added=(_A,))))
 
     asyncio.run(
-        authority.record_holding("wkr-1", HoldingReport(1, added=(_B,), whole=True))
+        authority.record_holding("wkr-1", HoldingReport(seq=1, added=(_B,), whole=True))
     )
-    asyncio.run(authority.record_holding("wkr-1", HoldingReport(2, dropped=(_B,))))
+    asyncio.run(authority.record_holding("wkr-1", HoldingReport(seq=2, dropped=(_B,))))
 
     assert (_held(directory, _A), _held(directory, _B)) == ([], [])
     assert workers.resyncs() == ["wkr-1"]  # 7 followed nothing applied
@@ -143,7 +143,7 @@ def test_a_whole_report_replaces_the_records_whatever_its_number() -> None:
 
 def test_a_heartbeat_naming_an_unapplied_report_twice_asks_for_the_whole() -> None:
     authority, workers, _ = _setup("wkr-1")
-    asyncio.run(authority.record_holding("wkr-1", HoldingReport(1, added=(_A,))))
+    asyncio.run(authority.record_holding("wkr-1", HoldingReport(seq=1, added=(_A,))))
 
     asyncio.run(authority.check_holding("wkr-1", 1))
     asyncio.run(authority.check_holding("wkr-1", 2))
@@ -155,10 +155,12 @@ def test_a_heartbeat_naming_an_unapplied_report_twice_asks_for_the_whole() -> No
 
 def test_reports_skipping_numbers_while_the_whole_is_awaited_ask_once() -> None:
     authority, workers, _ = _setup("wkr-1")
-    asyncio.run(authority.record_holding("wkr-1", HoldingReport(1, added=(_A,))))
+    asyncio.run(authority.record_holding("wkr-1", HoldingReport(seq=1, added=(_A,))))
 
     for seq in range(3, 14):
-        asyncio.run(authority.record_holding("wkr-1", HoldingReport(seq, added=(_B,))))
+        asyncio.run(
+            authority.record_holding("wkr-1", HoldingReport(seq=seq, added=(_B,)))
+        )
     asyncio.run(authority.check_holding("wkr-1", 20))
     asyncio.run(authority.check_holding("wkr-1", 20))
 
@@ -169,8 +171,8 @@ def test_a_whole_holding_asked_for_and_lost_is_asked_for_again_after_the_wait(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     authority, workers, _ = _setup("wkr-1")
-    asyncio.run(authority.record_holding("wkr-1", HoldingReport(1, added=(_A,))))
-    asyncio.run(authority.record_holding("wkr-1", HoldingReport(3, added=(_B,))))
+    asyncio.run(authority.record_holding("wkr-1", HoldingReport(seq=1, added=(_A,))))
+    asyncio.run(authority.record_holding("wkr-1", HoldingReport(seq=3, added=(_B,))))
     asyncio.run(authority.check_holding("wkr-1", 3))
     assert workers.resyncs() == ["wkr-1"]
 
@@ -182,15 +184,15 @@ def test_a_whole_holding_asked_for_and_lost_is_asked_for_again_after_the_wait(
 
 def test_a_whole_report_ends_the_wait_for_it(monkeypatch: pytest.MonkeyPatch) -> None:
     authority, workers, _ = _setup("wkr-1")
-    asyncio.run(authority.record_holding("wkr-1", HoldingReport(1, added=(_A,))))
-    asyncio.run(authority.record_holding("wkr-1", HoldingReport(3, added=(_B,))))
+    asyncio.run(authority.record_holding("wkr-1", HoldingReport(seq=1, added=(_A,))))
+    asyncio.run(authority.record_holding("wkr-1", HoldingReport(seq=3, added=(_B,))))
     asyncio.run(
-        authority.record_holding("wkr-1", HoldingReport(4, added=(_A,), whole=True))
+        authority.record_holding("wkr-1", HoldingReport(seq=4, added=(_A,), whole=True))
     )
 
     monkeypatch.setattr(authority_module, "_RESYNC_RETRY_SEC", 0.0)
     asyncio.run(authority.check_holding("wkr-1", 4))
-    asyncio.run(authority.record_holding("wkr-1", HoldingReport(6, added=(_B,))))
+    asyncio.run(authority.record_holding("wkr-1", HoldingReport(seq=6, added=(_B,))))
 
     # The only asks are for the two gaps, each after the whole report it waited on.
     assert workers.resyncs() == ["wkr-1", "wkr-1"]
@@ -198,7 +200,7 @@ def test_a_whole_report_ends_the_wait_for_it(monkeypatch: pytest.MonkeyPatch) ->
 
 def test_a_heartbeat_asks_on_the_second_unapplied_beat_and_not_the_next() -> None:
     authority, workers, _ = _setup("wkr-1")
-    asyncio.run(authority.record_holding("wkr-1", HoldingReport(1, added=(_A,))))
+    asyncio.run(authority.record_holding("wkr-1", HoldingReport(seq=1, added=(_A,))))
 
     for _ in range(4):
         asyncio.run(authority.check_holding("wkr-1", 2))
@@ -208,7 +210,7 @@ def test_a_heartbeat_asks_on_the_second_unapplied_beat_and_not_the_next() -> Non
 
 def test_a_heartbeat_check_reads_no_redis_once_a_report_was_applied() -> None:
     authority, _, directory = _setup("wkr-1")
-    asyncio.run(authority.record_holding("wkr-1", HoldingReport(1, added=(_A,))))
+    asyncio.run(authority.record_holding("wkr-1", HoldingReport(seq=1, added=(_A,))))
 
     async def no_read(worker_id: str) -> int:
         raise AssertionError("a heartbeat read the directory")
@@ -221,7 +223,7 @@ def test_a_heartbeat_check_reads_no_redis_once_a_report_was_applied() -> None:
 def test_a_restarted_root_reads_the_applied_report_once() -> None:
     redis = fake_redis_client(fakeredis.FakeServer())
     before, _, _ = _setup("wkr-1", redis=redis)
-    asyncio.run(before.record_holding("wkr-1", HoldingReport(4, added=(_A,))))
+    asyncio.run(before.record_holding("wkr-1", HoldingReport(seq=4, added=(_A,))))
 
     after, workers, directory = _setup("wkr-1", redis=redis)
     reads: list[str] = []
@@ -234,7 +236,7 @@ def test_a_restarted_root_reads_the_applied_report_once() -> None:
     cast(Any, directory).applied_seq_async = counted
     for _ in range(3):
         asyncio.run(after.check_holding("wkr-1", 4))
-    asyncio.run(after.record_holding("wkr-1", HoldingReport(5, dropped=(_A,))))
+    asyncio.run(after.record_holding("wkr-1", HoldingReport(seq=5, dropped=(_A,))))
 
     assert reads == ["wkr-1"]
     assert workers.resyncs() == []
@@ -246,14 +248,14 @@ def test_the_sweep_removes_every_worker_no_longer_registered() -> None:
     redis = fake_redis_client(fakeredis.FakeServer())
     before, old, _ = _setup("wkr-1", "wkr-2", "wkr-3", redis=redis)
     for worker_id in ("wkr-1", "wkr-2", "wkr-3"):
-        asyncio.run(before.record_holding(worker_id, HoldingReport(1, added=(_A,))))
+        asyncio.run(before.record_holding(worker_id, HoldingReport(seq=1, added=(_A,))))
     old.unregister("wkr-3")  # while control was down
 
     authority, workers, directory = _setup("wkr-1", "wkr-2", redis=redis)
     workers.unregister("wkr-1")  # reaped
     workers.unregister("wkr-2")  # unregistered
     workers.register("wkr-4")
-    asyncio.run(authority.record_holding("wkr-4", HoldingReport(1, added=(_A,))))
+    asyncio.run(authority.record_holding("wkr-4", HoldingReport(seq=1, added=(_A,))))
 
     assert asyncio.run(authority.sweep_unregistered()) == 3
     assert _held(directory, _A) == ["wkr-4"]
@@ -262,13 +264,13 @@ def test_the_sweep_removes_every_worker_no_longer_registered() -> None:
 
 def test_a_late_report_for_a_swept_worker_writes_nothing() -> None:
     authority, workers, directory = _setup("wkr-1")
-    asyncio.run(authority.record_holding("wkr-1", HoldingReport(1, added=(_A,))))
+    asyncio.run(authority.record_holding("wkr-1", HoldingReport(seq=1, added=(_A,))))
     workers.unregister("wkr-1")
     asyncio.run(authority.sweep_unregistered())
     # The registry read raced the removal: the lookup still finds the worker.
     workers._live.add("wkr-1")
 
-    asyncio.run(authority.record_holding("wkr-1", HoldingReport(2, added=(_B,))))
+    asyncio.run(authority.record_holding("wkr-1", HoldingReport(seq=2, added=(_B,))))
 
     assert _held(directory, _B) == []
     assert directory.unregistered() == []
@@ -276,7 +278,7 @@ def test_a_late_report_for_a_swept_worker_writes_nothing() -> None:
 
 def test_binding_the_loop_sweeps_at_once() -> None:
     authority, workers, directory = _setup("wkr-1")
-    asyncio.run(authority.record_holding("wkr-1", HoldingReport(1, added=(_A,))))
+    asyncio.run(authority.record_holding("wkr-1", HoldingReport(seq=1, added=(_A,))))
     workers.unregister("wkr-1")
 
     async def run() -> None:

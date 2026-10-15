@@ -66,7 +66,7 @@ class HoldingReporter:
             self._pending.clear()
             if restart:
                 self._seq = 0
-            self._send(HoldingReport(self._seq + 1, tuple(held), whole=True))
+            self._send(HoldingReport(seq=self._seq + 1, added=tuple(held), whole=True))
 
     def flush(self) -> None:
         """Send what is collecting now."""
@@ -106,7 +106,7 @@ class HoldingReporter:
         added = tuple(copy for copy, held in self._pending.items() if held)
         dropped = tuple(copy for copy, held in self._pending.items() if not held)
         self._pending.clear()
-        self._send(HoldingReport(self._seq + 1, added, dropped))
+        self._send(HoldingReport(seq=self._seq + 1, added=added, dropped=dropped))
 
     def _send(self, report: HoldingReport) -> None:
         # Numbered even when it cannot be sent, so control sees the gap and asks for

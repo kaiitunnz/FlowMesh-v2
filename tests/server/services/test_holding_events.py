@@ -20,11 +20,15 @@ def _monitor_with_authority() -> tuple[Any, MagicMock]:
 
 def test_a_holding_report_reaches_the_authority_as_sent() -> None:
     monitor, authority = _monitor_with_authority()
-    report = HoldingReport(3, added=(("org", "a" * 64),), dropped=(("org", "b" * 64),))
+    report = HoldingReport(
+        seq=3, added=(("org", "a" * 64),), dropped=(("org", "b" * 64),)
+    )
 
     monitor._handle_worker_event(
         WorkerEvent(
-            type="CONTENT_HOLDING", worker_id="wkr-1", payload=report.to_payload()
+            type="CONTENT_HOLDING",
+            worker_id="wkr-1",
+            payload={"report": report.model_dump(mode="json")},
         )
     )
 
@@ -41,11 +45,13 @@ def test_an_unreadable_holding_report_is_dropped_and_the_next_one_handled() -> N
         WorkerEvent(
             type="CONTENT_HOLDING",
             worker_id="wkr-1",
-            payload=HoldingReport(1, whole=True).to_payload(),
+            payload={"report": HoldingReport(seq=1, whole=True).model_dump()},
         )
     )
 
-    authority.on_holding.assert_called_once_with("wkr-1", HoldingReport(1, whole=True))
+    authority.on_holding.assert_called_once_with(
+        "wkr-1", HoldingReport(seq=1, whole=True)
+    )
 
 
 def test_a_heartbeat_hands_over_the_holding_report_number_it_names() -> None:

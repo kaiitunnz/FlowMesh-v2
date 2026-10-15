@@ -9,6 +9,8 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
+from pydantic import ValidationError
+
 from shared.content import ContentReference, ContentRouteObservation, HoldingReport
 from shared.resident.reports import (
     ResidentBootstrapAck,
@@ -995,8 +997,8 @@ class EventMonitor:
                 )
             case "CONTENT_HOLDING" if self._content_authority is not None:
                 try:
-                    holding = HoldingReport.from_payload(event.payload)
-                except (KeyError, TypeError, ValueError):
+                    holding = HoldingReport.model_validate(event.payload.get("report"))
+                except ValidationError:
                     self._logger.warning(
                         "Ignoring an unreadable content holding report from %s",
                         worker_id,

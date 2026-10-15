@@ -969,7 +969,7 @@ class SupervisorClient:
             WorkerEvent(
                 type="CONTENT_HOLDING",
                 worker_id=self.worker_id,
-                payload=report.to_payload(),
+                payload={"report": report.model_dump(mode="json")},
             )
         )
 
