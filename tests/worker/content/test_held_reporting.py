@@ -3,18 +3,26 @@ is asked, and each copy it keeps or drops, in numbered reports that follow the d
 
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
-from shared.content import HOLDING_RESYNC_FRAME_KIND, HoldingReport
+from shared.content import (
+    HOLDING_RESYNC_FRAME_KIND,
+    HeldCopy,
+    HoldingReport,
+    reference_for,
+)
 from worker.content import (
     ContentLaneHost,
     HoldingReporter,
     WorkerContentCache,
     WorkerContentPlane,
 )
+
+_COPY = ("local", "c" * 64)
 
 
 class _Reports:
@@ -218,3 +226,59 @@ def test_a_worker_without_a_reporting_cache_names_no_holding_report(
 ) -> None:
     assert WorkerContentPlane(None, cast(Any, None)).holding_seq is None
     assert WorkerContentCache(tmp_path / "content").holding_seq is None
+
+
+def _keep_by_write(cache: WorkerContentCache, body: bytes, tmp_path: Path) -> str:
+    return cache.write("local", body).content_digest
+
+
+def _keep_by_write_file(cache: WorkerContentCache, body: bytes, tmp_path: Path) -> str:
+    source = tmp_path / "source"
+    source.write_bytes(body)
+    return cache.write_file("local", source).content_digest
+
+
+def _keep_by_adopt(cache: WorkerContentCache, body: bytes, tmp_path: Path) -> str:
+    reference = reference_for("local", body)
+    verified = cache.staging_dir("local") / "verified"
+    verified.write_bytes(body)
+    cache.adopt(reference, verified)
+    return reference.content_digest
+
+
+@pytest.mark.parametrize(
+    "keep",
+    [_keep_by_write, _keep_by_write_file, _keep_by_adopt],
+    ids=lambda k: k.__name__,
+)
+def test_every_way_a_copy_is_kept_reports_it(
+    tmp_path: Path, keep: Callable[[WorkerContentCache, bytes, Path], str]
+) -> None:
+    reports = _Reports()
+    cache = _cache(tmp_path, reports)
+
+    digest = keep(cache, b"kept", tmp_path)
+    cache.flush_holding()
+
+    assert [report.added for report in reports.reports] == [(("local", digest),)]
+
+
+@pytest.mark.parametrize(
+    ("notes", "added", "dropped"),
+    [
+        (["kept", "dropped", "kept"], (_COPY,), ()),
+        (["dropped", "kept"], (_COPY,), ()),
+        (["kept", "dropped"], (), (_COPY,)),
+    ],
+)
+def test_the_last_note_about_a_copy_is_the_one_reported(
+    notes: list[str], added: tuple[HeldCopy, ...], dropped: tuple[HeldCopy, ...]
+) -> None:
+    reports = _Reports()
+    reporter = HoldingReporter(reports, threading.RLock())
+    for note in notes:
+        getattr(reporter, note)(_COPY)
+    reporter.flush()
+
+    (report,) = reports.reports
+    assert (report.added, report.dropped) == (added, dropped)

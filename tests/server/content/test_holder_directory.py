@@ -164,3 +164,14 @@ def test_the_sync_and_async_twins_behave_alike() -> None:
     assert expected[6] == ["wkr-2"]
     assert expected[7] == 1
     assert expected[8] == []
+
+
+def test_every_public_method_has_its_twin() -> None:
+    public = {
+        name
+        for name in vars(ContentHolderDirectory)
+        if not name.startswith("_") and callable(getattr(ContentHolderDirectory, name))
+    }
+    sync = {name for name in public if not name.endswith("_async")}
+
+    assert {f"{name}_async" for name in sync} == public - sync
