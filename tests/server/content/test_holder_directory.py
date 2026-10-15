@@ -152,6 +152,44 @@ async def _scenario_async(directory: ContentHolderDirectory, client: Any) -> lis
     return out
 
 
+def _apply(
+    directory: ContentHolderDirectory,
+    use_async: bool,
+    added: list[tuple[str, str]],
+    seq: int,
+) -> bool:
+    if use_async:
+        return asyncio.run(
+            directory.apply_async(
+                "wkr-1", node_id="nde-1", generation=1, added=added, seq=seq
+            )
+        )
+    return directory.apply("wkr-1", node_id="nde-1", generation=1, added=added, seq=seq)
+
+
+@pytest.mark.parametrize("use_async", [False, True])
+def test_changes_spanning_several_chunks_all_land_and_note_the_report(
+    use_async: bool,
+) -> None:
+    directory, client = _directory("wkr-1")
+    held = [("org", f"{i:064x}") for i in range(directory_module._CHUNK * 2 + 1)]
+
+    assert _apply(directory, use_async, held, 4)
+
+    assert all(_holders(directory, copy) == ["wkr-1"] for copy in held)
+    assert len(client.sync.set_members(content_held_key("wkr-1"))) == len(held)
+    assert directory.applied_seq("wkr-1") == 4
+
+
+@pytest.mark.parametrize("use_async", [False, True])
+def test_a_report_with_no_changes_still_notes_its_number(use_async: bool) -> None:
+    directory, _ = _directory("wkr-1")
+
+    assert _apply(directory, use_async, [], 2)
+
+    assert directory.applied_seq("wkr-1") == 2
+
+
 def test_the_sync_and_async_twins_behave_alike() -> None:
     sync_directory, sync_client = _directory("wkr-1", "wkr-2")
     async_directory, async_client = _directory("wkr-1", "wkr-2")

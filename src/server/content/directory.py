@@ -15,7 +15,7 @@ choice among equals rather than the discovery of the one true copy.
 
 import json
 import time
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -326,12 +326,13 @@ def _scripts(
     field: str,
     changes: list[tuple[str, HeldCopy]],
     seq: int | None,
-) -> list[tuple[list[str], list[str]]]:
-    """The keys and arguments of each chunk's script; the last one notes ``seq``."""
-    chunks = [changes[i : i + _CHUNK] for i in range(0, len(changes), _CHUNK)] or [[]]
-    scripts: list[tuple[list[str], list[str]]] = []
-    for position, chunk in enumerate(chunks):
-        last = position == len(chunks) - 1
+) -> Iterator[tuple[list[str], list[str]]]:
+    """The keys and arguments of each chunk's script; the last one notes ``seq``, and
+    an empty change set still has one script to note it."""
+    starts = range(0, len(changes), _CHUNK) or range(1)
+    for start in starts:
+        chunk = changes[start : start + _CHUNK]
+        last = start == starts[-1]
         keys = [
             WORKERS_SET_KEY,
             CONTENT_HELD_WORKERS_KEY,
@@ -342,8 +343,7 @@ def _scripts(
         args = [worker_id, field, str(seq) if last and seq is not None else ""]
         for op, (scope, digest) in chunk:
             args.extend((op, _member(scope, digest)))
-        scripts.append((keys, args))
-    return scripts
+        yield keys, args
 
 
 def _forget_args(
