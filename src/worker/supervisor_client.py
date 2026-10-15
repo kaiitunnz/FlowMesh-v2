@@ -958,7 +958,7 @@ class SupervisorClient:
         self._push_event("SSH_FRAME", {"frame": frame})
 
     def push_content_holding(self, report: HoldingReport) -> None:
-        """Report how this worker's holding changed, so control can resolve its copies.
+        """Send one holding report, so control can resolve this worker's copies.
 
         The report queues while the event stream is down, so a re-registration's
         report reaches control once the stream is back.

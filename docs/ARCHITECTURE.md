@@ -509,29 +509,30 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
 - **Worker content cache and granted hydration.** What a worker holds is a cache over
   that store, so a copy may be dropped at any time: a deployment can bound the cache by
   how long a copy goes unused and by disk, least recently used first, and leaves both
-  unbounded by default. A worker reports each copy as it keeps or drops it, and its
-  whole holding when it registers, and control keeps that record while the worker runs.
-  A read tries the local copy, then another worker's copy, then the store itself. For a
-  peer's copy the control plane checks that the requesting worker is running the task
-  and that it is bound to exactly that reference as an input or delivered outcome,
-  resolves a live holder and a route to it, and mints one short-lived `chg-` grant it
-  hands to both ends: the holder serves only a grant it was handed, once, for that exact
-  object, and the requester verifies the digest and size before anything reads the
-  bytes. With trusted peer transports enabled (`NETWORK_PLANE_PEER_ENABLED`, off by
-  default), the requester dials the holder's node (`node_relay`), or the holder itself
-  where workers are declared routable (`worker_direct`), bypassing the root, and reads
-  such a holder before the store at any size. Otherwise the transfer runs over the
-  network plane's relay, where the root bridges opaque frames and never holds,
-  assembles, or resolves the payload, and an object of
-  `CONTENT_RELAY_TRANSFER_MAX_BYTES` or more is read from the store first unless the
-  store cannot be reached. A refused, expired, or replayed grant, an evicted copy, a
-  holder that is gone, or a transfer that breaks costs a read from the shared store, not
-  a failure. A transfer holds a window of the object, never the whole, and a copy that
-  turns out not to be the object ends the transfer refused and is dropped. A worker
-  keeps a copy of whatever it reads from a peer or the store. The cache and its
-  transfers are on wherever the network plane is; `CONTENT_HYDRATION_ENABLED=false`
-  turns them off. A worker with the cache on under a control with it off reads from the
-  store. See [`NETWORK_PLANE.md`](NETWORK_PLANE.md).
+  unbounded by default. A worker reports each copy it keeps or drops, and its whole
+  holding when it registers; control keeps a worker's records while it is registered,
+  and grants a read from a holder only while its heartbeat is current. A read tries the
+  local copy, then another worker's copy, then
+  the store itself. For a peer's copy the control plane checks that the requesting
+  worker is running the task and that it is bound to exactly that reference as an input
+  or delivered outcome, resolves a live holder and a route to it, and mints one
+  short-lived `chg-` grant it hands to both ends: the holder serves only a grant it was
+  handed, once, for that exact object, and the requester verifies the digest and size
+  before anything reads the bytes. With trusted peer transports enabled
+  (`NETWORK_PLANE_PEER_ENABLED`, off by default), the requester dials the holder's node
+  (`node_relay`), or the holder itself where workers are declared routable
+  (`worker_direct`), bypassing the root, and reads such a holder before the store at any
+  size. Otherwise the transfer runs over the network plane's relay, where the root
+  bridges opaque frames and never holds, assembles, or resolves the payload, and an
+  object of `CONTENT_RELAY_TRANSFER_MAX_BYTES` or more is read from the store first
+  unless the store cannot be reached. A refused, expired, or replayed grant, an evicted
+  copy, a holder that is gone, or a transfer that breaks costs a read from the shared
+  store, not a failure. A transfer holds a window of the object, never the whole, and a
+  copy that turns out not to be the object ends the transfer refused and is dropped. A
+  worker keeps a copy of whatever it reads from a peer or the store. The cache and its
+  transfers are on wherever the network plane is; `CONTENT_HYDRATION_ENABLED=false` turns
+  them off. A worker with the cache on under a control with it off reads from the store.
+  See [`NETWORK_PLANE.md`](NETWORK_PLANE.md).
 - **Task results.** A task's result lives in the shared content store: its worker writes
   the result envelope there under the task's store access before it reports success, and
   the success binds that reference once, at the commit that settles the task, so a retry,

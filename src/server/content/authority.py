@@ -20,7 +20,7 @@ owns the directory, the routing records and the record of which transfer connect
 which pair; the thread that reads worker events only hands them over. A worker's
 holding reports apply in the order it sent them, and one that went missing — its number
 skipped, or its heartbeat naming a report never applied — has the worker report its
-whole holding again.
+whole holding again. On a cadence it sweeps the records of unregistered workers.
 """
 
 import asyncio
@@ -382,8 +382,7 @@ class ContentHydrationAuthority:
             reference.authorization_scope, reference.content_digest
         )
         if not reported:
-            # No worker reports holding a copy. Its consumer reads the shared store
-            # instead.
+            # No worker reports holding a copy, so its consumer reads the shared store.
             await self._deny(requester, request_id, HydrationDenial.NOT_TRACKED)
             return
         live = await self._live_holders(reference, reported, requester)

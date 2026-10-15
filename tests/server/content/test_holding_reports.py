@@ -1,6 +1,6 @@
 """How control applies a worker's holding reports: in the order the worker sent them,
 each once, asking for the whole holding when one went missing, and sweeping the records
-of workers no longer registered."""
+of unregistered workers."""
 
 import asyncio
 from types import SimpleNamespace

@@ -367,7 +367,7 @@ def test_a_grant_carries_no_service_admission_identity() -> None:
 
 
 def test_a_holder_report_costs_one_scripted_round_trip_per_chunk() -> None:
-    """A report goes up in one scripted call per 256 copies, not commands per object.
+    """A report goes up in one scripted call per 256 copies.
 
     Every worker's report lands on the one loop that also serves every content request,
     so the cost of a large report there has to stay bounded per round trip.

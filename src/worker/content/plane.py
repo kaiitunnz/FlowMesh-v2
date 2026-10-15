@@ -363,8 +363,8 @@ class _TaskScopedStores:
     """One task's content plane, presented as the store each scope is reached through.
 
     An outcome is content like any other: it goes through the plane, so it lands in the
-    shared store, stays in this worker's cache, and is reported there — a later reader
-    can then be served the copy instead of paying for the store.
+    shared store and in this worker's cache, which reports it, and a later reader can be
+    served the copy without a store read.
     """
 
     def __init__(self, plane: "WorkerContentPlane", task_id: str) -> None:
