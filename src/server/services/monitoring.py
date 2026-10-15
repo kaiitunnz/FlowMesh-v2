@@ -26,6 +26,7 @@ from shared.schemas.event import (
     parse_event,
 )
 from shared.schemas.worker import WorkerStatus
+from shared.tasks.artifact_upload import ARTIFACT_UPLOAD_EVENT, UploadReport
 from shared.tools.contract import AgentModelTurnProposal, MediatedOperationOutcome
 from shared.utils.recent import RecentMap
 
@@ -520,6 +521,32 @@ class EventMonitor:
             key: value for key, value in payload.items() if key != "artifact_published"
         }
 
+    def _handle_artifact_upload(
+        self, event: TaskEvent, worker_id: str, payload: dict[str, Any]
+    ) -> None:
+        """Apply a worker's report of an upload a task's success left owed.
+
+        It follows a task that may already be DONE, so it bypasses the running-task
+        fence; the runtime fences it to the dispatch and registration owing it.
+        """
+        try:
+            report = UploadReport(str(payload.get("report")))
+        except ValueError:
+            self._logger.warning(
+                "Ignoring an unreadable artifact upload report for %s from %s",
+                event.task_id,
+                worker_id,
+            )
+            return
+        error = payload.get("error")
+        self._runtime.record_artifact_upload(
+            event.task_id,
+            worker_id,
+            event.dispatch_id,
+            report,
+            str(error) if error is not None else None,
+        )
+
     def handle_task_event(self, event: TaskEvent) -> None:
         with self._runtime.event_tail(event.task_id):
             self._handle_task_event(event)
@@ -541,6 +568,8 @@ class EventMonitor:
                 if self._unapplied(event, effect):
                     return
                 self._metrics.record_task_event(event)
+            case x if x == ARTIFACT_UPLOAD_EVENT:
+                self._handle_artifact_upload(event, worker_id, payload)
             case "TASK_UPDATE":
                 if not self._runtime.holds_dispatch(
                     event.task_id, worker_id, event.dispatch_id
@@ -960,6 +989,7 @@ class EventMonitor:
                 if report.outcome is ReportOutcome.APPLIED:
                     self._revoke_orphan_run(worker_id, event)
                     self._runtime.redrive_overdue_ops(worker_id)
+                    self._runtime.artifact_owner_heard(worker_id)
                 if report.outcome is not ReportOutcome.UNKNOWN:
                     self._record_gpu_availability(worker_id, event.metrics)
                     self._check_holding(worker_id, event.payload.get("holding_seq"))
@@ -1067,6 +1097,7 @@ class EventMonitor:
                     self._schedule_deregister(
                         ResourceKind.WORKER, worker_id, self._actor_from_event(event)
                     )
+                    self._runtime.artifact_owner_lost(worker_id)
                     if self._watchdog.enabled and self._watchdog.is_marked_dead(
                         worker_id
                     ):

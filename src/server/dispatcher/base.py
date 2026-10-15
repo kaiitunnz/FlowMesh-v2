@@ -910,6 +910,7 @@ class Dispatcher:
             upstream_results=upstream_results,
             artifact_inputs=artifact_inputs.bindings or None,
             upstream_artifacts=upstream_artifacts or None,
+            pending_artifacts=self._runtime.pending_artifact_digests([*named, *lent]),
             input_element=self._runtime.input_element(task_id),
             credential_pointers=self._runtime.credential_pointers(
                 [task_id, *(child.task_id for child in rendered_children or ())]

@@ -28,6 +28,11 @@ class _InputCheck:
     # Why control found an input unreadable, once it has; the task then fails as a
     # report of the dispatch that could not read it.
     unreadable: str | None = None
+    # The upstream tasks whose accepted artifacts the task reads and whose upload is
+    # still owed; control reads nothing until they settle.
+    awaiting: frozenset[str] = frozenset()
+    # Why an upload it waited on lost artifacts, which an unreadable verdict reports.
+    lost: str | None = None
 
 
 INPUT_VERDICT_REPORT = "TASK_FAILED:input_unreadable"
@@ -105,7 +110,12 @@ class InputChecks:
                     "Task %s input is unreadable at control: %s", task_id, verdict
                 )
                 check = self.input_checks[task_id] = replace(
-                    check, unreadable=str(verdict)
+                    check,
+                    unreadable=(
+                        f"{check.lost}: {verdict}"
+                        if check.lost is not None
+                        else str(verdict)
+                    ),
                 )
                 failures.append(_input_verdict(task_id, check))
                 continue
@@ -167,13 +177,54 @@ class InputChecks:
         dispatch_id: str | None,
         references: tuple[ContentReference, ...],
         members: frozenset[ContentReference] = frozenset(),
+        awaiting: frozenset[str] = frozenset(),
     ) -> None:
-        """Keep a returned task out of the queue until control has read its inputs."""
+        """Keep a returned task out of the queue until control has read its inputs,
+        or, while uploads it reads are still owed in ``awaiting``, until they settle."""
         self._ready.remove_from_ready_locked(record.task_id)
         self.input_checks[record.task_id] = _InputCheck(
-            worker_id, dispatch_id, references, members
+            worker_id, dispatch_id, references, members, awaiting=awaiting
         )
-        self._redrive.drive_now(record.workflow_id)
+        if not awaiting:
+            self._redrive.drive_now(record.workflow_id)
+
+    def checkable(self, check: _InputCheck) -> bool:
+        """Whether control reads a held check's inputs now."""
+        return not check.awaiting
+
+    def wake_uploaded_locked(self, producer_id: str, lost: str | None) -> None:
+        """Let the checks waiting on a task's upload read their inputs, now that it
+        settled, durable or with ``lost`` saying what it lost."""
+        for task_id, check in list(self.input_checks.items()):
+            if producer_id not in check.awaiting:
+                continue
+            check = self.input_checks[task_id] = replace(
+                check,
+                awaiting=check.awaiting - {producer_id},
+                lost=lost if lost is not None else check.lost,
+            )
+            if not check.awaiting and (record := self._tasks.get(task_id)) is not None:
+                self._redrive.drive_now(record.workflow_id)
+
+    def retry_awaiting_locked(self, producer_ids: set[str]) -> None:
+        """Place again each task waiting on one of these tasks' uploads, as its
+        producer can serve it again before the upload lands; it waits again if the
+        read still misses."""
+        for task_id, check in list(self.input_checks.items()):
+            if not check.awaiting & producer_ids:
+                continue
+            record = self._tasks.get(task_id)
+            if record is None or record.status != TaskStatus.PENDING:
+                continue
+            del self.input_checks[task_id]
+            record.avoided_worker = None
+            if self._ready.enqueue_ready_locked(
+                task_id,
+                front=False,
+                not_before=time.monotonic() + INPUT_RECHECK_PACE_SEC,
+            ):
+                self._cv.notify_all()
+            self._committer.commit_locked(task_id)
 
     def is_input_verdict_locked(
         self,

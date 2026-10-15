@@ -161,6 +161,7 @@ class WorkerWatchdog:
             self._mark_dead(worker_id)
             state.stale_since.pop(worker_id, None)
             self._handle_worker_expired(worker_id)
+            self._runtime.artifact_owner_lost(worker_id)
 
         for worker_id in list(state.stale_since):
             if worker_id not in worker_ids:

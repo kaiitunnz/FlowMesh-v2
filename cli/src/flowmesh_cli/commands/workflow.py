@@ -127,14 +127,16 @@ def watch(
 ) -> None:
     """Monitor a workflow's progress by polling until completion."""
     client = FlowMesh()
-    last_status: str | None = None
+    last: tuple[WorkflowStatus, int] | None = None
     try:
         while True:
             wf = client.workflows.retrieve(workflow_id)
             status_value = WorkflowStatus(wf.status)
-            if status_value != last_status:
-                logging.log(f"[{workflow_id}] status: {status_value}")
-                last_status = status_value
+            uploads = wf.pending_artifact_uploads
+            if (status_value, uploads) != last:
+                pending = f" ({uploads} artifact uploads pending)" if uploads else ""
+                logging.log(f"[{workflow_id}] status: {status_value}{pending}")
+                last = (status_value, uploads)
             if status_value in TERMINAL_WORKFLOW_STATUSES:
                 logging.log(wf.model_dump_json(indent=2))
                 return

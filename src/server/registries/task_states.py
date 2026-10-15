@@ -100,6 +100,12 @@ class PersistedTask(BaseModel):
         )
         # And where its vaulted credentials go back into its spec at dispatch.
         data["record"]["credential_refs"] = self.record.credential_refs
+        # And the upload its success left owed, and a receipt that beat the success.
+        upload = self.record.artifact_upload
+        data["record"]["artifact_upload"] = (
+            upload.model_dump(mode="json") if upload is not None else None
+        )
+        data["record"]["early_upload_receipt"] = self.record.early_upload_receipt
         # And when its first run started, which a serve task's TTL counts from.
         data["record"]["first_started_ts"] = self.record.first_started_ts
         return data

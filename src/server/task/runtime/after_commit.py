@@ -5,6 +5,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 from shared.schemas.command import InterruptMessage, RevokeMessage
+from shared.tasks.artifact_upload import UploadSettled
 from shared.tools.contract import AgentModelTurnProposal
 
 from ..models import TaskRecord, TaskStatus
@@ -82,8 +83,24 @@ class AuthorizeTurn:
     deadline_epoch: float
 
 
+@dataclass(frozen=True)
+class UploadAck:
+    """Tell the worker a dispatch's artifact upload of one task is owed or settled."""
+
+    worker_id: str
+    settled: UploadSettled
+
+
 type AfterCommit = (
-    CreditRelease | Reap | Interrupt | Revoke | Issue | Purge | Settled | AuthorizeTurn
+    CreditRelease
+    | Reap
+    | Interrupt
+    | Revoke
+    | Issue
+    | Purge
+    | Settled
+    | AuthorizeTurn
+    | UploadAck
 )
 
 

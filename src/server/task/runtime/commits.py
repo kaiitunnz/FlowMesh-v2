@@ -37,6 +37,7 @@ from ..models import (
     WorkflowSettlement,
 )
 from .after_commit import AfterCommitActions, Purge, Settled
+from .artifact_uploads import ArtifactUploads
 from .record_failures import RecordFailures
 from .reports import clear_dispatched_inputs, membership
 from .reservations import WorkerReservations
@@ -210,6 +211,7 @@ class TransitionCommitter:
         actions: AfterCommitActions,
         record_failures: RecordFailures,
         tasks: TaskTable,
+        uploads: ArtifactUploads,
         original_deps: dict[str, set[str]],
         engines: dict[str, OrchestrationEngine],
         workflow_registry: WorkflowRegistry,
@@ -223,6 +225,7 @@ class TransitionCommitter:
         self._actions = actions
         self._record_failures = record_failures
         self._tasks = tasks
+        self._uploads = uploads
         self._original_deps = original_deps
         self._engines = engines
         self._workflow_registry = workflow_registry
@@ -724,17 +727,28 @@ class TransitionCommitter:
         the last of their finishes.
 
         A workflow whose ledger still waits on a value read to route a branch or fan
-        out a spawn has not settled, though none of its tasks holds it open.
+        out a spawn has not settled, though none of its tasks holds it open, and
+        neither has one owing an upload of its tasks' accepted artifacts. Its finish
+        is the last of its tasks' finishes and its uploads' settlements.
         """
         engine = self._engines.get(workflow_id)
         if (
             not self._tasks.holds(workflow_id)
             or self._tasks.has_unsettled(workflow_id)
             or (engine is not None and engine.awaits_control_reads())
+            or self._uploads.pending_locked(workflow_id)
         ):
             return WorkflowSettlement(settled=False, finished_ts=None)
+        finishes = [
+            ts
+            for ts in (
+                self._tasks.last_finish(workflow_id),
+                self._uploads.last_settled_locked(workflow_id),
+            )
+            if ts is not None
+        ]
         return WorkflowSettlement(
-            settled=True, finished_ts=self._tasks.last_finish(workflow_id)
+            settled=True, finished_ts=max(finishes) if finishes else None
         )
 
     def notify_terminal_transition(self, workflow_id: str) -> None:

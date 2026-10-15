@@ -76,6 +76,7 @@ class Workflow(BaseModel):
     failed_tasks: list[str]
     cancelled_tasks: list[str]
     failure: str | None = None
+    pending_artifact_uploads: int = 0
 
 
 class WorkflowPage(CursorPage):
