@@ -7,7 +7,7 @@ import time
 import tracemalloc
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import BinaryIO
+from typing import Any, BinaryIO
 
 import pytest
 
@@ -15,6 +15,7 @@ from shared.content import (
     ContentHydrationError,
     ContentHydrationGrant,
     ContentReference,
+    ContentUnavailable,
     HoldingReport,
     reference_for,
 )
@@ -628,3 +629,46 @@ async def test_answers_for_one_object_reach_their_own_requests_in_any_order(
     assert await granted == _BODY
     with pytest.raises(ContentHydrationError, match="no_peer_route"):
         await denied
+
+
+@pytest.mark.asyncio
+async def test_a_copy_the_holder_cannot_open_for_a_moment_is_refused_and_kept(
+    tmp_path, monkeypatch
+) -> None:
+    pair = _Pair(tmp_path)
+    reference = pair.store.write("local", _BODY, media_type="application/json")
+    grant = _grant(reference)
+    pair.holder.accept_grant(grant)
+
+    def too_many_open_files(reference: ContentReference) -> Any:
+        raise ContentUnavailable("could not read: [Errno 24] Too many open files")
+
+    monkeypatch.setattr(pair.store, "open_pinned", too_many_open_files)
+    hydration = asyncio.ensure_future(_read(pair.client, reference, "tsk-1", tmp_path))
+    await asyncio.sleep(0)
+    pair.client.deliver_grant(1, grant)
+
+    with pytest.raises(ContentHydrationError, match="unavailable"):
+        await hydration
+    assert pair.store.holds(reference)
+
+
+@pytest.mark.asyncio
+async def test_a_lost_copy_the_holder_cannot_drop_is_still_refused(
+    tmp_path, monkeypatch
+) -> None:
+    pair = _Pair(tmp_path)
+    reference = reference_for("local", _BODY, media_type="application/json")
+    grant = _grant(reference)
+    pair.holder.accept_grant(grant)
+
+    def failing_drop(reference: ContentReference) -> None:
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(pair.store, "drop", failing_drop)
+    hydration = asyncio.ensure_future(_read(pair.client, reference, "tsk-1", tmp_path))
+    await asyncio.sleep(0)
+    pair.client.deliver_grant(1, grant)
+
+    with pytest.raises(ContentHydrationError, match="unavailable"):
+        await asyncio.wait_for(hydration, 2.0)

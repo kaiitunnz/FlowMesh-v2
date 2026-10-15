@@ -3,11 +3,11 @@
 The holder answers one transfer at a time per session: it admits the presented grant
 against the ones control pre-delivered, opens its copy of the exact object that grant
 names, and streams it back over the session's window, hashing as it reads. A copy it
-cannot open, or that turns out not to be the object, ends the transfer with a refusal
-instead of its last message and is dropped from the cache, which reports it gone. A
-refusal is a typed rejection the requester
-surfaces as a hydration failure — never a completed transfer of bytes the reference does
-not name, and never bytes for a grant this holder was not handed.
+cannot read ends the transfer with a refusal in place of its last message; one that is
+gone or turns out not to be the object is also dropped from the cache, which reports it
+gone. A refusal is a typed rejection the requester surfaces as a hydration failure —
+never a completed transfer of bytes the reference does not name, and never bytes for a
+grant this holder was not handed.
 
 A transfer arrives over the root relay or over a connection the requester dialed, and
 every frame of it answers over the carriage it arrived on: a session belongs to the
@@ -26,6 +26,7 @@ from shared.content import (
     ContentHydrationGrant,
     ContentReference,
     ContentStoreError,
+    ContentUnavailable,
     ContentVerifier,
     GrantRejection,
     HolderGrantGate,
@@ -244,8 +245,7 @@ class ContentHolder:
             fh = await asyncio.to_thread(self._store.open_pinned, reference)
         except (ContentStoreError, OSError) as exc:
             self._logger.warning("holder cannot serve %s: %s", session_id, exc)
-            await asyncio.to_thread(self._store.drop, reference)
-            await session.send_wire(KIND_REJECT, reason="unavailable")
+            await self._refuse_unreadable(session, reference, exc)
             return
         with fh:
             await self._stream(session, reference, fh)
@@ -276,15 +276,36 @@ class ContentHolder:
                 await asyncio.to_thread(verifier.finish)
             except (ContentHydrationError, OSError) as exc:
                 self._logger.warning(
-                    "held copy of %s is not the object: %s",
+                    "held copy of %s could not be served: %s",
                     reference.content_digest,
                     exc,
                 )
-                await asyncio.to_thread(self._store.drop, reference)
-                await session.send_wire(KIND_REJECT, reason="unavailable")
+                await self._refuse_unreadable(session, reference, exc)
                 return
             stall.reschedule(loop.time() + self._stall_timeout_sec)
             await session.send_wire(KIND_DONE)
+
+    async def _refuse_unreadable(
+        self,
+        session: FramedRelaySession,
+        reference: ContentReference,
+        exc: Exception,
+    ) -> None:
+        """Refuse a transfer this holder could not read its copy for, and drop the copy
+        when it is gone or not the object, never on a read that failed for a moment."""
+        await session.send_wire(KIND_REJECT, reason="unavailable")
+        if not isinstance(exc, ContentHydrationError) or isinstance(
+            exc, ContentUnavailable
+        ):
+            return
+        try:
+            await asyncio.to_thread(self._store.drop, reference)
+        except Exception:
+            self._logger.warning(
+                "could not drop the held copy of %s",
+                reference.content_digest,
+                exc_info=True,
+            )
 
     async def _await_grant(self, grant_id: str) -> bool:
         """Wait out the delivery race for one grant; False once the wait is spent."""
