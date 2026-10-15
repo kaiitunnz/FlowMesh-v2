@@ -33,12 +33,12 @@ class UploadReport(StrEnum):
 
 
 class ArtifactDurability(StrEnum):
-    """Where an accepted artifact's bytes are."""
+    """Where an artifact's bytes are."""
 
-    # Accepted at its task's success, and not yet in the shared store.
+    # Accepted at its task's success and still uploading to the shared store.
     PENDING = "pending"
     DURABLE = "durable"
-    # Its upload can no longer finish: its producer left without storing it.
+    # Its producer left before storing it.
     LOST = "lost"
 
 

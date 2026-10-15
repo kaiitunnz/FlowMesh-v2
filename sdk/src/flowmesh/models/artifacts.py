@@ -27,12 +27,12 @@ class ArtifactKind(StrEnum):
 
 
 class ArtifactDurability(StrEnum):
-    """Where a published artifact's bytes are."""
+    """Where an artifact's bytes are."""
 
-    # Accepted at its task's success; its upload to the shared store is in progress.
+    # Accepted at its task's success and still uploading to the shared store.
     PENDING = "pending"
     DURABLE = "durable"
-    # Its producer left before uploading it.
+    # Its producer left before storing it.
     LOST = "lost"
 
 

@@ -56,7 +56,7 @@ class OutputUnreadableError(APIError):
 
 
 class ArtifactPendingError(APIError):
-    """Raised when an artifact is still uploading (503); retry after ``Retry-After``."""
+    """Raised when an artifact is still uploading (503)."""
 
 
 class ArtifactLostError(APIError):

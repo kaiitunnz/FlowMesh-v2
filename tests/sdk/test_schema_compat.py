@@ -10,6 +10,8 @@ from flowmesh import models as sdk_models
 # SDK-side imports
 from flowmesh.models import (
     ArtifactContext,
+    ArtifactDurability,
+    ArtifactKind,
     ArtifactRef,
     BaseExecutorResult,
     CPUInfo,
@@ -138,6 +140,8 @@ from shared.schemas.result import BaseExecutorResult as SrvBaseExecutorResult
 from shared.schemas.result import ResultEnvelope as SrvResultEnvelope
 from shared.schemas.worker import SSHLimits as SrvSSHLimits
 from shared.schemas.worker import WorkerCapabilities as SrvWorkerCapabilities
+from shared.tasks.artifact_binding import ArtifactKind as SrvArtifactKind
+from shared.tasks.artifact_upload import ArtifactDurability as SrvArtifactDurability
 from shared.tasks.task_type import TaskType as SrvTaskType
 
 from .helpers import (
@@ -336,6 +340,8 @@ ENUM_PAIRS = [
     (SrvLogStream, LogStream),
     (SrvNodeRole, NodeRole),
     (SrvOutputOutcome, OutputOutcome),
+    (SrvArtifactDurability, ArtifactDurability),
+    (SrvArtifactKind, ArtifactKind),
 ]
 
 

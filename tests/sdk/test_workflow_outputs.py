@@ -5,6 +5,7 @@ import respx
 from flowmesh import (
     ArtifactLostError,
     ArtifactPendingError,
+    AsyncFlowMesh,
     ContentUnavailableError,
     FlowMesh,
     NotFoundError,
@@ -112,14 +113,14 @@ def test_an_output_error_raises_its_typed_exception(
     assert "because" in str(caught.value)
 
 
+_ARTIFACT_ERRORS = [
+    (503, "artifact_pending", ArtifactPendingError),
+    (410, "artifact_lost", ArtifactLostError),
+]
+
+
 @respx.mock
-@pytest.mark.parametrize(
-    ("status", "code", "error"),
-    [
-        (503, "artifact_pending", ArtifactPendingError),
-        (410, "artifact_lost", ArtifactLostError),
-    ],
-)
+@pytest.mark.parametrize(("status", "code", "error"), _ARTIFACT_ERRORS)
 def test_an_artifact_download_error_raises_its_typed_exception(
     client: FlowMesh, tmp_path, status: int, code: str, error: type[Exception]
 ) -> None:
@@ -129,4 +130,20 @@ def test_an_artifact_download_error_raises_its_typed_exception(
 
     with pytest.raises(error) as caught:
         client.results.download_file("tsk-1", "model.bin", tmp_path / "model.bin")
+    assert "because" in str(caught.value)
+
+
+@pytest.mark.asyncio
+@respx.mock
+@pytest.mark.parametrize(("status", "code", "error"), _ARTIFACT_ERRORS)
+async def test_an_async_artifact_download_error_raises_its_typed_exception(
+    tmp_path, status: int, code: str, error: type[Exception]
+) -> None:
+    client = AsyncFlowMesh(base_url=TEST_BASE_URL, api_key="flm-test-key")
+    respx.get(
+        route_url("download_result_file", task_id="tsk-1", filename="model.bin")
+    ).respond(status, json={"detail": {"code": code, "message": "because"}})
+
+    with pytest.raises(error) as caught:
+        await client.results.download_file("tsk-1", "model.bin", tmp_path / "model.bin")
     assert "because" in str(caught.value)

@@ -134,7 +134,7 @@ def watch(
             status_value = WorkflowStatus(wf.status)
             uploads = wf.pending_artifact_uploads
             if (status_value, uploads) != last:
-                pending = f" ({uploads} artifact uploads pending)" if uploads else ""
+                pending = f" ({uploads} pending artifact upload(s))" if uploads else ""
                 logging.log(f"[{workflow_id}] status: {status_value}{pending}")
                 last = (status_value, uploads)
             if status_value in TERMINAL_WORKFLOW_STATUSES:
