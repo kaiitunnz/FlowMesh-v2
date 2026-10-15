@@ -712,7 +712,9 @@ def test_the_download_routes_declare_their_binary_responses() -> None:
 
 
 def _owed(runtime: _Runtime, lost: dict[str, ArtifactLoss] | None = None) -> None:
-    upload = ArtifactUpload(dispatch_id="dsp-1", owner_id="wkr-1")
+    upload = ArtifactUpload(
+        dispatch_id="dsp-1", dispatch_task_id="tsk-1", owner_id="wkr-1"
+    )
     runtime.uploads["tsk-1"] = upload if lost is None else upload.settle(lost, 1.0)
 
 

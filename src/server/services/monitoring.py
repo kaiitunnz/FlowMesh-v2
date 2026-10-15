@@ -26,7 +26,7 @@ from shared.schemas.event import (
     parse_event,
 )
 from shared.schemas.worker import WorkerStatus
-from shared.tasks.artifact_upload import ARTIFACT_UPLOAD_EVENT, UploadReport
+from shared.tasks.artifact_upload import UploadReport
 from shared.tools.contract import AgentModelTurnProposal, MediatedOperationOutcome
 from shared.utils.recent import RecentMap
 
@@ -568,7 +568,7 @@ class EventMonitor:
                 if self._unapplied(event, effect):
                     return
                 self._metrics.record_task_event(event)
-            case x if x == ARTIFACT_UPLOAD_EVENT:
+            case "TASK_ARTIFACT_UPLOAD":
                 self._handle_artifact_upload(event, worker_id, payload)
             case "TASK_UPDATE":
                 if not self._runtime.holds_dispatch(
@@ -989,7 +989,8 @@ class EventMonitor:
                 if report.outcome is ReportOutcome.APPLIED:
                     self._revoke_orphan_run(worker_id, event)
                     self._runtime.redrive_overdue_ops(worker_id)
-                    self._runtime.artifact_owner_heard(worker_id)
+                    if self._content_authority is not None:
+                        self._runtime.artifact_owner_heard(worker_id, ttl_sec)
                 if report.outcome is not ReportOutcome.UNKNOWN:
                     self._record_gpu_availability(worker_id, event.metrics)
                     self._check_holding(worker_id, event.payload.get("holding_seq"))
@@ -1035,6 +1036,8 @@ class EventMonitor:
                     )
                 else:
                     self._content_authority.on_holding(worker_id, holding)
+                    if holding.added:
+                        self._runtime.artifact_owner_holds(worker_id)
             case "CONTENT_ACCESS_REQUEST" if self._content_access is not None:
                 task_id = str(event.payload["task_id"])
                 dispatch_id = event.payload.get("dispatch_id")

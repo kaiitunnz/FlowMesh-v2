@@ -3,10 +3,13 @@
 import logging
 import threading
 import time
+from collections import defaultdict
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 
 from shared.content import ContentReference
 from shared.schemas.event import TaskEvent, TaskFailureKind
+from shared.tasks.artifact_binding import ArtifactBinding
 
 from ..models import TaskRecord, TaskStatus
 from ..redrive import StoreRedriveScheduler
@@ -31,8 +34,13 @@ class _InputCheck:
     # The upstream tasks whose accepted artifacts the task reads and whose upload is
     # still owed; control reads nothing until they settle.
     awaiting: frozenset[str] = frozenset()
-    # Why an upload it waited on lost artifacts, which an unreadable verdict reports.
-    lost: str | None = None
+    # The accepted artifacts the task reads, whose loss an unreadable verdict names.
+    reads: tuple[ArtifactBinding, ...] = ()
+
+    @property
+    def checkable(self) -> bool:
+        """Whether control reads the check's inputs now."""
+        return not self.awaiting
 
 
 INPUT_VERDICT_REPORT = "TASK_FAILED:input_unreadable"
@@ -69,6 +77,7 @@ class InputChecks:
         redrive: StoreRedriveScheduler,
         logger: logging.Logger,
         cv: threading.Condition,
+        lost_reads: Callable[[Iterable[ArtifactBinding]], str | None],
     ) -> None:
         self._ready = ready
         self._committer = committer
@@ -77,6 +86,7 @@ class InputChecks:
         self._redrive = redrive
         self._logger = logger
         self._cv = cv
+        self._lost_reads = lost_reads
         self.input_checks: dict[str, _InputCheck] = {}
 
     def settle_input_checks_locked(
@@ -109,12 +119,11 @@ class InputChecks:
                 self._logger.warning(
                     "Task %s input is unreadable at control: %s", task_id, verdict
                 )
+                lost = self._lost_reads(check.reads)
                 check = self.input_checks[task_id] = replace(
                     check,
                     unreadable=(
-                        f"{check.lost}: {verdict}"
-                        if check.lost is not None
-                        else str(verdict)
+                        f"{lost}: {verdict}" if lost is not None else str(verdict)
                     ),
                 )
                 failures.append(_input_verdict(task_id, check))
@@ -178,40 +187,35 @@ class InputChecks:
         references: tuple[ContentReference, ...],
         members: frozenset[ContentReference] = frozenset(),
         awaiting: frozenset[str] = frozenset(),
-        lost: str | None = None,
+        reads: tuple[ArtifactBinding, ...] = (),
     ) -> None:
         """Keep a returned task out of the queue until control has read its inputs,
         or, while uploads it reads are still owed in ``awaiting``, until they settle.
-        ``lost`` says what uploads it reads already lost."""
+        ``reads`` are the accepted artifacts it reads."""
         self._ready.remove_from_ready_locked(record.task_id)
         self.input_checks[record.task_id] = _InputCheck(
-            worker_id, dispatch_id, references, members, awaiting=awaiting, lost=lost
+            worker_id, dispatch_id, references, members, awaiting=awaiting, reads=reads
         )
         if not awaiting:
             self._redrive.drive_now(record.workflow_id)
 
-    def checkable(self, check: _InputCheck) -> bool:
-        """Whether control reads a held check's inputs now."""
-        return not check.awaiting
-
-    def wake_uploaded_locked(self, producer_id: str, lost: str | None) -> None:
+    def wake_uploaded_locked(self, producer_id: str) -> None:
         """Let the checks waiting on a task's upload read their inputs, now that it
-        settled, durable or with ``lost`` saying what it lost."""
+        settled."""
         for task_id, check in list(self.input_checks.items()):
             if producer_id not in check.awaiting:
                 continue
             check = self.input_checks[task_id] = replace(
-                check,
-                awaiting=check.awaiting - {producer_id},
-                lost=lost if lost is not None else check.lost,
+                check, awaiting=check.awaiting - {producer_id}
             )
-            if not check.awaiting and (record := self._tasks.get(task_id)) is not None:
+            if check.checkable and (record := self._tasks.get(task_id)) is not None:
                 self._redrive.drive_now(record.workflow_id)
 
     def retry_awaiting_locked(self, producer_ids: set[str]) -> None:
-        """Place again each task waiting on one of these tasks' uploads, as its
-        producer can serve it again before the upload lands; it waits again if the
-        read still misses."""
+        """Place again each task waiting on one of these tasks' uploads, as a holder
+        can serve it before the upload lands; it waits again if the read still
+        misses."""
+        retried: dict[str, list[str]] = defaultdict(list)
         for task_id, check in list(self.input_checks.items()):
             if not check.awaiting & producer_ids:
                 continue
@@ -226,7 +230,12 @@ class InputChecks:
                 not_before=time.monotonic() + INPUT_RECHECK_PACE_SEC,
             ):
                 self._cv.notify_all()
-            self._committer.commit_locked(task_id)
+            retried[record.workflow_id].append(task_id)
+        for workflow_id in retried:
+            # The record is unchanged; only the workflow's schedule moved.
+            self._committer.commit_records_locked(
+                workflow_id, (), with_membership=False, sched=True
+            )
 
     def is_input_verdict_locked(
         self,

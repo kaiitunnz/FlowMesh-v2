@@ -8,6 +8,7 @@ import logging
 import time
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest import mock
 
 import fakeredis
 import pytest
@@ -16,6 +17,7 @@ from server.clients.redis import (
     task_state_key,
     workflow_sources_key,
     workflow_uploads_key,
+    workflow_v2_key,
 )
 from server.config import OrchestrationConfig
 from server.registries.task_states import load_task_state
@@ -531,3 +533,256 @@ def test_a_task_loading_a_lost_artifact_is_refused_at_dispatch() -> None:
     reason = setup.runtime.lost_artifact_reads([tree, metrics])
     assert reason is not None and reason.startswith("artifact_lost")
     assert setup.runtime.lost_artifact_reads([metrics]) is None
+
+
+def test_an_unuploadable_report_ahead_of_its_success_is_settled_at_acceptance() -> None:
+    setup = _dispatched()
+    setup.report(UploadReport.UNUPLOADABLE)
+    assert setup.record(setup.train).early_upload_receipt is not None
+
+    setup.succeed([setup.tree(stored=False)])
+    assert setup.train in setup.runtime._reconciler._queued
+    setup.runtime._reconciler.check(setup.train)
+
+    upload = setup.record(setup.train).artifact_upload
+    assert upload is not None and upload.state is ArtifactDurability.LOST
+
+
+def _merged(parent_owes: bool) -> tuple[_Setup, str, str]:
+    """A merged dispatch of ``a`` with children ``b`` and ``c`` whose success staged
+    ``b``'s artifacts, and ``a``'s when ``parent_owes``."""
+    setup = _Setup()
+    runtime = setup.runtime
+    _, results = asyncio.run(
+        runtime.register("owner", "org", _SIBLINGS, format="native")
+    )
+    a, b, c = (r.task_id for r in results)
+    with runtime._cv:
+        assert {runtime._ready.pop_ready_locked() for _ in range(2)} == {setup.train, a}
+    assert runtime.plan_merge(a, 8, "wkr-1") == [b, c]
+    record_dispatch(runtime, a, dispatch_id="dsp-m")
+    staged = setup.file(b"weights", "model.bin", stored=False)
+    payload = result_payload(setup.reader, a, {"value": a}, "org")
+    payload["artifacts"] = [staged.model_dump(mode="json")] if parent_owes else []
+    payload["child_result_references"] = {
+        child: store_result(setup.reader, child, {"value": child}, "org").model_dump(
+            mode="json"
+        )
+        for child in (b, c)
+    }
+    payload["child_artifacts"] = {b: [staged.model_dump(mode="json")]}
+    payload[ARTIFACTS_PENDING] = True
+    runtime.mark_succeeded(a, "wkr-1", payload, _TS, dispatch_id="dsp-m")
+    return setup, a, b
+
+
+@pytest.mark.parametrize("parent_owes", [True, False], ids=["parent-settled", "none"])
+def test_a_merged_childs_upload_renews_under_the_dispatchs_task(
+    parent_owes: bool,
+) -> None:
+    setup, a, b = _merged(parent_owes)
+    renew = setup.runtime.renewable_content_scope
+    if parent_owes:
+        setup.runtime.record_artifact_upload(a, "wkr-1", "dsp-m", UploadReport.UPLOADED)
+    assert setup.record(a).merged_parent_id is None
+
+    child = setup.record(b).artifact_upload
+    assert child is not None and child.pending
+    assert renew(a, "wkr-1", "dsp-m") == "org"
+    assert renew(a, "wkr-2", "dsp-m") is None
+
+    setup.runtime.record_artifact_upload(b, "wkr-1", "dsp-m", UploadReport.UPLOADED)
+    assert renew(a, "wkr-1", "dsp-m") is None
+
+
+def test_an_early_receipt_of_a_merged_child_is_kept_for_its_success() -> None:
+    setup = _Setup()
+    runtime = setup.runtime
+    _, results = asyncio.run(
+        runtime.register("owner", "org", _SIBLINGS, format="native")
+    )
+    a, b, c = (r.task_id for r in results)
+    with runtime._cv:
+        assert {runtime._ready.pop_ready_locked() for _ in range(2)} == {setup.train, a}
+    assert runtime.plan_merge(a, 8, "wkr-1") == [b, c]
+    record_dispatch(runtime, a, dispatch_id="dsp-m")
+
+    runtime.record_artifact_upload(b, "wkr-1", "dsp-m", UploadReport.UPLOADED)
+    runtime.record_artifact_upload(c, "wkr-2", "dsp-m", UploadReport.UPLOADED)
+
+    receipt = setup.record(b).early_upload_receipt
+    assert receipt is not None and receipt.dispatch_id == "dsp-m"
+    assert setup.record(c).early_upload_receipt is None
+
+
+def test_a_staged_copy_left_by_another_registration_is_asked_about_safely() -> None:
+    setup = _dispatched()
+    setup.succeed([setup.tree(stored=False)])
+
+    setup.report(UploadReport.ABANDONED, worker_id="wkr-2")
+
+    assert setup.train not in setup.runtime._reconciler._queued
+    assert setup.workers.answers(setup.train)[-1] is UploadDisposition.PENDING
+    setup.report(UploadReport.UPLOADED)
+    assert setup.workers.answers(setup.train)[-1] is UploadDisposition.DURABLE
+
+    setup.report(UploadReport.ABANDONED, worker_id="wkr-2")
+    assert setup.workers.sent[-1] == (
+        "wkr-2",
+        UploadSettled(
+            task_id=setup.train,
+            dispatch_id="dsp-1",
+            disposition=UploadDisposition.DURABLE,
+        ),
+    )
+
+
+def test_a_staged_copy_whose_owner_is_gone_has_its_upload_settled_from_the_store() -> (
+    None
+):
+    setup = _dispatched()
+    setup.succeed([setup.tree(stored=True)])
+    setup.workers.registered.discard("wkr-1")
+
+    setup.report(UploadReport.ABANDONED, worker_id="wkr-2")
+    setup.runtime._reconciler.check(setup.train)
+
+    upload = setup.record(setup.train).artifact_upload
+    assert upload is not None and upload.state is ArtifactDurability.DURABLE
+
+
+def test_an_owner_declared_lost_renews_nothing_and_settles_nothing() -> None:
+    setup = _dispatched()
+    setup.succeed([setup.tree(stored=False)])
+
+    setup.runtime.artifact_owner_lost("wkr-1")
+
+    assert setup.runtime.renewable_content_scope(setup.train, "wkr-1", "dsp-1") is None
+    setup.report(UploadReport.UPLOADED)
+    upload = setup.record(setup.train).artifact_upload
+    assert upload is not None and upload.pending
+    setup.runtime._reconciler.check(setup.train)
+    upload = setup.record(setup.train).artifact_upload
+    assert upload is not None and upload.state is ArtifactDurability.LOST
+    assert not setup.runtime._uploads.fenced_locked("wkr-1")
+
+
+def test_a_staged_success_for_a_task_no_longer_held_is_answered() -> None:
+    setup = _dispatched()
+    payload = result_payload(setup.reader, setup.train, {"ok": True}, "org")
+    payload["artifacts"] = [setup.tree(stored=False).model_dump(mode="json")]
+    payload[ARTIFACTS_PENDING] = True
+
+    setup.runtime.mark_succeeded("tsk-freed", "wkr-1", payload, _TS, "dsp-9")
+
+    assert setup.workers.answers("tsk-freed") == [UploadDisposition.REJECTED]
+
+
+def test_a_freed_tasks_upload_is_answered_from_its_stored_record() -> None:
+    setup = _dispatched()
+    setup.succeed([setup.tree(stored=False)])
+    setup.report(UploadReport.UPLOADED)
+    stored = setup.record(setup.train).model_copy()
+    with setup.runtime._lock:
+        setup.runtime._tasks.pop(setup.train)
+
+    def stored_task(task_id: str) -> Any:
+        if task_id != setup.train:
+            return None
+        return SimpleNamespace(persisted=SimpleNamespace(record=stored))
+
+    payload = result_payload(setup.reader, setup.train, {"ok": True}, "org")
+    payload[ARTIFACTS_PENDING] = True
+
+    with mock.patch.object(setup.runtime, "_stored_task", stored_task):
+        setup.runtime.mark_succeeded(setup.train, "wkr-1", payload, _TS, "dsp-1")
+        setup.runtime.mark_succeeded(setup.train, "wkr-1", payload, _TS, "dsp-0")
+
+    assert setup.workers.answers(setup.train)[-2:] == [
+        UploadDisposition.DURABLE,
+        UploadDisposition.REJECTED,
+    ]
+
+
+def test_a_success_accepted_for_an_owner_that_left_is_settled_from_the_store() -> None:
+    setup = _dispatched()
+    setup.workers.registered.discard("wkr-1")
+
+    setup.succeed([setup.tree(stored=True)])
+
+    assert setup.train in setup.runtime._reconciler._queued
+    assert setup.runtime.renewable_content_scope(setup.train, "wkr-1", "dsp-1") is None
+
+
+def test_a_store_check_remembers_the_objects_it_found_across_retries() -> None:
+    setup = _dispatched()
+    setup.succeed([setup.tree(stored=True)])
+    store = setup.reader.store
+    asked: list[ContentReference] = []
+    stored_size = store.stored_size
+
+    def flaky(reference: ContentReference) -> int:
+        asked.append(reference)
+        if len(asked) == 2:
+            raise ContentUnavailable("store down")
+        return stored_size(reference)
+
+    store.stored_size = flaky  # type: ignore[method-assign]
+    setup.runtime._reconciler.check(setup.train)
+    upload = setup.record(setup.train).artifact_upload
+    assert upload is not None and upload.pending
+    setup.runtime._reconciler.check(setup.train)
+
+    upload = setup.record(setup.train).artifact_upload
+    assert upload is not None and upload.state is ArtifactDurability.DURABLE
+    first, second, third = asked
+    assert third == second != first
+
+
+def test_a_reader_of_a_durable_sibling_of_a_lost_artifact_is_not_blamed() -> None:
+    setup = _dispatched()
+    stored = setup.file(b"metrics", "metrics.json", stored=True)
+    setup.succeed([setup.tree(stored=False), stored])
+    bindings = setup.record(setup.train).artifacts
+    tree, metrics = (
+        bindings[("final", "final_model")],
+        bindings[("final", "metrics.json")],
+    )
+    setup.runtime.artifact_owner_lost("wkr-1")
+    setup.runtime._reconciler.check(setup.train)
+
+    with setup.runtime._lock:
+        assert setup.runtime._lost_reads_locked([metrics]) is None
+        reason = setup.runtime._lost_reads_locked([tree, metrics])
+    assert reason == f"artifact_lost: task {setup.train} lost final/final_model"
+
+
+def test_an_unrestorable_workflow_stays_open_on_its_owed_uploads() -> None:
+    setup = _dispatched(_V2)
+    setup.succeed([setup.tree(stored=False)])
+    setup.finish_use()
+    raw_control(setup.registry).set(workflow_v2_key(setup.workflow_id), "{}")
+
+    restarted = _runtime(setup.registry, setup.workers, setup.reader)
+    asyncio.run(restarted.rehydrate([setup.workflow_id]))
+
+    assert not restarted.workflow_settlement(setup.workflow_id).settled
+    restarted.record_artifact_upload(
+        setup.train, "wkr-1", "dsp-1", UploadReport.UPLOADED
+    )
+    assert restarted.workflow_settlement(setup.workflow_id).settled
+
+
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+def test_unregistering_a_workflow_drops_its_owed_uploads(use_async: bool) -> None:
+    setup = _dispatched()
+    setup.succeed([setup.tree(stored=False)])
+    uploads = workflow_uploads_key(setup.workflow_id)
+    assert raw_control(setup.registry).exists(uploads)
+
+    if use_async:
+        asyncio.run(setup.registry.unregister_workflows_async(setup.workflow_id))
+    else:
+        setup.registry.unregister_workflows(setup.workflow_id)
+
+    assert not raw_control(setup.registry).exists(uploads)

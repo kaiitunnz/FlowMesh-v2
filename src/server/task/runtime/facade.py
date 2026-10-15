@@ -116,7 +116,13 @@ from ...services.credential_vault import CredentialVault
 from ...utils.cursors import page_slice
 from ...utils.query import QueryFilter
 from ...utils.time import now_iso, parse_iso_ts
-from ..artifact_durability import ArtifactLoss, ArtifactUpload
+from ..artifact_durability import (
+    ArtifactLoss,
+    ArtifactUpload,
+    EarlyUploadReceipt,
+    UploadStateUnavailable,
+    lost_read,
+)
 from ..credentials import (
     CredentialRefs,
     InlineCredentials,
@@ -450,6 +456,17 @@ _RESTORE_MEMBER_READERS = 4
 _RESTORE_MEMBER_RETRY_SEC = 30.0
 
 
+def _announced_tasks(task_id: str, payload: dict[str, Any]) -> list[str]:
+    """Return the tasks a success announced artifacts for: its own, and each merged
+    child's."""
+    children = payload.get("child_artifacts")
+    return (
+        [task_id, *(str(c) for c in children)]
+        if isinstance(children, dict)
+        else [task_id]
+    )
+
+
 def _trees(
     artifacts: Sequence[ArtifactBinding],
 ) -> dict[ObjectIdentity, ContentReference]:
@@ -651,6 +668,7 @@ class TaskRuntime:
             self._redrive,
             self._logger,
             self._cv,
+            self._lost_reads_locked,
         )
         self._settled_history = SettledHistory(
             self._tasks.holds,
@@ -1105,6 +1123,7 @@ class TaskRuntime:
                         self._install_rehydrated_workflow_locked(
                             workflow_id, tasks, None, rehydrated_at
                         )
+                        self._track_uploads_locked(workflow_id)
                         self._actions.file_locked(
                             workflow_id, *revokes, Settled(workflow_id)
                         )
@@ -1127,10 +1146,7 @@ class TaskRuntime:
                     self._install_rehydrated_workflow_locked(
                         workflow_id, tasks, sched, rehydrated_at
                     )
-                # The uploads still owed hold the workflow open before anything can
-                # close it.
-                for record in self._tasks.of_workflow(workflow_id):
-                    self._uploads.track_locked(record)
+                self._track_uploads_locked(workflow_id)
                 # A task a restart found still being cancelled may never have had its
                 # interrupt delivered. A workflow whose last task settled just before
                 # the crash has no event left to close it: replay the completion
@@ -1169,6 +1185,12 @@ class TaskRuntime:
                 "Rehydrated %d workflow(s) from durable state", len(restored)
             )
         return restored
+
+    def _track_uploads_locked(self, workflow_id: str) -> None:
+        """Index a restored workflow's owed uploads, which hold it open, before
+        anything can close it."""
+        for record in self._tasks.of_workflow(workflow_id):
+            self._uploads.track_locked(record)
 
     async def _reconcile_departed_owners(self) -> None:
         """Settle from the store the uploads owed by worker registrations that ended
@@ -1995,8 +2017,8 @@ class TaskRuntime:
         return True
 
     def send_upload_settled(self, worker_id: str, settled: UploadSettled) -> None:
-        """Answer a worker about a dispatch's upload of one task's artifacts; a worker
-        no longer registered hears nothing, and asks again if it comes back."""
+        """Tell a worker where a dispatch's upload of one task's artifacts stands; an
+        unregistered worker hears nothing."""
         worker = self._worker_registry.get_worker(worker_id)
         if worker is None:
             return
@@ -3738,16 +3760,18 @@ class TaskRuntime:
 
     def _owe_uploads_locked(
         self,
-        records: Iterable[TaskRecord],
+        records: Sequence[TaskRecord],
         payload: dict[str, Any],
         worker_id: str | None,
         dispatch_id: str | None,
     ) -> None:
         """Record the upload a success leaves owed of each task's accepted final
-        artifacts, when it reported them staged rather than stored.
+        artifacts, when it reported them staged rather than stored; the first record is
+        the task the dispatch ran.
 
-        A receipt the dispatch sent ahead of its success settles the upload durable at
-        once.
+        A report the dispatch sent ahead of its success applies at once: a receipt
+        settles the upload durable, and an upload that cannot finish is settled from
+        the store.
         """
         if not payload.get(ARTIFACTS_PENDING) or not worker_id or not dispatch_id:
             return
@@ -3759,11 +3783,30 @@ class TaskRuntime:
                 for binding in record.artifacts.values()
             ):
                 continue
-            upload = ArtifactUpload(dispatch_id=dispatch_id, owner_id=worker_id)
-            if receipt == dispatch_id:
-                upload = upload.settle({}, now)
+            upload = ArtifactUpload(
+                dispatch_id=dispatch_id,
+                dispatch_task_id=records[0].task_id,
+                owner_id=worker_id,
+            )
+            if receipt is not None and receipt.dispatch_id == dispatch_id:
+                match receipt.report:
+                    case UploadReport.UPLOADED:
+                        upload = upload.settle({}, now)
+                    case UploadReport.UNUPLOADABLE:
+                        self._unuploadable_locked(record.task_id, worker_id, receipt)
             record.artifact_upload = upload
             self._uploads.track_locked(record)
+
+    def _unuploadable_locked(
+        self, task_id: str, worker_id: str, receipt: EarlyUploadReceipt | None = None
+    ) -> None:
+        self._logger.warning(
+            "Task %s's upload cannot finish on %s: %s",
+            task_id,
+            worker_id,
+            receipt.error if receipt is not None else None,
+        )
+        self._reconciler.request(task_id)
 
     def _answer_unowed_uploads_locked(
         self,
@@ -3777,30 +3820,34 @@ class TaskRuntime:
         so its worker stops reporting it and drops what it staged."""
         if not payload.get(ARTIFACTS_PENDING) or not worker_id or not dispatch_id:
             return
-        children = payload.get("child_artifacts")
-        for task_id in (
-            record.task_id,
-            *(children if isinstance(children, dict) else ()),
-        ):
-            owed = self._tasks.get(str(task_id))
+        for task_id in _announced_tasks(record.task_id, payload):
+            owed = self._tasks.get(task_id)
             if (
                 owed is not None
                 and owed.artifact_upload is not None
                 and owed.artifact_upload.dispatch_id == dispatch_id
             ):
                 self._ack_upload_locked(owed, worker_id)
-                continue
-            self._file_locked(
-                record.task_id,
-                UploadAck(
-                    worker_id,
-                    UploadSettled(
-                        task_id=str(task_id),
-                        dispatch_id=dispatch_id,
-                        disposition=UploadDisposition.REJECTED,
-                    ),
+            else:
+                self._reject_upload_locked(
+                    record.task_id, task_id, worker_id, dispatch_id
+                )
+
+    def _reject_upload_locked(
+        self, filed_under: str, task_id: str, worker_id: str, dispatch_id: str
+    ) -> None:
+        """Tell a worker no upload is owed of a task's artifacts for a dispatch."""
+        self._file_locked(
+            filed_under,
+            UploadAck(
+                worker_id,
+                UploadSettled(
+                    task_id=task_id,
+                    dispatch_id=dispatch_id,
+                    disposition=UploadDisposition.REJECTED,
                 ),
-            )
+            ),
+        )
 
     def _ack_upload_locked(self, record: TaskRecord, worker_id: str) -> None:
         """Tell a worker where a task's upload stands, once that is durable."""
@@ -3819,9 +3866,24 @@ class TaskRuntime:
         )
 
     def _merged_records_locked(self, record: TaskRecord) -> list[TaskRecord]:
-        """A task's record with those of the merged children its success settled."""
+        """Return a task's record with those of the merged children its success
+        settled."""
         children = [self._tasks.get(child) for child in record.merged_children or ()]
         return [record, *(child for child in children if child is not None)]
+
+    def _answer_unheld_success(
+        self,
+        task_id: str,
+        worker_id: str | None,
+        payload: dict[str, Any],
+        dispatch_id: str | None,
+    ) -> None:
+        """Answer a staged success for a task this runtime no longer changes, about
+        each task it announced artifacts for."""
+        if not payload.get(ARTIFACTS_PENDING) or not worker_id or not dispatch_id:
+            return
+        for announced in _announced_tasks(task_id, payload):
+            self._answer_unheld_upload(announced, worker_id, dispatch_id)
 
     def record_artifact_upload(
         self,
@@ -3834,42 +3896,54 @@ class TaskRuntime:
         """Apply a worker's report of a dispatch's upload of a task's artifacts.
 
         The owing registration's report that every object is stored settles the upload
-        durable; a report that it cannot finish, or one from a later registration of
-        that worker saying it stopped, has the upload settled from the store. A
-        receipt that arrives while the success it follows is still in flight is kept
+        durable, and its report that it cannot finish has the upload settled from the
+        store. A worker reporting staged copies an earlier registration left has the
+        upload settled from the store once its owner is no longer registered, and
+        hears that it is still owed otherwise. An owner declared lost settles nothing.
+        A report that arrives while the success it follows is still in flight is kept
         for that success. Each answer is sent once what the report changed is durable;
-        a task whose workflow was freed is answered from its stored record.
+        a task this runtime no longer changes is answered from its record as it stands.
         """
         if not dispatch_id:
-            return None
+            return
+        owner_gone = False
+        if report is UploadReport.ABANDONED:
+            with self._lock:
+                record = self._tasks.get(task_id)
+                upload = record.artifact_upload if record is not None else None
+            if upload is not None and upload.pending:
+                owner_gone = self._worker_registry.get_worker(upload.owner_id) is None
         with self._transition():
             record = self._reported_record_locked(task_id)
             if record is not None:
                 self._apply_upload_report_locked(
-                    record, worker_id, dispatch_id, report, error
+                    record, worker_id, dispatch_id, report, error, owner_gone
                 )
-                return None
-        self._answer_freed_upload(task_id, worker_id, dispatch_id)
-        return None
+                return
+        self._answer_unheld_upload(task_id, worker_id, dispatch_id)
 
-    def _answer_freed_upload(
+    def _answer_unheld_upload(
         self, task_id: str, worker_id: str, dispatch_id: str
     ) -> None:
-        """Answer an upload report of a task this runtime no longer holds from its
-        stored record, which keeps how the upload settled."""
-        try:
-            stored = self._workflow_registry.load_history([task_id])[0]
-        except Exception:
-            # Not answered: the worker reports again.
-            self._logger.debug(
-                "Could not read the stored upload of %s", task_id, exc_info=True
-            )
+        """Answer an upload report of a task this runtime no longer changes from its
+        record: the one held while its settled workflow is being freed, or the stored
+        one after."""
+        with self._lock:
+            record = self._tasks.get(task_id)
+            held = record is not None
+        if not held:
+            try:
+                stored = self._stored_task(task_id)
+            except Exception:
+                # Not answered: the worker reports again.
+                self._logger.debug(
+                    "Could not read the stored upload of %s", task_id, exc_info=True
+                )
+                return
+            record = stored.persisted.record if stored is not None else None
+        if record is not None and record.status not in TERMINAL_TASK_STATUSES:
             return
-        upload = stored.persisted.record.artifact_upload if stored else None
-        if stored is not None and stored.persisted.record.status not in (
-            TERMINAL_TASK_STATUSES
-        ):
-            return
+        upload = record.artifact_upload if record is not None else None
         disposition = (
             UploadDisposition(upload.state.value)
             if upload is not None and upload.dispatch_id == dispatch_id
@@ -3889,59 +3963,74 @@ class TaskRuntime:
         dispatch_id: str,
         report: UploadReport,
         error: str | None,
+        owner_gone: bool,
     ) -> None:
         """Apply an upload report about a task this runtime holds."""
         task_id = record.task_id
         upload = record.artifact_upload
         if upload is None or upload.dispatch_id != dispatch_id:
-            if (
-                report is UploadReport.UPLOADED
-                and record.status == TaskStatus.DISPATCHED
-                and record.dispatch_id == dispatch_id
-                and record.assigned_worker == worker_id
-            ):
-                # The success it follows is behind it on the stream; it applies
-                # when that success commits.
-                record.early_upload_receipt = dispatch_id
-                self._committer.commit_locked(task_id, sched=False)
-                return
-            if (
+            if not self._keep_early_report_locked(
+                record, worker_id, dispatch_id, report, error
+            ) and (
                 record.status in TERMINAL_TASK_STATUSES
                 or record.status == TaskStatus.PENDING
             ):
-                self._file_locked(
-                    task_id,
-                    UploadAck(
-                        worker_id,
-                        UploadSettled(
-                            task_id=task_id,
-                            dispatch_id=dispatch_id,
-                            disposition=UploadDisposition.REJECTED,
-                        ),
-                    ),
-                )
+                self._reject_upload_locked(task_id, task_id, worker_id, dispatch_id)
             self._committer.close_locked(record.workflow_id)
             return
         if not upload.pending:
             self._ack_upload_locked(record, worker_id)
             self._committer.close_locked(record.workflow_id)
             return
-        owner = worker_id == upload.owner_id
+        owner = worker_id == upload.owner_id and not self._uploads.fenced_locked(
+            worker_id
+        )
         match report:
             case UploadReport.UPLOADED if owner:
                 self._settle_upload_locked(record, {})
             case UploadReport.UNUPLOADABLE if owner:
-                self._logger.warning(
-                    "Task %s's upload cannot finish on %s: %s",
+                self._unuploadable_locked(
                     task_id,
                     worker_id,
-                    error,
+                    EarlyUploadReceipt(
+                        dispatch_id=dispatch_id, report=report, error=error
+                    ),
                 )
+            case UploadReport.ABANDONED if owner_gone:
                 self._reconciler.request(task_id)
             case UploadReport.ABANDONED:
-                self._reconciler.request(task_id)
+                # Its owner still uploads it; the one asking hears so, and asks again.
+                self._ack_upload_locked(record, worker_id)
         self._committer.close_locked(record.workflow_id)
-        return
+
+    def _keep_early_report_locked(
+        self,
+        record: TaskRecord,
+        worker_id: str,
+        dispatch_id: str,
+        report: UploadReport,
+        error: str | None,
+    ) -> bool:
+        """Keep a dispatch's report about a task its success has not reached control
+        yet, for that success, and return whether it was kept."""
+        if report is UploadReport.ABANDONED or record.status != TaskStatus.DISPATCHED:
+            return False
+        dispatched = (
+            self._tasks.get(record.merged_parent_id)
+            if record.merged_parent_id
+            else record
+        )
+        if (
+            dispatched is None
+            or dispatched.dispatch_id != dispatch_id
+            or dispatched.assigned_worker != worker_id
+        ):
+            return False
+        record.early_upload_receipt = EarlyUploadReceipt(
+            dispatch_id=dispatch_id, report=report, error=error
+        )
+        self._committer.commit_locked(record.task_id, sched=False)
+        return True
 
     def _settle_upload_locked(
         self, record: TaskRecord, lost: dict[str, ArtifactLoss]
@@ -3955,17 +4044,16 @@ class TaskRuntime:
         self._ack_upload_locked(record, upload.owner_id)
         if settled.lost:
             self._logger.error("%s", settled.failure(record.task_id))
-        self._inputs.wake_uploaded_locked(
-            record.task_id,
-            settled.failure(record.task_id) if settled.lost else None,
-        )
+        self._inputs.wake_uploaded_locked(record.task_id)
         self._committer.settle_if_done_locked(record.workflow_id)
         self._cv.notify_all()
 
     def artifact_owner_lost(self, worker_id: str) -> None:
-        """Settle from the store every upload a departed worker registration owed."""
+        """Fence a departed worker registration and settle from the store every upload
+        it owed."""
         with self._lock:
             owed = self._uploads.owed_by_locked(worker_id)
+            self._uploads.fence_locked(worker_id)
         if owed:
             self._logger.info(
                 "Worker %s left owing %d artifact upload(s); checking the store",
@@ -3974,18 +4062,33 @@ class TaskRuntime:
             )
             self._reconciler.request(*owed)
 
-    def artifact_owner_heard(self, worker_id: str) -> None:
-        """Place again, on a pace, the tasks waiting on uploads a heard worker owes, so
-        they read from it before the uploads land."""
-        with self._transition():
-            if not self._uploads.retry_due_locked(worker_id, time.monotonic()):
+    def artifact_owner_heard(self, worker_id: str, unheard_after: float) -> None:
+        """Place again the tasks waiting on uploads a worker owes, when it is heard
+        from after going unheard for ``unheard_after``, so they read from it before
+        the uploads land."""
+        with self._lock:
+            if not self._uploads.owes_locked(worker_id) or not (
+                self._uploads.heard_locked(worker_id, time.monotonic(), unheard_after)
+            ):
                 return
+        self._retry_awaiting(worker_id)
+
+    def artifact_owner_holds(self, worker_id: str) -> None:
+        """Place again the tasks waiting on uploads a worker owes, once it reports
+        holding new copies, so they read from it before the uploads land."""
+        with self._lock:
+            if not self._uploads.owes_locked(worker_id):
+                return
+        self._retry_awaiting(worker_id)
+
+    def _retry_awaiting(self, worker_id: str) -> None:
+        with self._transition():
             self._inputs.retry_awaiting_locked(
                 set(self._uploads.owed_by_locked(worker_id))
             )
 
     def artifact_upload_owners(self) -> set[str]:
-        """Every worker registration owing an artifact upload."""
+        """Return every worker registration owing an artifact upload."""
         with self._lock:
             return self._uploads.owners_locked()
 
@@ -4015,12 +4118,6 @@ class TaskRuntime:
                 return
             self._settle_upload_locked(record, lost)
 
-    def pending_artifact_inputs(self, task_id: str) -> frozenset[str]:
-        """The upstream tasks whose accepted artifacts a task reads and whose upload is
-        still owed."""
-        with self._lock:
-            return self._pending_producers_locked(task_id)
-
     def _pending_producers_locked(self, task_id: str) -> frozenset[str]:
         record = self._tasks.get(task_id)
         if record is None:
@@ -4036,32 +4133,26 @@ class TaskRuntime:
             pending.update(self._pending_publisher_locked(binding))
         return frozenset(pending)
 
-    def _lost_inputs_locked(self, record: TaskRecord) -> str | None:
-        """What the settled uploads of the artifacts a task reads lost, if any did."""
-        dispatches = {binding.dispatch_id for binding in record.dispatched_artifacts}
-        producers = set(record.dispatched_producers)
-        if dispatches:
-            producers.update(
-                upstream.task_id
-                for upstream in self._tasks.values()
-                if upstream.workflow_id == record.workflow_id
+    def _artifact_reads_locked(self, record: TaskRecord) -> tuple[ArtifactBinding, ...]:
+        """Return the accepted artifacts a dispatched task reads: those named to it,
+        and its upstream tasks' final ones."""
+        return (
+            *record.dispatched_artifacts,
+            *(
+                binding
+                for producer in record.dispatched_producers
+                if (upstream := self._tasks.get(producer)) is not None
                 and upstream.artifact_upload is not None
-                and upstream.artifact_upload.dispatch_id in dispatches
-            )
-        failures = [
-            upload.failure(producer)
-            for producer in sorted(producers)
-            if (upstream := self._tasks.get(producer)) is not None
-            and (upload := upstream.artifact_upload) is not None
-            and upload.lost
-        ]
-        return "; ".join(failures) or None
+                for binding in upstream.artifacts.values()
+                if binding.revision == FINAL_REVISION
+            ),
+        )
 
     def pending_artifact_digests(
         self, bindings: Iterable[ArtifactBinding]
     ) -> list[str] | None:
-        """The digests of the accepted artifacts among ``bindings`` whose upload is
-        still owed, for a dispatch reading them."""
+        """Return the digests of the accepted artifacts among ``bindings`` whose
+        upload is still owed, for a dispatch reading them."""
         with self._lock:
             pending = {
                 binding.reference.content_digest
@@ -4071,26 +4162,28 @@ class TaskRuntime:
         return sorted(pending) or None
 
     def lost_artifact_reads(self, bindings: Iterable[ArtifactBinding]) -> str | None:
-        """Why a task loading ``bindings`` cannot run, when an upload owed for one of
-        them settled with it lost."""
+        """Return why a task loading ``bindings`` cannot run, when an upload owed for
+        one of them settled with it lost."""
         with self._lock:
-            failures = {
-                upload.failure(task_id)
-                for binding in bindings
-                for task_id in self._uploads.lost_for_dispatch_locked(
-                    binding.dispatch_id
-                )
-                if (record := self._tasks.get(task_id)) is not None
-                and (upload := record.artifact_upload) is not None
-                and (owned := record.artifacts.get((binding.revision, binding.name)))
-                is not None
-                and owned.reference.identity == binding.reference.identity
-                and upload.durability(binding)[0] is ArtifactDurability.LOST
-            }
+            return self._lost_reads_locked(bindings)
+
+    def _lost_reads_locked(self, bindings: Iterable[ArtifactBinding]) -> str | None:
+        failures = {
+            lost_read(task_id, binding)
+            for binding in bindings
+            for task_id in self._uploads.lost_for_dispatch_locked(binding.dispatch_id)
+            if (record := self._tasks.get(task_id)) is not None
+            and (upload := record.artifact_upload) is not None
+            and (owned := record.artifacts.get((binding.revision, binding.name)))
+            is not None
+            and owned.reference.identity == binding.reference.identity
+            and upload.durability(binding)[0] is ArtifactDurability.LOST
+        }
         return "; ".join(sorted(failures)) or None
 
     def _pending_publisher_locked(self, binding: ArtifactBinding) -> set[str]:
-        """The task whose still-owed upload covers an accepted artifact, if one does."""
+        """Return the task whose still-owed upload covers an accepted artifact, if one
+        does."""
         return {
             task_id
             for task_id in self._uploads.owed_for_dispatch_locked(binding.dispatch_id)
@@ -4101,19 +4194,19 @@ class TaskRuntime:
         }
 
     def artifact_upload_of(self, task_id: str) -> ArtifactUpload | None:
-        """The upload a task's success left owed of its final artifacts, as it now
-        stands; None when its success stored them first.
+        """Return the upload a task's success left owed of its final artifacts, as it
+        now stands; None when its success stored them first.
 
-        Raises ``ResultUnavailable`` when a freed task's stored record cannot be read,
-        rather than answer as if its artifacts were stored.
+        Raises ``UploadStateUnavailable`` when a freed task's stored record cannot be
+        read, so a reader never takes its artifacts for stored.
         """
         with self._lock:
             if (record := self._tasks.get(task_id)) is not None:
                 return record.artifact_upload
         try:
-            stored = self._workflow_registry.load_history([task_id])[0]
+            stored = self._stored_task(task_id)
         except Exception as exc:
-            raise ResultUnavailable(
+            raise UploadStateUnavailable(
                 f"could not read the stored record of task {task_id}: {exc}"
             ) from exc
         return stored.persisted.record.artifact_upload if stored is not None else None
@@ -4212,15 +4305,15 @@ class TaskRuntime:
                 return None
             if self._fence.dispatch_live_locked(record, worker_id, dispatch_id):
                 return record.org_id
-            # A dispatch owing its success's artifact upload writes it after the task
-            # settled, from the worker registration holding them.
+            if self._uploads.fenced_locked(worker_id):
+                return None
             for owing_id in self._uploads.owed_for_dispatch_locked(dispatch_id):
                 owing = self._tasks.get(owing_id)
                 if (
                     owing is not None
-                    and owing.artifact_upload is not None
-                    and owing.artifact_upload.owner_id == worker_id
-                    and task_id in (owing_id, owing.merged_parent_id)
+                    and (upload := owing.artifact_upload) is not None
+                    and upload.owner_id == worker_id
+                    and upload.dispatch_task_id == task_id
                 ):
                     return record.org_id
             return None
@@ -4817,7 +4910,7 @@ class TaskRuntime:
                 for task_id, check in self._inputs.input_checks.items()
                 if (record := self._tasks.get(task_id)) is not None
                 and record.workflow_id == workflow_id
-                and self._inputs.checkable(check)
+                and check.checkable
             }
         if not checks:
             return
@@ -5286,7 +5379,7 @@ class TaskRuntime:
         makes the task DONE; a success that does not settle the task binds nothing.
         """
         with self._transition(locked=False):
-            return self._committer.reported(
+            outcome = self._committer.reported(
                 "TASK_SUCCEEDED",
                 task_id,
                 worker_id,
@@ -5295,6 +5388,22 @@ class TaskRuntime:
                     task_id, worker_id, payload, ts, dispatch_id, skip
                 ),
             )
+        if outcome.status is None:
+            self._answer_unheld_success(task_id, worker_id, payload, dispatch_id)
+        elif payload.get(ARTIFACTS_PENDING) and worker_id is not None:
+            self._check_owner_registered(worker_id)
+        return outcome
+
+    def _check_owner_registered(self, worker_id: str) -> None:
+        """Settle from the store the uploads a worker registration owes once it is no
+        longer registered, as when its success is replayed after it left."""
+        with self._lock:
+            if not self._uploads.owes_locked(worker_id) or self._uploads.fenced_locked(
+                worker_id
+            ):
+                return
+        if self._worker_registry.get_worker(worker_id) is None:
+            self.artifact_owner_lost(worker_id)
 
     def _apply_success(
         self,
@@ -5395,6 +5504,9 @@ class TaskRuntime:
                 if record.status == TaskStatus.CANCELLING:
                     # A completion racing the cancel settles it before routing a
                     # captured facade group or consulting the reroute guard.
+                    self._answer_unowed_uploads_locked(
+                        record, payload, worker_id, dispatch_id
+                    )
                     self._file_locked(
                         task_id,
                         *self._mediated_ops.reap_captures_locked(
@@ -5411,6 +5523,9 @@ class TaskRuntime:
                     # terminal result, so it routes the whole ordered membership
                     # kind-specifically, consumed durably in the same reroute save.
                     record.pending_facade_group = None
+                    self._answer_unowed_uploads_locked(
+                        record, payload, worker_id, dispatch_id
+                    )
                     self._route_and_dispatch_facade_group_locked(
                         task_id, group, harness_result.capsule
                     )
@@ -5429,6 +5544,9 @@ class TaskRuntime:
                     # publish the episode with a stale intermediate result. A post-DONE
                     # terminal replay is excluded so it still reaches the idempotent
                     # done-branch below (its fan-out / re-persist heal must survive).
+                    self._answer_unowed_uploads_locked(
+                        record, payload, worker_id, dispatch_id
+                    )
                     return settle_outcome(EventEffect.STALE, record, [], [])
             if record.status == TaskStatus.CANCELLED:
                 self._answer_unowed_uploads_locked(
@@ -5440,15 +5558,11 @@ class TaskRuntime:
                 # re-persist in case the original completion's write failed
                 # after its in-memory commit.
                 self._committer.recommit_terminal_locked(record)
-                if worker_id is not None:
-                    # A worker reports a success again until it hears its upload is
-                    # owed, so the answer goes out again.
-                    for owed in self._merged_records_locked(record):
-                        if (
-                            owed.artifact_upload is not None
-                            and owed.artifact_upload.dispatch_id == dispatch_id
-                        ):
-                            self._ack_upload_locked(owed, worker_id)
+                # A worker reports a success again until it hears where its upload
+                # stands, so the answer goes out again.
+                self._answer_unowed_uploads_locked(
+                    record, payload, worker_id, dispatch_id
+                )
                 # Recover a settlement or fan-out lost to a failed commit or a crash
                 # between the producer's terminal persist and its children: both
                 # are no-ops once applied.
@@ -5708,7 +5822,7 @@ class TaskRuntime:
                 ):
                     held_dispatch = record.dispatch_id
                     awaiting = self._pending_producers_locked(task_id)
-                    lost = self._lost_inputs_locked(record)
+                    reads = self._artifact_reads_locked(record)
                     members = frozenset(
                         reference
                         for reference in consumed
@@ -5725,7 +5839,7 @@ class TaskRuntime:
                         consumed,
                         members,
                         awaiting,
-                        lost,
+                        reads,
                     )
                     return FailureOutcome(end, record.attempts, [], [])
                 self._logger.warning(

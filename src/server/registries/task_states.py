@@ -105,7 +105,10 @@ class PersistedTask(BaseModel):
         data["record"]["artifact_upload"] = (
             upload.model_dump(mode="json") if upload is not None else None
         )
-        data["record"]["early_upload_receipt"] = self.record.early_upload_receipt
+        receipt = self.record.early_upload_receipt
+        data["record"]["early_upload_receipt"] = (
+            receipt.model_dump(mode="json") if receipt is not None else None
+        )
         # And when its first run started, which a serve task's TTL counts from.
         data["record"]["first_started_ts"] = self.record.first_started_ts
         return data

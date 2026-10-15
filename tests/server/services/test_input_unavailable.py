@@ -19,7 +19,7 @@ from server.task.models import TaskStatus
 from server.task.redrive import StoreRedriveScheduler
 from server.task.results import ResultUnavailable, ResultUnreadable
 from server.task.runtime import TaskRuntime, TransitionNotDurable, facade, scheduling
-from server.task.runtime.artifact_uploads import AWAITING_RETRY_SEC, manual_reconciler
+from server.task.runtime.artifact_uploads import manual_reconciler
 from server.task.runtime.input_checks import INPUT_RECHECK_PACE_SEC
 from shared.content import (
     TREE_MEDIA_TYPE,
@@ -728,7 +728,7 @@ async def test_verdicts_reported_again_while_the_monitor_lags_back_off() -> None
 
 
 async def _consumer_of_staged(
-    fixture: "_Attributing",
+    fixture: _Attributing,
 ) -> tuple[str, str, ContentReference]:
     """A dispatched task reading a producer's tree whose upload is still owed."""
     runtime = fixture.runtime
@@ -819,20 +819,48 @@ async def test_a_reader_of_an_upload_lost_before_it_read_fails_as_lost() -> None
 
 
 @pytest.mark.anyio
-async def test_a_waiting_reader_is_placed_again_when_its_producer_is_heard() -> None:
+async def test_a_waiting_reader_is_placed_again_when_its_producer_is_heard_again() -> (
+    None
+):
+    fixture = _Attributing()
+    runtime = fixture.runtime
+    task_id, _, member = await _consumer_of_staged(fixture)
+    fixture.report(_unavailable(task_id, [member]))
+    now = time.monotonic()
+
+    for heard in (now, now + 10, now + 20):
+        with mock.patch.object(facade.time, "monotonic", return_value=heard):
+            runtime.artifact_owner_heard("wkr-0", 30)
+    assert task_id in runtime._inputs.input_checks
+    later = now + 60
+    committer = runtime._committer
+    with (
+        mock.patch.object(facade.time, "monotonic", return_value=later),
+        mock.patch.object(
+            committer, "commit_records_locked", wraps=committer.commit_records_locked
+        ) as writes,
+    ):
+        runtime.artifact_owner_heard("wkr-0", 30)
+
+    assert task_id not in runtime._inputs.input_checks
+    assert runtime._tasks[task_id].avoided_worker is None
+    assert [call.args[1] for call in writes.call_args_list] == [()]
+    paced = later + INPUT_RECHECK_PACE_SEC
+    with mock.patch.object(scheduling.time, "monotonic", return_value=paced):
+        assert fixture.ready() == task_id
+
+
+@pytest.mark.anyio
+async def test_a_waiting_reader_is_placed_again_when_its_producer_holds_copies() -> (
+    None
+):
     fixture = _Attributing()
     runtime = fixture.runtime
     task_id, _, member = await _consumer_of_staged(fixture)
     fixture.report(_unavailable(task_id, [member]))
 
-    runtime.artifact_owner_heard("wkr-0")
+    runtime.artifact_owner_holds("wkr-1")
     assert task_id in runtime._inputs.input_checks
-    later = time.monotonic() + AWAITING_RETRY_SEC + 1
-    with mock.patch.object(facade.time, "monotonic", return_value=later):
-        runtime.artifact_owner_heard("wkr-0")
+    runtime.artifact_owner_holds("wkr-0")
 
     assert task_id not in runtime._inputs.input_checks
-    assert runtime._tasks[task_id].avoided_worker is None
-    paced = later + INPUT_RECHECK_PACE_SEC
-    with mock.patch.object(scheduling.time, "monotonic", return_value=paced):
-        assert fixture.ready() == task_id

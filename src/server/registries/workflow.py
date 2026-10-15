@@ -138,8 +138,7 @@ class WorkflowRecord(BaseModel):
     )
     artifact_failure: str = Field(
         default="",
-        description="Why the workflow failed because a task's accepted artifact was "
-        "lost, if it did; set once, by the first loss.",
+        description="Why a task's lost artifact failed the workflow, when one did.",
         exclude_if=lambda failure: not failure,
     )
 
@@ -199,8 +198,7 @@ class Workflow(BaseModel):
     )
     pending_artifact_uploads: int = Field(
         default=0,
-        description="How many of its tasks' accepted artifact sets are not yet in "
-        "the shared store; the workflow is not done while any is.",
+        description="How many of its tasks' artifacts are still uploading.",
     )
 
 
@@ -600,6 +598,7 @@ class WorkflowRegistry(WorkflowHistoryStore, ArtifactCatalogStore):
             pipe.delete(*(workflow_sources_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_credential_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_revision_key(wid) for wid in workflow_ids))
+            pipe.delete(*(workflow_uploads_key(wid) for wid in workflow_ids))
             for task_id in task_ids:
                 pipe.delete(task_state_key(task_id), task_artifacts_key(task_id))
             pipe.execute()
@@ -624,6 +623,7 @@ class WorkflowRegistry(WorkflowHistoryStore, ArtifactCatalogStore):
             pipe.delete(*(workflow_sources_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_credential_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_revision_key(wid) for wid in workflow_ids))
+            pipe.delete(*(workflow_uploads_key(wid) for wid in workflow_ids))
             for task_id in task_ids:
                 pipe.delete(task_state_key(task_id), task_artifacts_key(task_id))
             await pipe.execute()

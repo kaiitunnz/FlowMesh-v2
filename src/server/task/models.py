@@ -21,7 +21,7 @@ from shared.tasks.worker_message import HardwareUsage
 
 from ..orchestration.tool_dispatch import FacadeTurnGroup
 from ..utils.time import now_iso
-from .artifact_durability import ArtifactUpload
+from .artifact_durability import ArtifactUpload, EarlyUploadReceipt
 
 _logger = logging.getLogger(__name__)
 
@@ -374,13 +374,12 @@ class TaskRecord(BaseModel):
     )
     artifact_upload: ArtifactUpload | None = Field(
         default=None,
-        description="The upload its success left owed of the final artifacts it "
-        "accepted, and how it settled.",
+        description="The owed upload of the final artifacts its success accepted.",
         exclude=True,
     )
-    early_upload_receipt: str | None = Field(
+    early_upload_receipt: EarlyUploadReceipt | None = Field(
         default=None,
-        description="The dispatch whose upload receipt arrived ahead of its success.",
+        description="An upload report that arrived ahead of its success.",
         exclude=True,
     )
     unwritten_artifacts: list[ArtifactBinding] = Field(

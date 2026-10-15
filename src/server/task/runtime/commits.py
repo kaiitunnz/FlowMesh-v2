@@ -723,13 +723,11 @@ class TransitionCommitter:
             )
 
     def workflow_settlement_locked(self, workflow_id: str) -> WorkflowSettlement:
-        """Whether every task of a workflow has settled in memory, durable or not, and
-        the last of their finishes.
+        """Whether every task of a workflow and every artifact upload it owes has
+        settled in memory, durable or not, and the last of their finishes.
 
         A workflow whose ledger still waits on a value read to route a branch or fan
-        out a spawn has not settled, though none of its tasks holds it open, and
-        neither has one owing an upload of its tasks' accepted artifacts. Its finish
-        is the last of its tasks' finishes and its uploads' settlements.
+        out a spawn has not settled, though none of its tasks holds it open.
         """
         engine = self._engines.get(workflow_id)
         if (

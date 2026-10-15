@@ -112,7 +112,7 @@ def workflow_cancelled_tasks_key(workflow_id: str) -> str:
 
 
 def workflow_uploads_key(workflow_id: str) -> str:
-    """The workflow's tasks whose accepted artifacts are not yet in the shared store."""
+    """Return the key of the set of a workflow's tasks whose artifacts still upload."""
     return f"workflow:{workflow_id}:uploads"
 
 

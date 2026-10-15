@@ -1,15 +1,13 @@
-"""The artifact uploads tasks' successes left owed, and settling one from the store.
+"""Owed artifact uploads, and settling one from the store.
 
-Each owed upload lives on its task's record, which is durable; this keeps only what
-reads it fast — which workflows each holds open, which worker owes it, and when each
-workflow's last one settled — rebuilt from the records whenever one changes, so it
-never counts on its own.
+Each owed upload lives on its task's record; the index here keeps which workflows each
+holds open, which worker owes it, and when each workflow's last one settled, derived
+from the record whenever it changes.
 
-An upload whose owner can no longer finish it is settled from the store: control
-checks every object the accepted artifacts name, a tree's members through its stored
-manifest, by size and never by reading a payload. Every object present settles it
-durable; an object the store says is absent loses the artifact naming it; a store that
-cannot be asked leaves it owed, to be checked again later.
+An upload whose owner can no longer finish it settles from the store, checked by each
+object's size and a tree's stored manifest, never by reading a payload: every object
+present settles it durable, an absent one loses the artifact naming it, and a store
+that cannot be asked leaves it owed.
 """
 
 import heapq
@@ -29,9 +27,6 @@ from ..results import ResultReader, ResultUnavailable, ResultUnreadable
 
 # How long an upload whose store could not be asked waits to be checked again.
 RECONCILE_RETRY_SEC = 30.0
-# How often a worker owing uploads, heard from, has the tasks waiting on them placed
-# again, to read from it before the uploads land.
-AWAITING_RETRY_SEC = 60.0
 
 
 class ArtifactUploads:
@@ -43,9 +38,12 @@ class ArtifactUploads:
         self._by_dispatch: dict[str, set[str]] = defaultdict(set)
         self._owners: dict[str, tuple[str, str, str]] = {}
         self._last_settled: dict[str, float] = {}
-        self._retried: dict[str, float] = {}
         self._lost_by_dispatch: dict[str, set[str]] = defaultdict(set)
         self._lost_of: dict[str, str] = {}
+        # The owners declared lost, whose uploads only the store settles now.
+        self._fenced: set[str] = set()
+        # When each owner was last heard from.
+        self._heard: dict[str, float] = {}
 
     def track_locked(self, record: TaskRecord) -> None:
         """Index a record's upload as it now stands."""
@@ -77,44 +75,60 @@ class ArtifactUploads:
             _discard(self._pending, workflow_id, task_id)
             _discard(self._owned, worker_id, task_id)
             _discard(self._by_dispatch, dispatch_id, task_id)
+            if worker_id not in self._owned:
+                self._fenced.discard(worker_id)
+                self._heard.pop(worker_id, None)
 
     def owed_for_dispatch_locked(self, dispatch_id: str | None) -> set[str]:
-        """The tasks whose upload a dispatch still owes."""
+        """Return the tasks whose upload a dispatch still owes."""
         return set(self._by_dispatch.get(dispatch_id or "", ()))
 
     def lost_for_dispatch_locked(self, dispatch_id: str | None) -> set[str]:
-        """The tasks whose upload a dispatch owed settled with artifacts lost."""
+        """Return the tasks whose upload a dispatch owed settled with artifacts
+        lost."""
         return set(self._lost_by_dispatch.get(dispatch_id or "", ()))
 
     def pending_locked(self, workflow_id: str) -> int:
-        """How many of a workflow's tasks still owe their upload."""
+        """Return how many of a workflow's tasks still owe their upload."""
         return len(self._pending.get(workflow_id, ()))
 
     def owed_by_locked(self, worker_id: str) -> list[str]:
-        """The tasks whose upload a worker registration owes."""
+        """Return the tasks whose upload a worker registration owes."""
         return sorted(self._owned.get(worker_id, ()))
 
-    def retry_due_locked(self, worker_id: str, now: float) -> bool:
-        """Whether the tasks waiting on a heard worker's uploads are due another try,
-        noting the try."""
-        if worker_id not in self._owned:
-            self._retried.pop(worker_id, None)
+    def owes_locked(self, worker_id: str) -> bool:
+        """Return whether a worker registration owes any upload."""
+        return worker_id in self._owned
+
+    def fence_locked(self, worker_id: str) -> None:
+        """Fence an owner declared lost: it renews nothing and settles nothing."""
+        if worker_id in self._owned:
+            self._fenced.add(worker_id)
+        self._heard.pop(worker_id, None)
+
+    def fenced_locked(self, worker_id: str) -> bool:
+        """Return whether an owner was declared lost."""
+        return worker_id in self._fenced
+
+    def heard_locked(self, worker_id: str, now: float, unheard_after: float) -> bool:
+        """Note an owner heard from, and return whether it had gone unheard for
+        ``unheard_after``."""
+        if worker_id not in self._owned or worker_id in self._fenced:
             return False
-        last = self._retried.setdefault(worker_id, now)
-        if now - last < AWAITING_RETRY_SEC:
-            return False
-        self._retried[worker_id] = now
-        return True
+        last = self._heard.get(worker_id)
+        self._heard[worker_id] = now
+        return last is not None and now - last >= unheard_after
 
     def owners_locked(self) -> set[str]:
-        """Every worker registration owing an upload."""
+        """Return every worker registration owing an upload."""
         return set(self._owned)
 
     def last_settled_locked(self, workflow_id: str) -> float | None:
-        """When the workflow's last upload settled, if any did."""
+        """Return when the workflow's last upload settled, if any did."""
         return self._last_settled.get(workflow_id)
 
     def forget_workflow_locked(self, workflow_id: str, task_ids: Iterable[str]) -> None:
+        """Drop a freed workflow's uploads."""
         for task_id in task_ids:
             self._untrack(task_id)
         self._pending.pop(workflow_id, None)
@@ -143,20 +157,28 @@ class StoreUncertain(Exception):
 
 
 def probe_upload(
-    results: ResultReader, artifacts: Iterable[ArtifactBinding]
+    results: ResultReader,
+    artifacts: Iterable[ArtifactBinding],
+    stored: set[ContentReference] | None = None,
 ) -> dict[str, ArtifactLoss]:
-    """The accepted artifacts missing from the store, each with why; raises
+    """Return the accepted artifacts missing from the store, each with why; raises
     ``StoreUncertain`` when the store could not say.
 
     An archive views a tree and stands with it, so it is not checked on its own.
+    ``stored`` holds the objects an earlier probe found, which are not asked again,
+    and gains each one this probe finds.
     """
+    stored = set() if stored is None else stored
     lost: dict[str, ArtifactLoss] = {}
     for binding in artifacts:
         if binding.kind is ArtifactKind.ARCHIVE:
             continue
         try:
             for member in _objects(results, binding):
+                if member in stored:
+                    continue
                 results.verify_stored(member)
+                stored.add(member)
         except ResultUnavailable as exc:
             raise StoreUncertain(str(exc)) from exc
         except ResultUnreadable as exc:
@@ -173,7 +195,8 @@ def probe_upload(
 def _objects(
     results: ResultReader, binding: ArtifactBinding
 ) -> Iterable[ContentReference]:
-    """Every object an artifact's bytes are in: a file's own, or a tree's members."""
+    """Return every object an artifact's bytes are in: a file's own, or a tree's
+    members."""
     if binding.kind is not ArtifactKind.TREE:
         return (binding.reference,)
     scope = binding.reference.authorization_scope
@@ -189,7 +212,7 @@ class UploadReconciler:
     ``take`` reads an upload to check under the lock, or None once it no longer needs
     one; ``settle`` applies what the store showed under the lock, unless the upload
     moved on meanwhile. A store that could not be asked is asked again after
-    ``RECONCILE_RETRY_SEC``.
+    ``RECONCILE_RETRY_SEC``, for the objects it did not find yet.
     """
 
     def __init__(
@@ -211,6 +234,7 @@ class UploadReconciler:
         self._cv = threading.Condition()
         self._due: list[tuple[float, str]] = []
         self._queued: set[str] = set()
+        self._stored: dict[str, set[ContentReference]] = {}
         self._stopped = False
         self._run_thread = run_thread
         self._thread: threading.Thread | None = None
@@ -259,9 +283,12 @@ class UploadReconciler:
         try:
             check = self._take(task_id)
             if check is None:
+                self._stored.pop(task_id, None)
                 return
-            lost = probe_upload(self._results, check.artifacts)
+            stored = self._stored.setdefault(task_id, set())
+            lost = probe_upload(self._results, check.artifacts, stored)
             self._settle(check, lost)
+            self._stored.pop(task_id, None)
         except StoreUncertain as exc:
             self._logger.warning(
                 "Upload of %s stays owed: the store could not be asked: %s",
@@ -280,6 +307,5 @@ def manual_reconciler(
     settle: Callable[[UploadCheck, dict[str, ArtifactLoss]], None],
     logger: logging.Logger,
 ) -> UploadReconciler:
-    """A reconciler that checks only when told to, for a runtime that delivers nothing
-    and for tests."""
+    """A reconciler its owner drives itself, which starts no thread."""
     return UploadReconciler(results, take, settle, logger, run_thread=False)
