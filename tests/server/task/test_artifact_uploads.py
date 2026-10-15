@@ -739,10 +739,11 @@ def test_a_store_check_remembers_the_objects_it_found_across_retries() -> None:
     assert third == second != first
 
 
-def test_a_reader_of_a_durable_sibling_of_a_lost_artifact_is_not_blamed() -> None:
+def test_a_reader_is_told_only_of_the_lost_artifacts_it_reads() -> None:
     setup = _dispatched()
     stored = setup.file(b"metrics", "metrics.json", stored=True)
-    setup.succeed([setup.tree(stored=False), stored])
+    missing = setup.file(b"notes", "notes.txt", stored=False)
+    setup.succeed([setup.tree(stored=False), stored, missing])
     bindings = setup.record(setup.train).artifacts
     tree, metrics = (
         bindings[("final", "final_model")],
@@ -751,9 +752,8 @@ def test_a_reader_of_a_durable_sibling_of_a_lost_artifact_is_not_blamed() -> Non
     setup.runtime.artifact_owner_lost("wkr-1")
     setup.runtime._reconciler.check(setup.train)
 
-    with setup.runtime._lock:
-        assert setup.runtime._lost_reads_locked([metrics]) is None
-        reason = setup.runtime._lost_reads_locked([tree, metrics])
+    assert setup.runtime.lost_artifact_reads([metrics]) is None
+    reason = setup.runtime.lost_artifact_reads([tree, metrics])
     assert reason == f"artifact_lost: task {setup.train} lost final/final_model"
 
 
