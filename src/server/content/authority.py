@@ -73,6 +73,11 @@ HOLDER_RECONCILE_SEC = 60.0
 # asked for its whole holding; a heartbeat can overtake a report still being applied.
 _RESYNC_AFTER_HEARTBEATS = 2
 
+# How long an asked-for whole holding may take before it is asked for again: two
+# heartbeat periods at their 30 s default, so a whole report still on its way is not
+# asked for twice and a lost request costs about a minute.
+_RESYNC_RETRY_SEC = 60.0
+
 
 class HydrationDenial(StrEnum):
     """Why control refused to authorize a hydration."""
@@ -140,6 +145,8 @@ class ContentHydrationAuthority:
         # Each worker's last applied holding report, as the directory records it.
         self._applied: dict[str, int] = {}
         self._behind: dict[str, int] = {}
+        # When each worker was asked for a whole holding it has not reported yet.
+        self._asked: dict[str, float] = {}
         self._serial: dict[str, asyncio.Lock] = {}
         self._serial_loop: asyncio.AbstractEventLoop | None = None
         self._reconcile: asyncio.Task[None] | None = None
@@ -251,15 +258,28 @@ class ContentHydrationAuthority:
                 return
             self._applied[worker_id] = report.seq
             self._behind.pop(worker_id, None)
-            if not report.whole and report.seq != applied + 1:
+            if report.whole:
+                self._asked.pop(worker_id, None)
+            elif report.seq != applied + 1:
                 await self._request_holding(
                     worker, f"report {report.seq} followed {applied}"
                 )
 
     async def check_holding(self, worker_id: str, holding_seq: int) -> None:
         """Ask a worker for its whole holding once its heartbeats keep naming a report
-        never applied."""
+        never applied, or again once a whole holding asked for has not arrived."""
         async with self._serial_for(worker_id):
+            if (asked := self._asked.get(worker_id)) is not None:
+                if time.monotonic() - asked < _RESYNC_RETRY_SEC:
+                    return
+                del self._asked[worker_id]
+                if (
+                    worker := await self._workers.get_worker_async(worker_id)
+                ) is not None:
+                    await self._request_holding(
+                        worker, "the whole holding asked for has not arrived"
+                    )
+                return
             if holding_seq <= await self._applied_seq(worker_id):
                 self._behind.pop(worker_id, None)
                 return
@@ -282,6 +302,7 @@ class ContentHydrationAuthority:
                 swept = await self._directory.sweep_async(worker_id)
             self._applied.pop(worker_id, None)
             self._behind.pop(worker_id, None)
+            self._asked.pop(worker_id, None)
             self._serial.pop(worker_id, None)
             self._logger.info("swept %d content holder records of %s", swept, worker_id)
         return len(retired)
@@ -309,6 +330,9 @@ class ContentHydrationAuthority:
         return self._serial.setdefault(worker_id, asyncio.Lock())
 
     async def _request_holding(self, worker: Worker, reason: str) -> None:
+        if worker.id in self._asked:
+            return
+        self._asked[worker.id] = time.monotonic()
         self._logger.info(
             "asking %s for its whole content holding: %s", worker.id, reason
         )

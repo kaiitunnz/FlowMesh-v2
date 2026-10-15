@@ -5,6 +5,8 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 from shared.content import HOLDING_RESYNC_FRAME, HoldingReport
 from worker.content import ContentLaneHost, HoldingReporter, WorkerContentCache
 
@@ -177,3 +179,33 @@ def test_control_asking_for_the_whole_holding_gets_it(tmp_path: Path) -> None:
 
     whole = [report for report in reports.reports if report.whole]
     assert whole and whole[0].added == (("local", kept.content_digest),)
+
+
+def test_requests_for_the_whole_holding_in_flight_together_walk_the_cache_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reports = _Reports()
+    cache, _ = _cache(tmp_path, reports)
+    walking = threading.Event()
+    release = threading.Event()
+    report_whole = cache.report_whole
+
+    def slow_walk(*, restart: bool = False) -> int:
+        walking.set()
+        release.wait(5.0)
+        return report_whole(restart=restart)
+
+    monkeypatch.setattr(cache, "report_whole", slow_walk)
+    lane = _lane(cache)
+    lane.start()
+    try:
+        assert lane.route(HOLDING_RESYNC_FRAME, {})
+        assert walking.wait(5.0)
+        assert lane.route(HOLDING_RESYNC_FRAME, {})
+        release.set()
+        assert reports.arrived.wait(5.0)
+        time.sleep(0.2)
+    finally:
+        lane.stop()
+
+    assert [report.whole for report in reports.reports] == [True]

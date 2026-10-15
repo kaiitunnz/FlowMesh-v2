@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import fakeredis
+import pytest
 
 from server.clients.redis import WORKERS_SET_KEY, RedisClient
 from server.content import (
@@ -14,6 +15,7 @@ from server.content import (
     ContentHydrationAuthority,
     ContentTransferSessions,
 )
+from server.content import authority as authority_module
 from shared.content import HOLDING_RESYNC_FRAME, HoldingReport
 from tests.server.redis_helpers import fake_redis_client
 
@@ -147,6 +149,59 @@ def test_a_heartbeat_naming_an_unapplied_report_twice_asks_for_the_whole() -> No
     asyncio.run(authority.check_holding("wkr-1", 2))
     assert workers.resyncs() == []
     asyncio.run(authority.check_holding("wkr-1", 2))
+
+    assert workers.resyncs() == ["wkr-1"]
+
+
+def test_reports_skipping_numbers_while_the_whole_is_awaited_ask_once() -> None:
+    authority, workers, _ = _setup("wkr-1")
+    asyncio.run(authority.record_holding("wkr-1", HoldingReport(1, added=(_A,))))
+
+    for seq in range(3, 14):
+        asyncio.run(authority.record_holding("wkr-1", HoldingReport(seq, added=(_B,))))
+    asyncio.run(authority.check_holding("wkr-1", 20))
+    asyncio.run(authority.check_holding("wkr-1", 20))
+
+    assert workers.resyncs() == ["wkr-1"]
+
+
+def test_a_whole_holding_asked_for_and_lost_is_asked_for_again_after_the_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority, workers, _ = _setup("wkr-1")
+    asyncio.run(authority.record_holding("wkr-1", HoldingReport(1, added=(_A,))))
+    asyncio.run(authority.record_holding("wkr-1", HoldingReport(3, added=(_B,))))
+    asyncio.run(authority.check_holding("wkr-1", 3))
+    assert workers.resyncs() == ["wkr-1"]
+
+    monkeypatch.setattr(authority_module, "_RESYNC_RETRY_SEC", 0.0)
+    asyncio.run(authority.check_holding("wkr-1", 3))
+
+    assert workers.resyncs() == ["wkr-1", "wkr-1"]
+
+
+def test_a_whole_report_ends_the_wait_for_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    authority, workers, _ = _setup("wkr-1")
+    asyncio.run(authority.record_holding("wkr-1", HoldingReport(1, added=(_A,))))
+    asyncio.run(authority.record_holding("wkr-1", HoldingReport(3, added=(_B,))))
+    asyncio.run(
+        authority.record_holding("wkr-1", HoldingReport(4, added=(_A,), whole=True))
+    )
+
+    monkeypatch.setattr(authority_module, "_RESYNC_RETRY_SEC", 0.0)
+    asyncio.run(authority.check_holding("wkr-1", 4))
+    asyncio.run(authority.record_holding("wkr-1", HoldingReport(6, added=(_B,))))
+
+    # The only asks are for the two gaps, each after the whole report it waited on.
+    assert workers.resyncs() == ["wkr-1", "wkr-1"]
+
+
+def test_a_heartbeat_asks_on_the_second_unapplied_beat_and_not_the_next() -> None:
+    authority, workers, _ = _setup("wkr-1")
+    asyncio.run(authority.record_holding("wkr-1", HoldingReport(1, added=(_A,))))
+
+    for _ in range(4):
+        asyncio.run(authority.check_holding("wkr-1", 2))
 
     assert workers.resyncs() == ["wkr-1"]
 

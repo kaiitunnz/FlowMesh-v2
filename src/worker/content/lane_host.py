@@ -119,6 +119,9 @@ class ContentLaneHost:
         self._holder: ContentHolder | None = None
         self._client: ContentHydrationClient | None = None
         self._sweep: asyncio.Task[None] | None = None
+        # Whether a whole holding report asked for is queued or being walked.
+        self._whole_lock = threading.Lock()
+        self._whole_queued = False
 
     @property
     def store(self) -> WorkerContentCache:
@@ -375,6 +378,11 @@ class ContentLaneHost:
         elif frame_kind == CONTENT_FRAME_KIND:
             asyncio.run_coroutine_threadsafe(self._on_frame(frame), self._loop)
         elif frame_kind == HOLDING_RESYNC_FRAME:
+            with self._whole_lock:
+                # A walk already queued or under way reports what this one would.
+                if self._whole_queued:
+                    return True
+                self._whole_queued = True
             # The whole holding walks the cache directory, so it is reported off both
             # the thread delivering control frames and the lane's loop.
             asyncio.run_coroutine_threadsafe(
@@ -390,6 +398,9 @@ class ContentLaneHost:
         except Exception:
             self._logger.exception("could not report the whole content holding")
             return
+        finally:
+            with self._whole_lock:
+                self._whole_queued = False
         self._logger.info("reported %d held content objects on request", held)
 
     def _on_grant(self, frame: dict[str, Any]) -> None:
