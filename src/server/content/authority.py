@@ -226,16 +226,19 @@ class ContentHydrationAuthority:
     async def record_holding(self, worker_id: str, report: HoldingReport) -> None:
         """Apply one of a worker's holding reports, after those it sent before it.
 
-        A report already applied changes nothing. A whole report replaces the worker's
-        records whatever its number; any other that skips a number is applied and the
-        worker is asked for its whole holding.
+        A report already applied, or one ahead of the worker's first whole report,
+        changes nothing. A whole report replaces the worker's records whatever its
+        number; any other that skips a number is applied and the worker is asked for
+        its whole holding.
         """
         async with self._serial_for(worker_id):
             worker = await self._workers.get_worker_async(worker_id)
             if worker is None:
                 return
             applied = await self._applied_seq(worker_id)
-            if not report.whole and report.seq <= applied:
+            # A registration reports its whole holding first, so a report before that
+            # was numbered under the registration before and its whole report covers it.
+            if not report.whole and (applied == 0 or report.seq <= applied):
                 return
             if report.whole:
                 recorded = await self._directory.replace_async(

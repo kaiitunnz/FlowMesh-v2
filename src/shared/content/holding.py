@@ -2,8 +2,9 @@
 
 A worker reports its holding as it changes: the copies it kept and the copies it dropped
 since its last report, and its whole holding when it attaches under a new registration
-or control asks for it. Reports of one worker registration are numbered from one, so
-control can tell when one went missing and ask for the whole holding again.
+or control asks for it. Reports of one worker registration are numbered from one, its
+whole holding first, so control can tell when one went missing and ask for the whole
+holding again.
 """
 
 from pydantic import BaseModel, ConfigDict
