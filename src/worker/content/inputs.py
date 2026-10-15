@@ -314,7 +314,11 @@ class TaskInputHydrator:
             )
         task_id = msg.task_id
         materializer = ArtifactMaterializer(
-            self._plane, task_id, root, lambda: self._cancelled(task_id)
+            self._plane,
+            task_id,
+            root,
+            lambda: self._cancelled(task_id),
+            pending=frozenset(msg.pending_artifacts or ()),
         )
         try:
             entered = materializer.__enter__()

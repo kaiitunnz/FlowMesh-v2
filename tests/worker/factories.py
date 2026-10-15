@@ -204,11 +204,23 @@ class FakeContentPlane:
         return self.store.hydrate(reference)
 
     def materialize_to(
-        self, task_id: str, reference: ContentReference, dest: Path
+        self,
+        task_id: str,
+        reference: ContentReference,
+        dest: Path,
+        *,
+        prefer_peer: bool = False,
     ) -> None:
         dest.write_bytes(self.hydrate(task_id, reference))
 
-    def hydrate_to(self, task_id: str, reference: ContentReference, dest: Path) -> None:
+    def hydrate_to(
+        self,
+        task_id: str,
+        reference: ContentReference,
+        dest: Path,
+        *,
+        prefer_peer: bool = False,
+    ) -> None:
         dest.write_bytes(self.hydrate(task_id, reference))
 
 

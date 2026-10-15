@@ -33,6 +33,7 @@ from shared.schemas.event import (
     serialize_event,
 )
 from shared.schemas.worker import SSHLimits, WorkerCapabilities
+from shared.tasks.artifact_upload import ARTIFACT_UPLOAD_EVENT, UploadReport
 from shared.tasks.worker_message import (
     WorkerHardware,
     WorkerStatus,
@@ -369,6 +370,49 @@ class SupervisorClient:
             payload=metadata or {},
         )
         self._send_event(event)
+
+    def resend_task_succeeded(
+        self, task_id: str, dispatch_id: str, metadata: dict[str, Any]
+    ) -> None:
+        """Report a dispatch's success again, after the task has left this worker.
+
+        It is repeated until control answers, so it is dropped while the stream is
+        down.
+        """
+        self._offer_event(
+            TaskEvent(
+                type="TASK_SUCCEEDED",
+                worker_id=self.worker_id,
+                task_id=task_id,
+                dispatch_id=dispatch_id,
+                payload=metadata,
+            )
+        )
+
+    def report_artifact_upload(
+        self,
+        task_id: str,
+        dispatch_id: str,
+        report: UploadReport,
+        error: str | None = None,
+    ) -> None:
+        """Report how a dispatch's upload of a task's artifacts went.
+
+        It is repeated until control answers, so it is dropped while the stream is
+        down.
+        """
+        payload: dict[str, Any] = {"report": report.value}
+        if error is not None:
+            payload["error"] = error
+        self._offer_event(
+            TaskEvent(
+                type=ARTIFACT_UPLOAD_EVENT,
+                worker_id=self.worker_id,
+                task_id=task_id,
+                dispatch_id=dispatch_id,
+                payload=payload,
+            )
+        )
 
     def task_started(
         self,

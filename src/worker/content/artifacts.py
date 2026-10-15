@@ -22,6 +22,7 @@ from pydantic import BaseModel
 
 from shared.content import (
     TREE_MEDIA_TYPE,
+    ContentReference,
     FabricObjectStore,
     TreeManifest,
     TreeMember,
@@ -163,18 +164,33 @@ def checkpoint_step(name: str) -> int | None:
     return int(match.group(1)) if (match := _CHECKPOINT.fullmatch(name)) else None
 
 
+type StageFile = Callable[[Path, Callable[[], bool] | None], ContentReference]
+
+
 class ArtifactPublisher:
-    """Writes a task's artifacts under its scope and names each by a binding."""
+    """Writes a task's artifacts under its scope and names each by a binding.
+
+    With ``stage``, every artifact file is staged for an upload that follows instead of
+    being written to the store, while each tree's manifest is still written to the
+    store, so the tree it names resolves before its files are uploaded.
+    """
 
     def __init__(
         self,
         store: FabricObjectStore,
         scope: str,
         cancelled: Callable[[], bool] | None = None,
+        stage: StageFile | None = None,
     ) -> None:
         self._store = store
         self._scope = scope
         self._cancelled = cancelled
+        self._stage = stage
+
+    def _write_file(self, path: Path) -> ContentReference:
+        if self._stage is not None:
+            return self._stage(path, self._cancelled)
+        return self._store.write_file(self._scope, path, cancelled=self._cancelled)
 
     def publish_final(
         self,
@@ -238,9 +254,7 @@ class ArtifactPublisher:
         if opened is None:
             return None
         with opened:
-            reference = self._store.write_file(
-                self._scope, fd_path(opened.fileno()), cancelled=self._cancelled
-            )
+            reference = self._write_file(fd_path(opened.fileno()))
         return ArtifactBinding(
             name=name,
             revision=FINAL_REVISION,
@@ -267,9 +281,7 @@ class ArtifactPublisher:
             if isinstance(opened, OSError):
                 raise opened
             with opened:
-                reference = self._store.write_file(
-                    self._scope, fd_path(opened.fileno()), cancelled=self._cancelled
-                )
+                reference = self._write_file(fd_path(opened.fileno()))
             members.append(
                 TreeMember(rel, reference.content_digest, reference.size_bytes)
             )
