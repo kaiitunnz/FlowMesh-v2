@@ -91,6 +91,21 @@ def test_a_trees_members_are_decoded_once(tmp_path: Path) -> None:
     assert first == {member.identity}
 
 
+def test_a_trees_member_paths_are_decoded_once(tmp_path: Path) -> None:
+    store = SharedFilesystemObjectStore(tmp_path / "cas")
+    reader = ResultReader(store, cache_max_bytes=_BUDGET)
+    tree = _tree_of(store, 2, "p")
+
+    first = reader.tree_paths(tree)
+    reader._cache.clear()
+    for path in (tmp_path / "cas").rglob("*"):
+        if path.is_file():
+            path.unlink()
+
+    assert reader.tree_paths(tree) is first
+    assert first == {"p-0.bin", "p-1.bin"}
+
+
 def _tree_of(store: SharedFilesystemObjectStore, count: int, tag: str) -> Any:
     manifest = TreeManifest.of(
         [
@@ -113,8 +128,8 @@ def test_the_tree_cache_stays_within_its_member_cap(
     for tag in "abcd":
         reader.tree_members(_tree_of(store, 4, tag))
 
-    assert reader._tree_members <= 10
-    assert len(reader._trees) == 2
+    assert reader._trees._members <= 10
+    assert len(reader._trees._trees) == 2
 
 
 def test_the_latest_tree_over_the_cap_is_decoded_once(
@@ -132,7 +147,7 @@ def test_the_latest_tree_over_the_cap_is_decoded_once(
             path.unlink()
 
     assert reader.tree_members(tree) is first
-    assert reader._tree_members == 0
+    assert reader._trees._members == 0
 
 
 def test_a_stored_check_reads_no_bytes_and_catches_another_size(

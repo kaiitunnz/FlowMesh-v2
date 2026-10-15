@@ -11,6 +11,7 @@ import threading
 import tracemalloc
 from pathlib import Path
 from typing import Any, cast
+from unittest import mock
 
 import anyio
 import pytest
@@ -786,6 +787,24 @@ async def test_a_pending_artifact_answers_503_and_a_lost_one_410(
         assert raised.value.status_code == status.HTTP_410_GONE
         assert _code(raised.value) == "artifact_lost"
     assert (await serve(await _download(runtime, "notes.txt"))).status == 200
+
+
+@pytest.mark.anyio
+async def test_polling_a_pending_artifact_reads_no_manifest_again(
+    runtime: _Runtime, published: dict[str, ArtifactBinding]
+) -> None:
+    _owed(runtime)
+    reader = runtime.result_reader
+
+    with mock.patch.object(
+        reader, "read_manifest", wraps=reader.read_manifest
+    ) as reads:
+        for name in ["final_model.tar.gz"] * 3 + ["final_model/config.json"] * 3:
+            with pytest.raises(HTTPException) as raised:
+                await _download(runtime, name)
+            assert raised.value.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+
+    assert reads.call_count == 1
 
 
 @pytest.mark.anyio

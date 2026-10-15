@@ -86,7 +86,7 @@ from ...task.artifact_reads import (
     resolve_download,
 )
 from ...task.models import TERMINAL_TASK_STATUSES
-from ...task.results import ResultUnavailable, ResultUnreadable
+from ...task.results import ResultReader, ResultUnavailable, ResultUnreadable
 from ...task.runtime import TaskRuntime
 
 # Sections the bundle endpoint can include.
@@ -264,6 +264,16 @@ async def download_result_file(
         )
     bindings = await _artifact_bindings(runtime, task_id, revision)
     try:
+        found = resolve_artifact_path(bindings, revision, filename)
+        if found is not None and revision == FINAL_REVISION:
+            upload = await _artifact_upload(runtime, task_id)
+            binding, inner = found
+            if _durability(binding, upload)[0] is not ArtifactDurability.DURABLE:
+                if not await asyncio.to_thread(
+                    _names_member, runtime.result_reader, binding, inner
+                ):
+                    raise ArtifactNotFound(filename)
+                _check_available([binding], upload, f"{filename} at {revision}")
         download = await asyncio.to_thread(
             resolve_download, runtime.result_reader, bindings, revision, filename
         )
@@ -278,14 +288,17 @@ async def download_result_file(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to read artifact: {exc}",
         ) from exc
-    found = resolve_artifact_path(bindings, revision, filename)
-    if found is not None and revision == FINAL_REVISION:
-        _check_available(
-            [found[0]],
-            await _artifact_upload(runtime, task_id),
-            f"{filename} at {revision}",
-        )
     return ArtifactResponse(download)
+
+
+def _names_member(reader: ResultReader, binding: ArtifactBinding, inner: str) -> bool:
+    """Return whether a path inside an artifact names something it holds, from the
+    tree's cached member paths rather than a fresh read of its manifest."""
+    if not inner:
+        return True
+    return binding.kind is ArtifactKind.TREE and inner in reader.tree_paths(
+        binding.reference
+    )
 
 
 @router.get(
