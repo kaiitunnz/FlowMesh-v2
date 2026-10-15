@@ -899,14 +899,6 @@ STACK_ENV_SCHEMA = EnvSchema(
                     min_inclusive=False,
                 ),
                 EnvVar(
-                    "CONTENT_HOLDER_TTL_SEC",
-                    "300",
-                    description="Holder report lifetime (seconds).",
-                    var_type=EnvVarType.FLOAT,
-                    min_value=0,
-                    min_inclusive=False,
-                ),
-                EnvVar(
                     "CONTENT_CACHE_TTL_SEC",
                     "0",
                     description=(

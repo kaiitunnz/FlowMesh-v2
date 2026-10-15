@@ -80,7 +80,6 @@ directory `flowmesh stack` runs in.
 | `CONTENT_ACCESS_TTL_SEC` | `900` | Store-access grant lifetime (seconds, at least 60) |
 | `CONTENT_HYDRATION_ENABLED` | – | Cache and hydrate content between workers; defaults to the network plane's setting |
 | `CONTENT_HYDRATION_GRANT_TTL_SEC` | `60` | Hydration grant lifetime (seconds) |
-| `CONTENT_HOLDER_TTL_SEC` | `300` | Holder report lifetime (seconds) |
 | `CONTENT_CACHE_TTL_SEC` | `0` | How long a worker keeps an unused cached copy (seconds, 0 = indefinitely) |
 | `CONTENT_CACHE_MAX_BYTES` | `0` | Disk budget for a worker's cached copies (0 = unbounded) |
 | `CONTENT_TRANSFER_TIMEOUT_SEC` | `60` | Longest a content transfer may go without progress (seconds) |

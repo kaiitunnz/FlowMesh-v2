@@ -43,7 +43,6 @@ DEFAULT_WORKER_CONFIG: Final[WorkerConfig] = WorkerConfig(
     content_hydration_enabled=False,
     content_cache_ttl_sec=0.0,
     content_cache_max_bytes=0,
-    content_holder_ttl_sec=300.0,
     object_store=ObjectStoreConfig.from_env(Path("/tmp/test-results")),
     content_transfer_timeout_sec=60.0,
     content_transfer_window_bytes=1 << 20,
