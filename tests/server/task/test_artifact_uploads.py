@@ -5,6 +5,7 @@ the upload settled from the store."""
 import asyncio
 import hashlib
 import logging
+import time
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -22,6 +23,7 @@ from server.registries.workflow import WorkflowRegistry, WorkflowStatus
 from server.task.models import TaskRecord, TaskStatus
 from server.task.redrive import StoreRedriveScheduler
 from server.task.runtime import TaskRuntime
+from server.task.runtime.artifact_uploads import UploadReconciler, manual_reconciler
 from shared.content import (
     TREE_MEDIA_TYPE,
     ContentReference,
@@ -113,7 +115,10 @@ class _Workers:
 
 
 def _runtime(
-    registry: WorkflowRegistry, workers: _Workers, reader: StoreResultReader
+    registry: WorkflowRegistry,
+    workers: _Workers,
+    reader: StoreResultReader,
+    reconciler: Any = manual_reconciler,
 ) -> TaskRuntime:
     return TaskRuntime(
         registry,
@@ -125,16 +130,17 @@ def _runtime(
         redrive=lambda fire, logger: StoreRedriveScheduler(
             fire, logger, run_thread=False
         ),
+        reconciler=reconciler,
     )
 
 
 class _Setup:
-    def __init__(self, spec: str = _V1) -> None:
+    def __init__(self, spec: str = _V1, reconciler: Any = manual_reconciler) -> None:
         self.server = fakeredis.FakeServer()
         self.registry = WorkflowRegistry(fake_redis_client(self.server))
         self.workers = _Workers()
         self.reader = make_result_reader()
-        self.runtime = _runtime(self.registry, self.workers, self.reader)
+        self.runtime = _runtime(self.registry, self.workers, self.reader, reconciler)
         workflow_id, results = asyncio.run(
             self.runtime.register("owner", "org", spec, format="native")
         )
@@ -486,3 +492,23 @@ def test_a_cancelled_workflow_finishes_the_uploads_it_owes_before_it_cancels(
 
     assert setup.status() == (WorkflowStatus.CANCELLED, 0, None)
     assert setup.settled()
+
+
+def test_an_owner_lost_in_service_has_its_upload_settled_without_being_asked() -> None:
+    setup = _Setup(reconciler=UploadReconciler)
+    record_dispatch(setup.runtime, setup.train, dispatch_id="dsp-1")
+    setup.succeed([setup.tree(stored=False)])
+
+    setup.runtime.artifact_owner_lost("wkr-1")
+
+    def owed() -> bool:
+        upload = setup.record(setup.train).artifact_upload
+        return upload is not None and upload.pending
+
+    deadline = time.monotonic() + 5
+    while owed():
+        assert time.monotonic() < deadline, "the owner's loss was never reconciled"
+        time.sleep(0.02)
+    upload = setup.record(setup.train).artifact_upload
+    assert upload is not None and upload.state is ArtifactDurability.LOST
+    setup.runtime.shutdown()

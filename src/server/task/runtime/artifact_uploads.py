@@ -189,6 +189,7 @@ class UploadReconciler:
         logger: logging.Logger,
         retry_sec: float = RECONCILE_RETRY_SEC,
         clock: Callable[[], float] = time.monotonic,
+        run_thread: bool = True,
     ) -> None:
         self._results = results
         self._take = take
@@ -200,9 +201,12 @@ class UploadReconciler:
         self._due: list[tuple[float, str]] = []
         self._queued: set[str] = set()
         self._stopped = False
+        self._run_thread = run_thread
         self._thread: threading.Thread | None = None
 
-    def start(self) -> None:
+    def _ensure_thread(self) -> None:
+        if not self._run_thread or self._thread is not None:
+            return
         self._thread = threading.Thread(
             target=self._run, name="artifact-upload-reconcile", daemon=True
         )
@@ -222,6 +226,7 @@ class UploadReconciler:
                     continue
                 self._queued.add(task_id)
                 heapq.heappush(self._due, (at, task_id))
+            self._ensure_thread()
             self._cv.notify_all()
 
     def _run(self) -> None:
@@ -256,3 +261,14 @@ class UploadReconciler:
         except Exception:
             self._logger.exception("Checking the upload of %s failed", task_id)
             self.request(task_id, delay=self._retry_sec)
+
+
+def manual_reconciler(
+    results: ResultReader,
+    take: Callable[[str], UploadCheck | None],
+    settle: Callable[[UploadCheck, dict[str, ArtifactLoss]], None],
+    logger: logging.Logger,
+) -> UploadReconciler:
+    """A reconciler that checks only when told to, for a runtime that delivers nothing
+    and for tests."""
+    return UploadReconciler(results, take, settle, logger, run_thread=False)

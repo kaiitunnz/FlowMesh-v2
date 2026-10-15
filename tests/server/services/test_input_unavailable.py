@@ -19,7 +19,7 @@ from server.task.models import TaskStatus
 from server.task.redrive import StoreRedriveScheduler
 from server.task.results import ResultUnavailable, ResultUnreadable
 from server.task.runtime import TaskRuntime, TransitionNotDurable, facade, scheduling
-from server.task.runtime.artifact_uploads import AWAITING_RETRY_SEC
+from server.task.runtime.artifact_uploads import AWAITING_RETRY_SEC, manual_reconciler
 from server.task.runtime.input_checks import INPUT_RECHECK_PACE_SEC
 from shared.content import (
     TREE_MEDIA_TYPE,
@@ -278,6 +278,7 @@ class _Attributing:
             logging.getLogger("input-unavailable"),
             credential_vault=InMemoryCredentialVault(),
             redrive=_scheduler,
+            reconciler=manual_reconciler,
         )
         self.scheduler = schedulers[0]
         self.monitor = _monitor(self.runtime)

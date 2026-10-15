@@ -211,7 +211,12 @@ from .after_commit import (
     UploadAck,
 )
 from .agent_inputs import AgentInputs
-from .artifact_uploads import ArtifactUploads, UploadCheck, UploadReconciler
+from .artifact_uploads import (
+    ArtifactUploads,
+    UploadCheck,
+    UploadReconciler,
+    manual_reconciler,
+)
 from .commits import TransitionCommitter, TransitionNotDurable, store_unavailable
 from .content_bindings import ContentBindings, ScopedInput, UnreadableInput
 from .dispatch_fence import DispatchFence, Publish, supplier_id
@@ -479,6 +484,15 @@ class TaskRuntime:
         durability_retry: Callable[
             [Callable[[str], None], logging.Logger], WorkflowRetryScheduler
         ] = _durability_retry,
+        reconciler: Callable[
+            [
+                ResultReader,
+                Callable[[str], UploadCheck | None],
+                Callable[[UploadCheck, dict[str, ArtifactLoss]], None],
+                logging.Logger,
+            ],
+            UploadReconciler,
+        ] = UploadReconciler,
         inert: bool = False,
     ) -> None:
         self._workflow_registry = workflow_registry
@@ -583,7 +597,7 @@ class TaskRuntime:
         )
 
         self._uploads = ArtifactUploads()
-        self._reconciler = UploadReconciler(
+        self._reconciler = reconciler(
             results, self._upload_check, self._settle_upload_from_store, logger
         )
 
@@ -1035,6 +1049,7 @@ class TaskRuntime:
             n8n=self._n8n,
             redrive=manual_redrive,
             durability_retry=manual_retry,
+            reconciler=manual_reconciler,
             inert=True,
         )
         # The classification checks closure and archiving itself before it frees.
