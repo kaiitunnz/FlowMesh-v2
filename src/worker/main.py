@@ -543,6 +543,8 @@ def main() -> None:
         peer_listener_sock=peer_sock,
         telemetry=cfg.telemetry,
         gpu_binding_task_types=capabilities.gpu_binding_task_types,
+        cleanup_after_publish=cfg.model_cleanup_after_upload,
+        owner=cfg.alias,
     )
     lifecycle.set_gpu_executor_probe(runner.gpu_devices_in_use)
     lifecycle.set_abandon_handler(runner.abandon_running)

@@ -31,3 +31,13 @@ def test_a_connect_budget_that_is_not_positive_is_the_default(
     monkeypatch.setenv("NETWORK_PLANE_CONNECT_BUDGET_SEC", configured)
 
     assert NetworkPlaneConfig.from_env().connect_budget_sec == 5.0
+
+
+@pytest.mark.parametrize("make_worker", [_docker_worker, _vastai_worker])
+def test_worker_env_carries_the_artifact_cleanup_setting(make_worker) -> None:
+    environment = make_worker()._base_environment()
+
+    assert environment["MODEL_CLEANUP_AFTER_UPLOAD"] == (
+        "1" if env.MODEL_CLEANUP_AFTER_UPLOAD else "0"
+    )
+    assert not [name for name in environment if name.startswith("MODEL_ARCHIVE_")]

@@ -885,8 +885,9 @@ STACK_ENV_SCHEMA = EnvSchema(
                 ),
                 EnvVar(
                     "CONTENT_HYDRATION_ENABLED",
-                    "false",
-                    description="Cache content on workers and hydrate it between them.",
+                    "",
+                    description="Cache and hydrate content between workers; defaults "
+                    "to the network plane's setting.",
                     var_type=EnvVarType.BOOL,
                 ),
                 EnvVar(
@@ -1345,7 +1346,7 @@ STACK_ENV_SCHEMA = EnvSchema(
                 ),
                 EnvVar(
                     "ENABLE_STAGE_WEIGHT_STICKINESS",
-                    "false",
+                    "true",
                     var_type=EnvVarType.BOOL,
                 ),
                 EnvVar(
@@ -1570,7 +1571,7 @@ STACK_ENV_SCHEMA = EnvSchema(
                     var_type=EnvVarType.DIR_PATH,
                     description=[
                         "Directory/Docker volume the server keeps task logs and "
-                        "artifacts in.",
+                        "traces in.",
                         "Defaults to the stack-scoped results volume when empty.",
                     ],
                 ),
@@ -1637,12 +1638,6 @@ STACK_ENV_SCHEMA = EnvSchema(
                     "CUDA_VISIBLE_DEVICES", "all", var_type=EnvVarType.CSV_INTS_OR_ALL
                 ),
                 EnvVar(
-                    "WORKER_UPLOAD_RESULTS",
-                    "false",
-                    description="Upload artifacts when no destination set.",
-                    var_type=EnvVarType.BOOL,
-                ),
-                EnvVar(
                     "WORKER_EXECUTOR_IDLE_CLEANUP_SEC",
                     "60",
                     var_type=EnvVarType.FLOAT,
@@ -1680,9 +1675,9 @@ STACK_ENV_SCHEMA = EnvSchema(
                 ),
                 EnvVar(
                     "MODEL_CLEANUP_AFTER_UPLOAD",
-                    "0",
-                    var_type=EnvVarType.INT,
-                    min_value=0,
+                    "false",
+                    description="Delete a task's local artifacts once published.",
+                    var_type=EnvVarType.BOOL,
                 ),
                 EnvVar(
                     "SERVE_DEFAULT_TTL_SEC",

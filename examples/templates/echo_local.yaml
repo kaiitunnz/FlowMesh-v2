@@ -17,10 +17,3 @@ spec:
     items:
       - hello echo
       - second message
-  output:
-    destination:
-      type: local
-    artifacts:
-      - results.json
-      - logs
-      - artifacts

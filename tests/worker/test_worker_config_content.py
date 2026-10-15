@@ -39,3 +39,14 @@ def test_a_connect_budget_that_is_not_positive_is_the_default(
     monkeypatch.setenv("NETWORK_PLANE_CONNECT_BUDGET_SEC", configured)
 
     assert WorkerConfig.from_env().peer_connect_budget_sec == 5.0
+
+
+@pytest.mark.parametrize(
+    ("configured", "cleanup"), [("", False), ("false", False), ("true", True)]
+)
+def test_artifact_cleanup_is_off_unless_set(
+    monkeypatch: pytest.MonkeyPatch, configured: str, cleanup: bool
+) -> None:
+    monkeypatch.setenv("MODEL_CLEANUP_AFTER_UPLOAD", configured)
+
+    assert WorkerConfig.from_env().model_cleanup_after_upload is cleanup

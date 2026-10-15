@@ -76,6 +76,12 @@ class ModelConfig(StrictBaseModel):
     diffusers: dict[str, Any] | None = None
     adapters: list[AdapterConfig] | None = None
 
+    @property
+    def visual_embedding(self) -> bool:
+        """Whether the model runs the transformers visual-embedding mode, which reads
+        its inputs as images."""
+        return (self.transformers or {}).get("mode") == "visual-embedding"
+
 
 class ModelConfigTemplate(TemplateBaseModel):
     source: ModelSourceTemplate | None = None
@@ -84,3 +90,9 @@ class ModelConfigTemplate(TemplateBaseModel):
     transformers: dict[str, Any] | None = None
     diffusers: dict[str, Any] | None = None
     adapters: list[AdapterConfigTemplate] | None = None
+
+    @property
+    def visual_embedding(self) -> bool:
+        """Whether the model runs the transformers visual-embedding mode, which reads
+        its inputs as images."""
+        return (self.transformers or {}).get("mode") == "visual-embedding"

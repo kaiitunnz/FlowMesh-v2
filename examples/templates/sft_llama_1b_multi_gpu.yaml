@@ -46,9 +46,3 @@ spec:
     packing: false
     fp16: false
     bf16: true
-
-  output:
-    destination:
-      type: http
-    artifacts:
-      - results.json

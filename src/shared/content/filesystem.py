@@ -27,8 +27,10 @@ from .store import (
     FabricObjectStore,
     WriteCancelled,
     check_existing_size,
+    check_range,
     new_hasher,
     reference_for,
+    short_range,
     verified_chunks,
 )
 
@@ -212,6 +214,36 @@ class FilesystemObjectBacking:
 
         return verified_chunks(reference, chunks())
 
+    def stream_range(
+        self,
+        reference: ContentReference,
+        start: int,
+        length: int,
+        chunk_bytes: int = STREAM_CHUNK_BYTES,
+    ) -> Iterator[bytes]:
+        """Yield ``length`` unverified bytes of the object from ``start``, in chunks."""
+        check_range(reference, start, length)
+        fh = self.open_object(reference.authorization_scope, reference.content_digest)
+
+        def chunks() -> Iterator[bytes]:
+            with fh:
+                offset, end = start, start + length
+                while offset < end:
+                    try:
+                        chunk = os.pread(
+                            fh.fileno(), min(chunk_bytes, end - offset), offset
+                        )
+                    except OSError as exc:
+                        raise ContentUnavailable(
+                            f"could not read {reference.content_digest}: {exc}"
+                        ) from exc
+                    if not chunk:
+                        short_range(reference, offset - start, length)
+                    offset += len(chunk)
+                    yield chunk
+
+        return chunks()
+
     def holds(self, scope: str, digest: str) -> bool:
         return self.object_path(scope, digest).exists()
 
@@ -297,7 +329,30 @@ class SharedFilesystemObjectStore(FabricObjectStore):
             reference.authorization_scope, reference.content_digest
         )
 
+    def stored_size(self, reference: ContentReference) -> int:
+        scope, digest = reference.authorization_scope, reference.content_digest
+        try:
+            return self._objects.object_path(scope, digest).stat().st_size
+        except FileNotFoundError as exc:
+            raise ContentHydrationError(
+                f"no content for {digest} in scope {scope}"
+            ) from exc
+        except OSError as exc:
+            raise ContentUnavailable(
+                f"could not read {digest} in scope {scope}: {exc}"
+            ) from exc
+
     def open(
         self, reference: ContentReference, *, chunk_bytes: int = STREAM_CHUNK_BYTES
     ) -> Iterator[bytes]:
         return self._objects.stream(reference, chunk_bytes)
+
+    def open_range(
+        self,
+        reference: ContentReference,
+        start: int,
+        length: int,
+        *,
+        chunk_bytes: int = STREAM_CHUNK_BYTES,
+    ) -> Iterator[bytes]:
+        return self._objects.stream_range(reference, start, length, chunk_bytes)

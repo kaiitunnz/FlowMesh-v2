@@ -90,10 +90,3 @@ spec:
                 description: Short label for the regime, e.g. "post-earnings".
             required: [date, regime]
       required: [start_date, rationale, alternative_dates]
-
-  output:
-    destination:
-      type: http
-    artifacts:
-      - results.json
-      - logs

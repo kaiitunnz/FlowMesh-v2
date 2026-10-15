@@ -77,12 +77,25 @@ def _strings(value: Any, path: CredentialPath) -> Iterator[tuple[CredentialPath,
             yield from _strings(item, (*path, index))
 
 
+# What reading a pointer a spec does not hold raises.
+_UNHELD = (AttributeError, KeyError, IndexError, TypeError, ValueError)
+
+
 def spec_value(spec: BaseModel, pointer: str) -> Any:
     """The value at ``pointer`` in ``spec``."""
     container: Any = spec
     for segment in _segments(pointer):
         container = _child(container, segment)
     return container
+
+
+def holds_pointer(spec: BaseModel, pointer: str) -> bool:
+    """Return whether ``spec`` has a value at ``pointer``."""
+    try:
+        spec_value(spec, pointer)
+    except _UNHELD:
+        return False
+    return True
 
 
 def dispatched_credentials(spec: BaseModel, pointers: Iterable[str]) -> list[Any]:
@@ -92,7 +105,7 @@ def dispatched_credentials(spec: BaseModel, pointers: Iterable[str]) -> list[Any
     for pointer in pointers:
         try:
             values.append(spec_value(spec, pointer))
-        except (AttributeError, KeyError, IndexError, TypeError, ValueError):
+        except _UNHELD:
             continue
     return values
 
@@ -146,6 +159,7 @@ def _assign(container: Any, segment: str, value: Any) -> None:
 __all__ = [
     "credential_pointer",
     "dispatched_credentials",
+    "holds_pointer",
     "find_spec_credentials",
     "find_spec_strings",
     "mask_spec_values",

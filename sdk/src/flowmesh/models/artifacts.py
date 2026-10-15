@@ -1,4 +1,6 @@
-from pydantic import BaseModel, Field
+from enum import StrEnum
+
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ArtifactRef(BaseModel):
@@ -6,5 +8,38 @@ class ArtifactRef(BaseModel):
 
 
 class ArtifactContext(BaseModel):
-    base_dir: str
-    base_url: str | None = Field(default=None, exclude_if=lambda v: v is None)
+    """Which task published the artifacts a result's refs name; ``base_dir`` is where
+    ``materialize`` extracted them locally."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    task_id: str | None = Field(default=None, exclude_if=lambda v: v is None)
+    revisions: dict[str, str] = Field(default_factory=dict, exclude_if=lambda v: not v)
+    base_dir: str | None = Field(default=None, exclude_if=lambda v: v is None)
+
+
+class ArtifactKind(StrEnum):
+    """What a published artifact is."""
+
+    FILE = "file"
+    TREE = "tree"
+    ARCHIVE = "archive"
+
+
+class PublishedArtifact(BaseModel):
+    """One artifact a task published: a file, a tree of files, or an archive of a
+    tree."""
+
+    name: str
+    revision: str
+    kind: ArtifactKind
+    size_bytes: int
+    files: int
+    sha256: str | None = None
+    archive_of: str | None = None
+    published_at: str | None = None
+
+
+class PublishedArtifactList(BaseModel):
+    task_id: str
+    artifacts: list[PublishedArtifact]

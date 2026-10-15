@@ -64,10 +64,14 @@ scope or key, fetched by name alone. Errors carry `detail.code`:
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/v1/results/{task_id}` | Get task result JSON, read from the shared content store. |
-| GET | `/api/v1/results/{task_id}/bundle` | Download tar.gz bundle (`?include=results,artifacts,logs,all`). |
-| POST | `/api/v1/results/{task_id}/files` | Upload artifact (multipart). A path segment starting with `.fm-tmp-` is reserved and refused. |
-| GET | `/api/v1/results/{task_id}/files/{filename}` | Download artifact. |
+| GET | `/api/v1/results/{task_id}/artifacts` | List the artifacts a task published. |
+| GET | `/api/v1/results/{task_id}/files/{path}` | Download a published file, a file inside a published tree, or a model archive such as `final_model.tar.gz`. |
+| GET | `/api/v1/results/{task_id}/bundle` | Download a gzip-compressed tar of the result, artifacts and logs (`?include=` per section: `results`, `artifacts`, `logs`, `all`). |
 | GET | `/api/v1/results/{task_id}/logs` | Download archived `logs.jsonl`. |
+
+A task publishes its artifacts as the `final` revision when it succeeds, and a training
+run publishes each checkpoint it saves as `step-<n>`. A download answers one `Range`,
+conditioned by `If-Range`, with `206`, and answers a request naming several ranges whole.
 
 ## Content
 

@@ -96,7 +96,11 @@ class FakeS3:
     def get_object(self, **kw: Any) -> Any:
         if kw["Key"] not in self.objects:
             raise s3_error("NoSuchKey", 404, "GetObject")
-        return {"Body": _Body(self.objects[kw["Key"]], fail_after=self.body_fail_after)}
+        data = self.objects[kw["Key"]]
+        if (byte_range := kw.get("Range")) is not None:
+            first, last = byte_range.removeprefix("bytes=").split("-")
+            data = data[int(first) : int(last) + 1]
+        return {"Body": _Body(data, fail_after=self.body_fail_after)}
 
     def head_object(self, **kw: Any) -> Any:
         if kw["Key"] not in self.objects:

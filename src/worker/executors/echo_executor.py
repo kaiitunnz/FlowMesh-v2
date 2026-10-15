@@ -102,5 +102,5 @@ class EchoExecutor(DataMixin, Executor):
                 result=result,
                 dependencies_by_task=dependencies_by_task,
             )
-        maybe_upload_traces(task, out_dir, logger=logger)
+        maybe_upload_traces(task, out_dir, self._config.server_base_url, logger=logger)
         return result

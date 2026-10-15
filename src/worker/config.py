@@ -17,6 +17,7 @@ from shared.content.config import (
     DEFAULT_RELAY_TRANSFER_MAX_BYTES,
     DEFAULT_TRANSFER_WINDOW_BYTES,
     ObjectStoreConfig,
+    content_hydration_enabled,
 )
 from shared.content.wire import CHUNK_BYTES
 from shared.network.peer_dial import connect_budget
@@ -110,6 +111,7 @@ class WorkerConfig:
     foreign_gpu_gate: GpuGateConfig = GpuGateConfig()
     serve_default_ttl_sec: float = 3600.0
     serve_max_ttl_sec: float = 86400.0
+    model_cleanup_after_upload: bool = False
 
     @staticmethod
     def from_env() -> "WorkerConfig":
@@ -288,6 +290,9 @@ class WorkerConfig:
 
         return WorkerConfig(
             worker_token=worker_token,
+            model_cleanup_after_upload=parse_bool_env(
+                "MODEL_CLEANUP_AFTER_UPLOAD", False
+            ),
             owner_principal=owner_principal,
             server_base_url=server_base_url,
             supervisor_grpc_target=supervisor_grpc_target,
@@ -303,9 +308,7 @@ class WorkerConfig:
             results_dir=results_dir,
             private_state_dir=private_state_dir,
             content_dir=content_dir,
-            content_hydration_enabled=parse_bool_env(
-                "CONTENT_HYDRATION_ENABLED", False
-            ),
+            content_hydration_enabled=content_hydration_enabled(),
             content_cache_ttl_sec=parse_float_env("CONTENT_CACHE_TTL_SEC", 0.0),
             content_cache_max_bytes=parse_int_env("CONTENT_CACHE_MAX_BYTES", 0),
             content_holder_ttl_sec=parse_float_env("CONTENT_HOLDER_TTL_SEC", 300.0),

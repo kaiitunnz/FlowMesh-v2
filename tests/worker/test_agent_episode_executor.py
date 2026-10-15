@@ -582,7 +582,9 @@ def test_a_step_whose_report_fails_holds_no_request_for_control(
         logger=MagicMock(),
     )
 
-    def write_results(self: Runner, msg: object, out_dir: object, out: object) -> dict:
+    def write_results(
+        self: Runner, msg: object, out_dir: object, out: object, *_: object
+    ) -> dict:
         if not reported:
             raise ExecutionError("the result store is unavailable", retryable=True)
         return {}

@@ -6,11 +6,12 @@ import threading
 import time
 from collections import defaultdict, deque
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from typing import Any, Final
 
+from opentelemetry.metrics import Meter
 from opentelemetry.trace import Tracer
 from pydantic import ValidationError
 
@@ -49,6 +50,14 @@ from shared.schemas.event import TaskEvent, TaskFailureKind
 from shared.schemas.result import BaseExecutorResult, ResultEnvelope
 from shared.schemas.result.binding import upstream_value
 from shared.tasks import TaskEnvelopeTemplate
+from shared.tasks.artifact_binding import (
+    FINAL_REVISION,
+    ArtifactBinding,
+    ArtifactBindings,
+    ArtifactKind,
+    final_set,
+    revision_step,
+)
 from shared.tasks.credentials import set_spec_values
 from shared.tasks.result_binding import ResultBinding, ResultElementRef
 from shared.tasks.specs import ModelBindingMode, TaskSpecBase
@@ -154,7 +163,12 @@ from ..outputs import (
 )
 from ..parser import ParsedWorkflow, parse_workflow
 from ..redrive import StoreRedriveScheduler, manual_redrive
-from ..results import ResultReader, ResultUnreadable
+from ..results import (
+    ObjectIdentity,
+    ResultReader,
+    ResultUnavailable,
+    ResultUnreadable,
+)
 from ..v2 import (
     ExecutionMode,
     FrontendWorkflowSource,
@@ -208,6 +222,8 @@ from .reports import (
     LOSS_EFFECTS,
     failed_task_can_retry,
     in_flight_usage,
+    reported_artifacts,
+    reported_child_artifacts,
     reported_child_references,
     reported_reference,
     reset_to_pending,
@@ -412,6 +428,22 @@ def _stored_task_info(stored: StoredTask) -> TaskInfo:
 _HISTORY_BUILD_CHUNK = 256
 
 
+# How many threads read a restored dispatch's tree members after a restart.
+_RESTORE_MEMBER_READERS = 4
+# How long a restored dispatch whose members did not all read waits to read them again.
+_RESTORE_MEMBER_RETRY_SEC = 30.0
+
+
+def _trees(
+    artifacts: Sequence[ArtifactBinding],
+) -> dict[ObjectIdentity, ContentReference]:
+    return {
+        binding.reference.identity: binding.reference
+        for binding in artifacts
+        if binding.kind is ArtifactKind.TREE
+    }
+
+
 class TaskRuntime:
     """In-memory task registry with FIFO-ready queue and dependency tracking."""
 
@@ -428,6 +460,7 @@ class TaskRuntime:
         control: ControlPlaneTracer | None = None,
         tracer: Tracer | None = None,
         telemetry: TelemetryConfig | None = None,
+        meter: Meter | None = None,
         content_scope_authority: Callable[[str, str], None] | None = None,
         n8n: N8nConfig | None = None,
         redrive: Callable[
@@ -521,7 +554,7 @@ class TaskRuntime:
         self._actions = AfterCommitActions()
         self._resident_tasks = ResidentServeTasks(self._tasks)
         self._content_bindings = ContentBindings(
-            self._tasks, self._engines, self._original_deps, self._logger
+            self._tasks, self._engines, self._original_deps, self._logger, meter
         )
         self._agent_inputs = AgentInputs(
             self._content_bindings,
@@ -1022,6 +1055,7 @@ class TaskRuntime:
         """Rebuild the given workflows' scheduler state; returns those restored."""
         rehydrated_at = time.time()
         restored: list[str] = []
+        unrestorable: list[str] = []
         for workflow_id in sorted(workflow_ids):
             try:
                 stored = await self._load_stored_workflow(workflow_id)
@@ -1034,6 +1068,7 @@ class TaskRuntime:
                     workflow_id, exc
                 )
                 if tasks:
+                    unrestorable.append(workflow_id)
                     with self._transition():
                         self._install_rehydrated_workflow_locked(
                             workflow_id, tasks, None, rehydrated_at
@@ -1077,6 +1112,8 @@ class TaskRuntime:
                 )
                 self._cv.notify_all()
             restored.append(workflow_id)
+        await self._restore_artifacts([*restored, *unrestorable])
+        await self._restore_dispatched_objects(restored)
         with self._transition():
             self._merges.restore_merges_locked()
             self._resident_tasks.seed_dispatched_resident_locked()
@@ -1095,6 +1132,113 @@ class TaskRuntime:
                 "Rehydrated %d workflow(s) from durable state", len(restored)
             )
         return restored
+
+    async def _restore_artifacts(self, workflow_ids: Sequence[str]) -> None:
+        """Load the artifact catalog of each restored task that published one: all of
+        it for a task that can still bind, and the final set of a settled one."""
+        settled: list[str] = []
+        live: list[str] = []
+        with self._lock:
+            for workflow_id in workflow_ids:
+                for task in self._tasks.of_workflow(workflow_id):
+                    if not task.has_artifacts:
+                        continue
+                    group = settled if task.status in TERMINAL_TASK_STATUSES else live
+                    group.append(task.task_id)
+        if not settled and not live:
+            return
+        registry = self._workflow_registry
+        catalogs = {
+            **await registry.artifact_bindings_many_async(live),
+            **await registry.artifact_bindings_many_async(settled, FINAL_REVISION),
+        }
+        with self._lock:
+            for task_id, bindings in catalogs.items():
+                if (record := self._tasks.get(task_id)) is not None:
+                    record.artifacts = bindings
+
+    async def _restore_dispatched_objects(self, workflow_ids: Sequence[str]) -> None:
+        """Lend each restored dispatch the objects its artifact inputs name at once,
+        and their tree members off the startup path.
+
+        Members that did not read are read again every ``_RESTORE_MEMBER_RETRY_SEC``.
+        Until all of a dispatch's members read, an input its worker reports unreadable
+        is checked at control before it is charged to the worker.
+        """
+        with self._lock:
+            restored = [
+                (record, record.dispatched_artifacts, record.dispatched_producers)
+                for workflow_id in workflow_ids
+                for record in self._tasks.of_workflow(workflow_id)
+                if record.status not in TERMINAL_TASK_STATUSES
+                and (record.dispatched_artifacts or record.dispatched_producers)
+            ]
+        widened: list[tuple[TaskRecord, list[ArtifactBinding]]] = []
+        for record, named, producers in restored:
+            artifacts = [
+                *named,
+                *(
+                    binding
+                    for producer in producers
+                    for binding in self.final_artifacts(producer).values()
+                ),
+            ]
+            with self._lock:
+                record.dispatched_objects = (
+                    frozenset(binding.reference.identity for binding in artifacts),
+                )
+                record.members_pending = True
+            widened.append((record, artifacts))
+        if widened:
+            threading.Thread(
+                target=self._widen_restored_dispatches,
+                args=(widened,),
+                name="restore-dispatch-members",
+                daemon=True,
+            ).start()
+
+    def _widen_restored_dispatches(
+        self, widened: list[tuple[TaskRecord, list[ArtifactBinding]]]
+    ) -> None:
+        """Read the tree members each restored dispatch's inputs hold and lend them,
+        again for each dispatch whose members did not all read, until they do or the
+        dispatch ends."""
+
+        def widen(record: TaskRecord, artifacts: list[ArtifactBinding]) -> None:
+            dispatch_id = record.dispatch_id
+            objects = self.artifact_input_objects((), artifacts)
+            whole = len(objects) - 1 == len(_trees(artifacts))
+            with self._lock:
+                if record.dispatch_id == dispatch_id and record.members_pending:
+                    record.dispatched_objects = objects
+                    record.members_pending = not whole
+
+        pending = [
+            (record, record.dispatch_id, artifacts) for record, artifacts in widened
+        ]
+        while True:
+            with ThreadPoolExecutor(
+                max_workers=_RESTORE_MEMBER_READERS,
+                thread_name_prefix="restore-members",
+            ) as pool:
+                futures = [
+                    pool.submit(widen, record, artifacts)
+                    for record, _, artifacts in pending
+                ]
+            for future in futures:
+                if (exc := future.exception()) is not None:
+                    self._logger.warning(
+                        "A restored dispatch's artifact members did not read: %s", exc
+                    )
+            with self._lock:
+                pending = [
+                    (record, dispatch_id, artifacts)
+                    for record, dispatch_id, artifacts in pending
+                    if record.members_pending and record.dispatch_id == dispatch_id
+                ]
+            if not pending:
+                return
+            time.sleep(_RESTORE_MEMBER_RETRY_SEC)
 
     async def _load_stored_workflow(self, workflow_id: str) -> (
         tuple[
@@ -2175,8 +2319,16 @@ class TaskRuntime:
                 task_id = self._ready.pop_ready_locked()
                 if task_id:
                     return task_id
-                self._cv.wait(timeout)
+                wait = timeout
+                if (due := self._ready.next_due()) is not None:
+                    wait = min(timeout, max(0.0, due - time.monotonic()))
+                self._cv.wait(wait)
             return None
+
+    def held_back(self, task_id: str) -> bool:
+        """Return whether a queued task is held back until a time of its own."""
+        with self._cv:
+            return task_id in self._ready.not_before
 
     # ------------------------------------------------------------------ #
     # v2 orchestration ledger (`DS`)
@@ -3129,6 +3281,49 @@ class TaskRuntime:
             return
         self.originate_facade_turn_group(task_id, group)
 
+    def artifact_refusal(self, task_id: str, payload: dict[str, Any]) -> str | None:
+        """Return why a success's own reported publications cannot be accepted whole, or
+        None when they can or the task is not held here."""
+        own = reported_artifacts(payload.get("artifacts"))
+        with self._lock:
+            if (record := self._tasks.get(task_id)) is None:
+                return None
+            return self._content_bindings.artifact_refusal_locked(record, own)
+
+    def without_unaccepted_children(
+        self, task_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Return a merged success without the children whose publications cannot be
+        accepted whole; those children run again alone."""
+        children = reported_child_artifacts(payload)
+        with self._lock:
+            unaccepted = {
+                child_id
+                for child_id, bindings in children.items()
+                if (child := self._tasks.get(child_id)) is not None
+                and self._content_bindings.artifact_refusal_locked(child, bindings)
+                is not None
+            }
+        if not unaccepted:
+            return payload
+        self._logger.warning(
+            "Task %s: merged children %s published artifacts that cannot be "
+            "accepted; they run again alone",
+            task_id,
+            sorted(unaccepted),
+        )
+        return {
+            **payload,
+            **{
+                key: {
+                    child_id: value
+                    for child_id, value in (payload.get(key) or {}).items()
+                    if child_id not in unaccepted
+                }
+                for key in ("child_result_references", "child_artifacts")
+            },
+        }
+
     def success_settles_task(self, task_id: str, payload: dict[str, Any]) -> bool:
         """Whether a worker success ends its task or yields the lane back to run again.
 
@@ -3417,6 +3612,120 @@ class TaskRuntime:
                 # A replay acknowledges only once what it replays is durable.
                 self._committer.close_locked(record.workflow_id)
 
+    def record_artifact_published(
+        self,
+        task_id: str,
+        worker_id: str | None,
+        payload: Any,
+        dispatch_id: str | None = None,
+    ) -> bool:
+        """Bind the checkpoints a running task reports it published, and save them.
+
+        Only the dispatch holding a task that is still running binds, and only
+        ``step-<n>`` revisions: a stale or cancelled one, or a task already settled,
+        binds nothing, and the final set binds at success. A publication already bound
+        stands. Returns whether anything new was bound.
+        """
+        bindings = reported_artifacts(payload)
+        if bindings is None:
+            self._logger.warning(
+                "Task %s reported a publication that does not parse", task_id
+            )
+            return False
+        if early := [b for b in bindings if revision_step(b.revision) is None]:
+            self._logger.warning(
+                "Task %s reported %s at %s while running; only checkpoints bind then",
+                task_id,
+                early[0].name,
+                early[0].revision,
+            )
+            bindings = [b for b in bindings if revision_step(b.revision) is not None]
+        if not bindings:
+            return False
+        with self._transition():
+            record = self._reported_record_locked(task_id)
+            if record is None or not self._fence.accepts_event_locked(
+                record, worker_id, dispatch_id
+            ):
+                return False
+            if record.status != TaskStatus.DISPATCHED:
+                self._logger.info(
+                    "Not binding checkpoints task %s published while %s",
+                    task_id,
+                    record.status,
+                )
+                self._committer.close_locked(record.workflow_id)
+                return False
+            accepted = self._content_bindings.bind_artifacts_locked(
+                record, bindings, dispatch_id
+            )
+            if accepted:
+                self._committer.commit_locked(task_id, sched=False)
+            else:
+                # A replay acknowledges only once what it replays is durable.
+                self._committer.close_locked(record.workflow_id)
+            return bool(accepted)
+
+    def artifact_bindings(
+        self, task_id: str, revision: str | None = None
+    ) -> ArtifactBindings | None:
+        """Return a task's published artifacts by revision and name, or only
+        ``revision`` of them; None for a task this runtime neither holds nor has stored.
+        A settled task holds only its final set, so the rest is read from its stored
+        catalog."""
+        held: ArtifactBindings | None = None
+        with self._lock:
+            if (record := self._tasks.get(task_id)) is not None:
+                held = {
+                    key: binding
+                    for key, binding in record.artifacts.items()
+                    if revision is None or key[0] == revision
+                }
+                if (
+                    record.status not in TERMINAL_TASK_STATUSES
+                    or not record.has_artifacts
+                    or revision == FINAL_REVISION
+                ):
+                    return held
+        if held is not None:
+            stored = self._workflow_registry.artifact_bindings(task_id, revision)
+            return {**stored, **held}
+        if (persisted := self._stored_task(task_id)) is None:
+            return None
+        if not persisted.persisted.record.has_artifacts:
+            return {}
+        return self._workflow_registry.artifact_bindings(task_id, revision)
+
+    def artifact_binding(
+        self, task_id: str, revision: str, name: str
+    ) -> ArtifactBinding | None:
+        """Return a task's published artifact ``name`` at ``revision``, or None when it
+        has none; a settled task's checkpoints are read from its stored catalog alone.
+        """
+        with self._lock:
+            if (record := self._tasks.get(task_id)) is not None:
+                if (binding := record.artifacts.get((revision, name))) is not None:
+                    return binding
+                if (
+                    record.status not in TERMINAL_TASK_STATUSES
+                    or not record.has_artifacts
+                    or revision == FINAL_REVISION
+                ):
+                    return None
+        if record is None:
+            if (persisted := self._stored_task(task_id)) is None:
+                return None
+            if not persisted.persisted.record.has_artifacts:
+                return None
+        return self._workflow_registry.artifact_binding(task_id, revision, name)
+
+    def final_artifacts(self, task_id: str) -> ArtifactBindings:
+        """Return a task's final set by revision and name, empty when it has none."""
+        with self._lock:
+            if (record := self._tasks.get(task_id)) is not None:
+                return final_set(record.artifacts)
+        return final_set(self.artifact_bindings(task_id) or {})
+
     def input_resolution_binding(self, task_id: str) -> InputResolutionBinding | None:
         """The binding a task's recorded resolution carries, if one was recorded."""
         with self._lock:
@@ -3466,12 +3775,68 @@ class TaskRuntime:
         """
         with self._lock:
             record = self._tasks.get(task_id)
-            return (
-                record is not None
-                and record.status not in TERMINAL_TASK_STATUSES
-                and self._fence.holds_dispatch_locked(record, worker_id, None)
-                and self._content_bindings.consumes_locked(record, reference)
-            )
+            if (
+                record is None
+                or record.status in TERMINAL_TASK_STATUSES
+                or not self._fence.holds_dispatch_locked(record, worker_id, None)
+            ):
+                return False
+            if self._content_bindings.consumes_locked(record, reference):
+                return True
+            identity = reference.identity
+            return any(identity in objects for objects in record.dispatched_objects)
+
+    def artifact_input_objects(
+        self,
+        named: Sequence[ArtifactBinding],
+        lent: Sequence[ArtifactBinding] = (),
+    ) -> tuple[frozenset[ObjectIdentity], ...]:
+        """Return every object a dispatch's artifact inputs name, a tree's members
+        included.
+
+        A ``named`` tree's manifest must read: raises ``ResultUnavailable`` while the
+        store is unreachable and ``ResultUnreadable`` for a missing or corrupt one. A
+        ``lent`` tree adds its members only when its manifest reads now, and none is
+        read once the store proves unreachable.
+        """
+        objects = frozenset(binding.reference.identity for binding in (*named, *lent))
+        required = _trees(named)
+        members = [self._results.tree_members(tree) for tree in required.values()]
+        for identity, tree in _trees(lent).items():
+            if identity in required:
+                continue
+            try:
+                members.append(self._results.tree_members(tree))
+            except ResultUnreadable as exc:
+                self._logger.debug(
+                    "Lending only tree %s itself: %s", tree.content_digest, exc
+                )
+            except ResultUnavailable as exc:
+                self._logger.debug("Lending the lent trees themselves only: %s", exc)
+                break
+        return (objects, *members)
+
+    def note_artifact_inputs(
+        self,
+        task_id: str,
+        artifacts: Sequence[ArtifactBinding],
+        producers: Iterable[str],
+        objects: tuple[frozenset[ObjectIdentity], ...],
+    ) -> None:
+        """Record what the dispatch being published names: the published artifacts
+        its spec names by token, the upstream tasks whose final sets it carries, and
+        the objects they hold, which its worker may then read from a peer."""
+        with self._lock:
+            if (record := self._tasks.get(task_id)) is not None:
+                record.dispatched_artifacts = tuple(
+                    {
+                        (*binding.reference.identity, binding.name): binding
+                        for binding in artifacts
+                    }.values()
+                )
+                record.dispatched_producers = tuple(sorted(set(producers)))
+                record.dispatched_objects = objects
+                record.members_pending = False
 
     def upstream_task_ids(self, task_id: str) -> set[str]:
         """Every task of its workflow a task depends on, directly or transitively."""
@@ -3702,6 +4067,11 @@ class TaskRuntime:
         """A task's stored result envelope bytes, None when it has none."""
         binding = self.result_binding(task_id)
         return self._results.read_bytes(binding) if binding is not None else None
+
+    @property
+    def result_reader(self) -> ResultReader:
+        """The reader results and published artifacts stream from the store through."""
+        return self._results
 
     def recovery_disposition(
         self, workflow_id: str, task_id: str
@@ -3986,7 +4356,7 @@ class TaskRuntime:
         if not checks:
             return
         verdicts = {
-            task_id: self._inputs.verify_inputs(check.references)
+            task_id: self._inputs.verify_inputs(check)
             for task_id, check in checks.items()
             if check.unreadable is None
         }
@@ -4471,6 +4841,8 @@ class TaskRuntime:
     ) -> SettleOutcome:
         reference = reported_reference(payload.get("result_reference"))
         child_references = reported_child_references(payload)
+        artifacts = reported_artifacts(payload.get("artifacts"))
+        child_artifacts = reported_child_artifacts(payload)
         fanout = self._prefetch_fanout(task_id, reference, skip)
         finished_ts = parse_iso_ts(str(payload.get("finished_at") or ts))
         maybe_started = payload.get("started_at")
@@ -4625,11 +4997,13 @@ class TaskRuntime:
             record.status = TaskStatus.DONE
             record.error = None
             record.finished_ts = finished_ts
+            record.succeeded_monotonic = time.monotonic()
             if started_ts:
                 record.started_ts = started_ts
             record.merged_children = None
             record.merged_dispatch_worker = None
             self._content_bindings.bind_result_locked(record, reference, skip)
+            self._bind_reported_artifacts_locked(record, artifacts, dispatch_id)
             if usage is not None:
                 record.usages.append(usage)
 
@@ -4659,6 +5033,10 @@ class TaskRuntime:
             )
             record.merged_children = settled_children or None
             for merged_child in settled_children:
+                if (child_record := self._tasks.get(merged_child)) is not None:
+                    self._bind_reported_artifacts_locked(
+                        child_record, child_artifacts.get(merged_child, []), dispatch_id
+                    )
                 ready_children.extend(
                     self._merges.finalize_merged_child_success_locked(
                         merged_child,
@@ -4686,6 +5064,20 @@ class TaskRuntime:
                 self._cv.notify_all()
 
             return settle_outcome(effect, record, settled_children, usages)
+
+    def _bind_reported_artifacts_locked(
+        self,
+        record: TaskRecord,
+        artifacts: list[ArtifactBinding] | None,
+        dispatch_id: str | None,
+    ) -> None:
+        if artifacts is None:
+            self._logger.error(
+                "Task %s reported artifacts that do not parse; binding none",
+                record.task_id,
+            )
+            return
+        self._content_bindings.bind_artifacts_locked(record, artifacts, dispatch_id)
 
     def _finish_success_locked(
         self, record: TaskRecord, fanout: FanoutRead | None
@@ -4824,11 +5216,17 @@ class TaskRuntime:
                     unavailable_inputs or (),
                 ):
                     held_dispatch = record.dispatch_id
+                    members = frozenset(
+                        reference
+                        for reference in consumed
+                        if not self._content_bindings.consumes_locked(record, reference)
+                    )
                     end = self._return_dispatch_locked(
                         record, increment_retry=False, front=False
                     )
+                    record.avoided_worker = worker_id
                     self._inputs.hold_for_input_check_locked(
-                        record, worker_id, held_dispatch, consumed
+                        record, worker_id, held_dispatch, consumed, members
                     )
                     return FailureOutcome(end, record.attempts, [], [])
                 self._logger.warning(
@@ -4890,8 +5288,10 @@ class TaskRuntime:
         *,
         increment_retry: bool,
         front: bool,
+        not_before: float | None = None,
     ) -> DispatchEnd:
-        """Return a task whose dispatch ended without a result to the ready queue.
+        """Return a task whose dispatch ended without a result to the ready queue,
+        not to be handed out before ``not_before``, a monotonic time, when given.
 
         ``holder`` names the worker whose dispatch ended, when the caller knows it;
         only a task that worker holds is returned. A settled task stays as it is. A
@@ -4922,11 +5322,19 @@ class TaskRuntime:
             ):
                 return DispatchEnd.MERGE_RETURNED
             return self._return_dispatch_locked(
-                record, increment_retry=increment_retry, front=front
+                record,
+                increment_retry=increment_retry,
+                front=front,
+                not_before=not_before,
             )
 
     def _return_dispatch_locked(
-        self, record: TaskRecord, *, increment_retry: bool, front: bool
+        self,
+        record: TaskRecord,
+        *,
+        increment_retry: bool,
+        front: bool,
+        not_before: float | None = None,
     ) -> DispatchEnd:
         """Return a task to the ready queue, its merged children still mergeable."""
         task_id = record.task_id
@@ -4954,13 +5362,18 @@ class TaskRuntime:
                 changed = True
             else:
                 changed = engine.on_returned(task_id)
-        self._release_dispatch_locked(record, moved, front=front)
+        self._release_dispatch_locked(record, moved, front=front, not_before=not_before)
         if engine is not None and changed:
             self._committer.save_ledger_locked(record.workflow_id)
         return DispatchEnd.RETURNED
 
     def _release_dispatch_locked(
-        self, record: TaskRecord, moved: list[str], *, front: bool
+        self,
+        record: TaskRecord,
+        moved: list[str],
+        *,
+        front: bool,
+        not_before: float | None = None,
     ) -> None:
         """Return a task whose dispatch ended to the ready queue and commit what moved.
 
@@ -4973,7 +5386,9 @@ class TaskRuntime:
                 task_id, (record.assigned_worker, record.dispatch_id, moved)
             )
         reset_to_pending(record)
-        if self._ready.enqueue_ready_locked(task_id, front=front):
+        if self._ready.enqueue_ready_locked(
+            task_id, front=front, not_before=not_before
+        ):
             self._cv.notify_all()
         self._committer.commit_locked(*moved)
 
@@ -6022,11 +6437,11 @@ class TaskRuntime:
 
     def ready_queue_length(self) -> int:
         with self._cv:
-            return len(self._ready.ready_queue)
+            return self._ready.queued_count()
 
     def task_status_counts(self) -> tuple[int, int, int, int, int]:
         with self._cv:
-            queueing = len(self._ready.ready_queue)
+            queueing = self._ready.queued_count()
             dispatched = 0
             pending = 0
             done = 0
@@ -6069,6 +6484,8 @@ class TaskRuntime:
             **{
                 name: value.copy() if isinstance(value, (list, dict)) else value
                 for name, value in record
+                # A time on this process's clock alone, which no restart restores.
+                if name != "succeeded_monotonic"
             },
             **self._derived_locked(task_id, record).info_fields(),
         }

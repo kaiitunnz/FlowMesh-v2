@@ -64,11 +64,3 @@ spec:
       required_fields:
         - row_id
         - answer
-
-  output:
-    destination:
-      type: local
-    artifacts:
-      - results.json
-      - artifacts
-      - logs

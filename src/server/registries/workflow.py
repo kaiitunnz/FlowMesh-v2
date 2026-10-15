@@ -30,6 +30,7 @@ from ..clients.redis import (
     WORKFLOWS_OPEN_KEY,
     WORKFLOWS_SET_KEY,
     RedisClient,
+    task_artifacts_key,
     task_state_key,
     workflow_blueprints_key,
     workflow_cancelled_tasks_key,
@@ -51,6 +52,7 @@ from ..task.v2 import PersistedV2Workflow
 from ..utils.cursors import page_slice
 from ..utils.query import QueryFilter
 from ..utils.time import now_iso
+from .artifacts import ArtifactCatalogStore, queue_artifact_bindings
 from .history import WorkflowHistoryStore
 from .scans import chunked, lex_scan, lex_scan_async, scan_sizes
 from .task_states import PersistedTask, load_context, load_task_state
@@ -319,6 +321,9 @@ def _queue_revision(pipe: _AnyPipeline, *workflow_ids: str) -> None:
 def _queue_task_states(pipe: _AnyPipeline, items: Sequence[PersistedTask]) -> None:
     for item in items:
         pipe.set(task_state_key(item.record.task_id), item.model_dump_json())
+        queue_artifact_bindings(
+            pipe, item.record.task_id, item.record.unwritten_artifacts
+        )
 
 
 def task_sources(items: Sequence[PersistedTask]) -> dict[str, dict[str, str]]:
@@ -500,7 +505,7 @@ def _queue_workflow_sources(
     pipe.hset(workflow_sources_key(workflow_id), mapping=sources)
 
 
-class WorkflowRegistry(WorkflowHistoryStore):
+class WorkflowRegistry(WorkflowHistoryStore, ArtifactCatalogStore):
     def __init__(self, rds: RedisClient) -> None:
         self._rds = rds
 
@@ -560,7 +565,7 @@ class WorkflowRegistry(WorkflowHistoryStore):
             pipe.delete(*(workflow_credential_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_revision_key(wid) for wid in workflow_ids))
             for task_id in task_ids:
-                pipe.delete(task_state_key(task_id))
+                pipe.delete(task_state_key(task_id), task_artifacts_key(task_id))
             pipe.execute()
 
     async def unregister_workflows_async(self, *workflow_ids: str) -> None:
@@ -584,7 +589,7 @@ class WorkflowRegistry(WorkflowHistoryStore):
             pipe.delete(*(workflow_credential_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_revision_key(wid) for wid in workflow_ids))
             for task_id in task_ids:
-                pipe.delete(task_state_key(task_id))
+                pipe.delete(task_state_key(task_id), task_artifacts_key(task_id))
             await pipe.execute()
 
     def get_workflow_ids(self) -> set[str]:

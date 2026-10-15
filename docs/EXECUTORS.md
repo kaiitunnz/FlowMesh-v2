@@ -46,13 +46,42 @@ end-to-end (worker envelope → server ingest and `GET /results/{id}` → SDK).
 Results without a `task_type` (legacy files, condition-skips) fall back to
 the permissive base.
 
-Artifact-bearing fields use `ArtifactRef` (`{"path": rel_path}`);
-relative paths resolve against the producer's `_artifacts` context via
-`artifact_to_source` / `_render_artifact_ref`.
+Artifact-bearing fields use `ArtifactRef` (`{"path": rel_path}`), a path relative
+to the producer's published artifacts, which the `_artifacts` context names. The worker
+hydrates each artifact a task reads before the task runs, through its content cache, a
+peer's copy or the shared store, and a placeholder or a ref in the spec's data (a
+visual-embedding model's image items, an `image_embedding`) arrives as its local path.
+A ref to a path the producer did not publish fails the task.
+
+A model a spec loads by another task's id arrives the same way. `checkpoint.load` with
+`task_id` (or `taskId`) loads that task's published `filename`, or its model — its
+`final_model` or `final_lora` tree — when it names none; a LoRA adapter with `task_id`
+loads the producer's model. A producer that published neither or both, or nothing under
+`filename`, fails the task at dispatch. `checkpoint.load.base_url` with `task_id` and
+`filename` fetches that artifact from another deployment's download route.
 
 An inference producer reports every item with its `index`, `prompt` and `output`, or its
 task fails before the result is stored; stored results read through the tolerant
 `InferenceItem`.
+
+## Artifact publication
+
+An executor writes its artifacts under `out_dir/artifacts/`, and the worker publishes
+them in the shared content store when the executor returns, before it reports the task
+done: each top-level file as one object and each top-level directory as a tree whose
+manifest names its files. A result field ending in `_archive` whose ref names a
+directory with `.tar.gz` appended (`final_model_archive`, `final_lora_archive`)
+declares a `.tar.gz` archive view of that tree. An artifact named `results.json` fails
+the task, since that name downloads its result.
+
+A training executor publishes each checkpoint its trainer saves as the `checkpoints`
+artifact at revision `step-<n>` while it runs, and leaves its
+`checkpoints/checkpoint-<n>` directories out of the `final` set; another task's
+`checkpoints` directory publishes as an ordinary artifact. A training result's
+`checkpoints_dir` names the last checkpoint the run published, which a consumer hydrates
+as `checkpoint-<n>/`. A save waits while two checkpoints are publishing, which bounds the
+run's disk. A checkpoint that cannot be published after retries stops training at the
+next save (a PPO run at the first logged step after it) and fails the task.
 
 ## Agent-episode harness backends
 

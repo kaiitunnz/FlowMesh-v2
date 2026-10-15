@@ -13,6 +13,7 @@ from server.task.models import TaskLoopTime, TaskOccurrence, TaskStatus
 from server.task.redrive import StoreRedriveScheduler
 from server.task.runtime import TaskRuntime
 from shared.schemas.result.binding import element_value
+from shared.tasks.artifact_binding import ArtifactBinding
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader, result_payload
@@ -106,8 +107,14 @@ class _Run:
         names = {op: name for name, op in self.ids.items()}
         return names[wi.operator_id]
 
-    def run(self, name: str, result: dict[str, Any] | None = None) -> str:
-        """Dispatch the one ready task of ``name`` and settle it with ``result``."""
+    def run(
+        self,
+        name: str,
+        result: dict[str, Any] | None = None,
+        artifacts: list[ArtifactBinding] | None = None,
+    ) -> str:
+        """Dispatch the one ready task of ``name`` and settle it with ``result`` and
+        the ``artifacts`` it published."""
         task_id = next(t for t in self.ready if self.name(t) == name)
         self.ready.remove(task_id)
         record = self.runtime.get_record(task_id)
@@ -117,6 +124,8 @@ class _Run:
             if result is not None
             else {}
         )
+        if artifacts:
+            payload["artifacts"] = [a.model_dump(mode="json") for a in artifacts]
         record_dispatch(self.runtime, task_id, cast(Any, _worker()))
         self.runtime.mark_started(task_id, "wkr-1", {}, _TS)
         self.runtime.mark_succeeded(task_id, "wkr-1", payload, _TS)

@@ -11,12 +11,17 @@ immutable reference makes safe to reuse.
 
 import threading
 from collections import OrderedDict
+from collections.abc import Callable, Iterator
+from functools import partial
 
 from shared.content import (
     ContentReference,
     ContentStoreError,
     ContentUnavailable,
+    DigestAlgorithm,
     FabricObjectStore,
+    TreeManifest,
+    TreeManifestError,
 )
 from shared.schemas.result import ResultEnvelope
 from shared.schemas.result.binding import (
@@ -35,6 +40,11 @@ _CACHE_MAX_ENTRY_BYTES = 8 * 1024 * 1024
 # header and its slot, about 1.3 KiB measured. The budget counts it, so it bounds the
 # memory the cache holds.
 _CACHE_ENTRY_OVERHEAD_BYTES = 1536
+# The members the decoded-tree cache keeps across its trees, about 201 B each, so about
+# 50 MiB at the cap. A tree over the cap is kept alone, as the most recent one.
+_TREE_MEMBERS_MAX = 1 << 18
+
+type ObjectIdentity = tuple[str, str, str]
 
 
 class ResultUnreadable(RuntimeError):
@@ -55,6 +65,11 @@ class ResultReader:
         self._cache_max_bytes = cache_max_bytes
         self._cache: OrderedDict[ContentReference, bytes] = OrderedDict()
         self._cached_bytes = 0
+        self._trees: OrderedDict[ObjectIdentity, frozenset[ObjectIdentity]] = (
+            OrderedDict()
+        )
+        self._tree_members = 0
+        self._oversize: tuple[ObjectIdentity, frozenset[ObjectIdentity]] | None = None
         self._lock = threading.Lock()
 
     def read_bytes(self, binding: ResultBinding) -> bytes:
@@ -79,6 +94,59 @@ class ResultReader:
             self._hydrate(reference), f"the stored result {reference.content_digest}"
         )
 
+    def read_manifest(self, reference: ContentReference) -> TreeManifest:
+        """Return the tree manifest a stored object reads as."""
+        try:
+            return TreeManifest.decode(self._hydrate(reference))
+        except TreeManifestError as exc:
+            raise ResultUnreadable(
+                f"the stored tree {reference.content_digest} is not a manifest: {exc}"
+            ) from exc
+
+    def tree_members(self, reference: ContentReference) -> frozenset[ObjectIdentity]:
+        """Return the identities of a stored tree's member objects.
+
+        A tree is decoded once and kept for the most recently read trees, or alone as
+        the most recent one too large to share the cache, so a check against its
+        members is a set lookup.
+        """
+        key = reference.identity
+        with self._lock:
+            if (cached := self._trees.get(key)) is not None:
+                self._trees.move_to_end(key)
+                return cached
+            if self._oversize is not None and self._oversize[0] == key:
+                return self._oversize[1]
+        scope = reference.authorization_scope
+        members = frozenset(
+            (scope, DigestAlgorithm.SHA256.value, member.digest)
+            for member in self.read_manifest(reference).members
+        )
+        if len(members) > _TREE_MEMBERS_MAX:
+            with self._lock:
+                self._oversize = (key, members)
+        else:
+            with self._lock:
+                if key not in self._trees:
+                    self._trees[key] = members
+                    self._tree_members += len(members)
+                    while self._tree_members > _TREE_MEMBERS_MAX:
+                        _, evicted = self._trees.popitem(last=False)
+                        self._tree_members -= len(evicted)
+        return members
+
+    def open(self, reference: ContentReference) -> Iterator[bytes]:
+        """Return an object's bytes in chunks, raising before the last one unless they
+        verify. Raises ``ResultUnavailable`` while the store cannot be reached and
+        ``ResultUnreadable`` for an object that is missing or corrupt."""
+        return _classified(partial(self._store.open, reference))
+
+    def open_range(
+        self, reference: ContentReference, start: int, length: int
+    ) -> Iterator[bytes]:
+        """Return ``length`` unverified bytes of an object from ``start``, in chunks."""
+        return _classified(partial(self._store.open_range, reference, start, length))
+
     def verify(self, reference: ContentReference) -> None:
         """Read one object from the store itself, bypassing the cache, and verify it.
 
@@ -93,6 +161,24 @@ class ResultReader:
             raise ResultUnavailable(str(exc)) from exc
         except ContentStoreError as exc:
             raise ResultUnreadable(str(exc)) from exc
+
+    def verify_stored(self, reference: ContentReference) -> None:
+        """Check that one object is in the store at its size, reading none of it.
+
+        Raises ``ResultUnavailable`` while the store cannot be reached and
+        ``ResultUnreadable`` for an object that is missing or of another size.
+        """
+        try:
+            size = self._store.stored_size(reference)
+        except ContentUnavailable as exc:
+            raise ResultUnavailable(str(exc)) from exc
+        except ContentStoreError as exc:
+            raise ResultUnreadable(str(exc)) from exc
+        if size != reference.size_bytes:
+            raise ResultUnreadable(
+                f"content {reference.content_digest} is stored at {size} bytes, not "
+                f"{reference.size_bytes}"
+            )
 
     def _hydrate(self, reference: ContentReference) -> bytes:
         key = reference
@@ -122,6 +208,15 @@ class ResultReader:
                 self._cached_bytes -= _charge(evicted)
 
 
+def _classified(open_chunks: Callable[[], Iterator[bytes]]) -> Iterator[bytes]:
+    try:
+        yield from open_chunks()
+    except ContentUnavailable as exc:
+        raise ResultUnavailable(str(exc)) from exc
+    except ContentStoreError as exc:
+        raise ResultUnreadable(str(exc)) from exc
+
+
 def _charge(data: bytes) -> int:
     return len(data) + _CACHE_ENTRY_OVERHEAD_BYTES
 
@@ -133,4 +228,4 @@ def _envelope(data: bytes, source: str) -> ResultEnvelope:
         raise ResultUnreadable(str(exc)) from exc
 
 
-__all__ = ["ResultReader", "ResultUnavailable", "ResultUnreadable"]
+__all__ = ["ObjectIdentity", "ResultReader", "ResultUnavailable", "ResultUnreadable"]

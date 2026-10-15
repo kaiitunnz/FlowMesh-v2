@@ -24,7 +24,7 @@ from shared.schemas.result import SSHResult
 from shared.tasks.specs.ssh import RELAYED_SSH_ACCESS_MODES, SSHSpecStrict
 from shared.tasks.task_type import TaskType
 from shared.utils import new_ssh_session_id
-from shared.utils.manifest import ARTIFACTS_DIR, prepare_output_dir
+from shared.utils.task_output import ARTIFACTS_DIR, prepare_output_dir
 from worker.config import WorkerConfig
 from worker.executors.ssh_session import (
     SessionGone,
@@ -37,7 +37,6 @@ from worker.executors.ssh_session import (
 )
 from worker.executors.ssh_session.config import output_limit, raise_if_exceeded
 from worker.executors.ssh_session.inputs import resolve_inputs
-from worker.executors.utils.checkpoints import maybe_upload_artifacts
 from worker.gpu_binding import FreeGpus
 
 from .base_executor import ExecutionError, Executor, ExecutorTask, RunSignals
@@ -198,7 +197,6 @@ class SSHExecutor(Executor):
                 if cfg.entrypoint is not None:
                     result.entrypoint = cfg.entrypoint
             session.collect_output(out_dir / ARTIFACTS_DIR, max_bytes)
-            maybe_upload_artifacts(task, out_dir, logger=logger, skip_errors=True)
         finally:
             # Its relayed connections end first, so none outlives the session's sshd.
             self.withdraw_ssh_endpoint(session_id)

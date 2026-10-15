@@ -39,13 +39,12 @@ from shared.tasks.specs import PPOSpecStrict
 from shared.tasks.task_type import TaskType
 from shared.utils.parsing import safe_float, safe_int, to_bool
 
+from ..content.artifacts import checkpoint_spool_dir
 from ..utils.logging import configure_hf_library_logging
 from .base_executor import ExecutionError, Executor, ExecutorTask
-from .mixins.training import TrainingMixin
+from .utils.checkpoint_spool import CheckpointSpool
 from .utils.checkpoints import (
-    archive_model_dir,
-    get_http_destination,
-    maybe_upload_artifacts,
+    archive_path_for,
     write_executor_result,
 )
 from .utils.data_utils import resolve_jsonl_path
@@ -351,14 +350,21 @@ class _EarlyStopSignal(Exception):
     """Internal signal: KL exceeded ``target_kl``; unwind ``PPOTrainer.train``."""
 
 
+class _CheckpointPublishStop(Exception):
+    """Internal signal: a saved checkpoint could not be published; unwind
+    ``PPOTrainer.train`` so the task fails as a publication failure."""
+
+
 class _EarlyStopPPOTrainer(PPOTrainer):
-    """``PPOTrainer`` subclass that halts when ``objective/kl`` exceeds a threshold.
+    """``PPOTrainer`` subclass that halts when ``objective/kl`` exceeds a threshold,
+    or once a saved checkpoint could not be published.
 
     TRL's PPO loop calls ``self.log(metrics)`` once per update step but
     never checks ``control.should_training_stop``, so a stock
     ``TrainerCallback`` cannot end training. Overriding ``log`` and
-    raising ``_EarlyStopSignal`` instead lets the exception unwind the
-    loop cleanly; the executor catches it at the ``train()`` call site.
+    raising ``_EarlyStopSignal`` or ``_CheckpointPublishStop`` instead lets the
+    exception unwind the loop cleanly; the executor catches it at the ``train()``
+    call site.
 
     ``target_kl`` defaults to ``None`` so the subclass is a safe
     drop-in when early stopping is disabled.
@@ -368,6 +374,11 @@ class _EarlyStopPPOTrainer(PPOTrainer):
 
     def log(self, logs: dict[str, float], *args: Any, **kwargs: Any) -> None:
         super().log(logs, *args, **kwargs)
+        if any(
+            isinstance(callback, CheckpointSpool) and callback.stopped
+            for callback in self.callback_handler.callbacks
+        ):
+            raise _CheckpointPublishStop()
         if self.target_kl is None:
             return
         kl = logs.get("objective/kl")
@@ -402,7 +413,7 @@ def _resolve_report_to(value: Any) -> str | list[str]:
     )
 
 
-class PPOExecutor(TrainingMixin, Executor):
+class PPOExecutor(Executor):
     """PPO training executor using TRL library."""
 
     name = "ppo_executor"
@@ -690,6 +701,7 @@ class PPOExecutor(TrainingMixin, Executor):
                 train_dataset=dataset,
                 eval_dataset=dataset,
                 data_collator=_PPOCollator(tokenizer),
+                callbacks=[CheckpointSpool(checkpoint_spool_dir(out_dir))],
             )
             self._ppo_trainer = ppo_trainer
             self._install_trainer_save_overrides(ppo_trainer)
@@ -701,18 +713,22 @@ class PPOExecutor(TrainingMixin, Executor):
             self._install_kl_early_stopping(ppo_trainer, training_config)
 
             logger.info("Starting PPO training...")
+            publish_failed = False
             try:
                 with reward_ctx:
                     ppo_trainer.train()
             except _EarlyStopSignal:
                 pass
+            except _CheckpointPublishStop:
+                publish_failed = True
+                logger.warning("PPO stopped: a saved checkpoint could not be published")
             logger.info("PPO training completed")
 
             ok = True
             error_msg = None
 
             # Save model if requested
-            if training_config.get("save_model", True):
+            if training_config.get("save_model", True) and not publish_failed:
                 try:
                     logger.info("Saving trained model...")
                     model_save_path = checkpoint_dir / "final_model"
@@ -720,18 +736,7 @@ class PPOExecutor(TrainingMixin, Executor):
                     ppo_trainer.save_model(model_save_path.as_posix())
                     logger.info("Model saved to: %s", model_save_path)
                     final_model_path = model_save_path
-                    destination = get_http_destination(task.spec)
-                    if destination:
-                        try:
-                            final_archive_path = archive_model_dir(model_save_path)
-                            logger.info(
-                                "Archived PPO model to %s for HTTP delivery",
-                                final_archive_path,
-                            )
-                        except Exception as arch_exc:
-                            logger.warning(
-                                "Failed to archive PPO model for upload: %s", arch_exc
-                            )
+                    final_archive_path = archive_path_for(model_save_path)
                 except Exception as exc:
                     logger.warning("Failed to save model: %s", exc)
 
@@ -749,9 +754,7 @@ class PPOExecutor(TrainingMixin, Executor):
                 dataset_size=dataset_size,
                 output_dir=out_dir.as_posix(),
             )
-            write_executor_result(
-                out_dir / "results.json", task.task_id, task.spec, result
-            )
+            write_executor_result(out_dir / "results.json", task.task_id, result)
             self._task_out_dir = None
             raise ExecutionError(error_msg or "PPO training failed") from exc
 
@@ -777,15 +780,6 @@ class PPOExecutor(TrainingMixin, Executor):
                 if final_archive_path
                 else None
             ),
-        )
-
-        maybe_upload_artifacts(task, out_dir, logger=logger)
-
-        self._cleanup_local_artifacts(
-            task,
-            checkpoint_dir,
-            final_model_path,
-            final_archive_path,
         )
 
         logger.info("PPO training task completed in %.2f seconds", training_time)

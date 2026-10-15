@@ -17,6 +17,7 @@ from redis.exceptions import (
 )
 
 from server.telemetry.tracing import ControlPlaneTracer
+from shared.tasks.artifact_binding import final_set
 
 from ...clients.redis import REDIS_CONN_ERRORS
 from ...orchestration import OrchestrationEngine
@@ -37,7 +38,7 @@ from ..models import (
 )
 from .after_commit import AfterCommitActions, Purge, Settled
 from .record_failures import RecordFailures
-from .reports import membership
+from .reports import clear_dispatched_inputs, membership
 from .reservations import WorkerReservations
 from .resident_tasks import ResidentServeTasks
 from .scheduling import EpochFrontier
@@ -502,8 +503,19 @@ class TransitionCommitter:
         by_status: dict[str, list[str]],
     ) -> None:
         """Report each committed resident task that ended, file the completion notice
-        of a terminal, and release the worker of each dispatch the commit ended."""
+        of a terminal, and release the worker of each dispatch the commit ended.
+
+        A settled task keeps only its final set in memory and drops what its last
+        dispatch lent a peer read.
+        """
         self._observe_resident_locked(records)
+        for persisted in records:
+            record = persisted.record
+            record.unwritten_artifacts.clear()
+            if record.status in TERMINAL_TASK_STATUSES:
+                clear_dispatched_inputs(record)
+                if record.artifacts:
+                    record.artifacts = final_set(record.artifacts)
         if any(by_status[status] for status in TERMINAL_TASK_STATUSES):
             self._actions.file_locked(workflow_id, Settled(workflow_id))
         self._reservations.release_ended_dispatches_locked(

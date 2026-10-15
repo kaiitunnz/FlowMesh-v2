@@ -18,7 +18,7 @@ from pydantic import (
 
 from shared.tasks import PERSISTED_LOAD_CONTEXT
 
-from ..task.models import TaskRecord
+from ..task.models import TERMINAL_TASK_STATUSES, TaskRecord
 
 # The validation-context key holding a workflow's stored sources by digest.
 _SOURCES = "workflow_sources"
@@ -75,6 +75,8 @@ class PersistedTask(BaseModel):
             reference.model_dump(mode="json") if reference is not None else None
         )
         data["record"]["result_skip"] = self.record.result_skip
+        # And whether its artifact catalog has anything a restart must load.
+        data["record"]["has_artifacts"] = self.record.has_artifacts
         # And which worker a merged dispatch went to, which tells a later report of
         # that worker's failure apart from the task's own.
         data["record"]["merged_dispatch_worker"] = self.record.merged_dispatch_worker
@@ -85,6 +87,17 @@ class PersistedTask(BaseModel):
         data["record"][
             "latest_update_dispatch_id"
         ] = self.record.latest_update_dispatch_id
+        # And what its live dispatch names by token and which upstream final sets it
+        # carries, which its worker may read from a peer; the final sets themselves
+        # are read again from the catalog.
+        live = self.record.status not in TERMINAL_TASK_STATUSES
+        data["record"]["dispatched_artifacts"] = [
+            binding.model_dump(mode="json")
+            for binding in (self.record.dispatched_artifacts if live else ())
+        ]
+        data["record"]["dispatched_producers"] = list(
+            self.record.dispatched_producers if live else ()
+        )
         # And where its vaulted credentials go back into its spec at dispatch.
         data["record"]["credential_refs"] = self.record.credential_refs
         # And when its first run started, which a serve task's TTL counts from.

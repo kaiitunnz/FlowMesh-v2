@@ -8,6 +8,7 @@ from shared.harness.boundary import BoundaryEventKind
 from shared.inference import engine_profile_key
 from shared.sandbox import SandboxEgressMode, SandboxRuntimeProfile
 from shared.tasks import TaskType
+from shared.tasks.components.exports import AgentExport
 from shared.tasks.specs import InferenceEmbodimentKind, ModelBindingMode
 from shared.tools.facade import FacadeDescriptor as FacadeDescriptor
 
@@ -555,6 +556,8 @@ class AgentOperator(_OperatorBase):
     # Legacy single-target shorthand the compiler normalizes into one declared region;
     # a declaration that sets both this and child_region_refs is rejected.
     child_template_ref: str | None = None
+    # The workspace paths the agent publishes when it completes, pinned at compile time.
+    exports: tuple[AgentExport, ...] = ()
 
 
 type SelectorStep = str | int

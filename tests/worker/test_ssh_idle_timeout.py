@@ -15,7 +15,6 @@ from tests.worker.factories import (
     make_live_worker_config,
     make_ssh_executor,
 )
-from worker.executors import ssh_executor as ssh_module
 from worker.executors.base_executor import ExecutionError
 from worker.executors.ssh_session import (
     SessionRequest,
@@ -122,10 +121,7 @@ def _run(
     session = _FakeSession(connections, output_size)
     executor._backend = _FakeBackend(session)
     started = time.monotonic()
-    with (
-        patch.object(executor, "emit_update"),
-        patch.object(ssh_module, "maybe_upload_artifacts"),
-    ):
+    with (patch.object(executor, "emit_update"),):
         executor.run(_task(**spec), tmp_path / "out")
     return session, time.monotonic() - started
 

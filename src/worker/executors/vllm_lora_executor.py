@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """VLLMLoRAExecutor: LoRA-enabled vLLM inference."""
 
+import dataclasses
 import logging
 import os
 import shutil
@@ -27,6 +28,8 @@ from .base_executor import ExecutionError
 from .utils.checkpoints import (
     detect_archive_format,
     download_and_unpack,
+    hydrated_path,
+    load_identity,
     select_extracted_subdir,
 )
 from .vllm_executor import VLLMExecutor
@@ -55,6 +58,9 @@ class VLLMLoRAExecutor(VLLMExecutor):
         super().__init__(*args, **kwargs)
         self._adapter_specs: list[LoRAAdapterSpec] = []
         self._runtime_specs: list[LoRAAdapterSpec] = []
+        # The engine the merged adapters went into: a reused engine, whose key names
+        # the same adapters, already carries them.
+        self._merged_into: Any = None
 
     def _build_inference_spec(
         self,
@@ -63,7 +69,14 @@ class VLLMLoRAExecutor(VLLMExecutor):
         spec: InferenceSpecStrict,
     ) -> dict[str, Any]:
         base_spec = super()._build_inference_spec(vllm_cfg, checkpoint_cfg, spec)
-        base_spec["adapters"] = self._extract_adapter_specs(spec)
+        base_spec["adapters"] = [
+            dataclasses.replace(
+                adapter,
+                path=adapter.path and load_identity(adapter.path),
+                url=adapter.url and load_identity(adapter.url),
+            )
+            for adapter in self._extract_adapter_specs(spec)
+        ]
         return base_spec
 
     def _extra_llm_kwargs(self, spec: InferenceSpecStrict) -> dict[str, Any]:
@@ -150,7 +163,7 @@ class VLLMLoRAExecutor(VLLMExecutor):
                 runtime_specs.append(adapter)
         self._runtime_specs = runtime_specs
 
-        if not merge_specs:
+        if not merge_specs or self._merged_into is self._llm:
             return
         if self._llm is None:
             raise ExecutionError("vLLM must be initialized before LoRA merge")
@@ -163,12 +176,19 @@ class VLLMLoRAExecutor(VLLMExecutor):
                 "vLLM load_lora_adapter/merge_lora_weights API required for apply=merge"
             )
 
-        for adapter in merge_specs:
-            adapter_dir = self._resolve_adapter_directory(adapter, out_dir)
-            load_fn(adapter_name=adapter.name, adapter_path=adapter_dir.as_posix())
-            merge_fn(adapter_name=adapter.name)
-            if unload_fn is not None:
-                unload_fn(adapter_name=adapter.name)
+        try:
+            for adapter in merge_specs:
+                adapter_dir = self._resolve_adapter_directory(adapter, out_dir)
+                load_fn(adapter_name=adapter.name, adapter_path=adapter_dir.as_posix())
+                merge_fn(adapter_name=adapter.name)
+                if unload_fn is not None:
+                    unload_fn(adapter_name=adapter.name)
+        except BaseException:
+            # A partly merged engine must not be reused: merging again would add an
+            # adapter's delta twice.
+            self._shutdown_llm()
+            raise
+        self._merged_into = self._llm
 
     def _build_lora_requests(self, out_dir: Path) -> Any | None:
         if not self._runtime_specs:
@@ -201,30 +221,13 @@ class VLLMLoRAExecutor(VLLMExecutor):
             if path.exists():
                 return self._ensure_or_extract(path, out_dir, name, archive_format)
 
-        if task_id := adapter.task_id:
-            base_dir = (
-                Path(os.getenv("RESULTS_DIR", "").strip() or "./results")
-                .expanduser()
-                .resolve()
-            )
-            artifacts_base = base_dir / str(task_id) / "artifacts"
-            candidates = [
-                artifacts_base / "final_lora",
-                artifacts_base / "final_lora.tar.gz",
-                artifacts_base / "final_model",
-                artifacts_base / "final_model.tar.gz",
-                artifacts_base,
-            ]
-            for candidate in candidates:
-                if candidate.exists():
-                    return self._ensure_or_extract(
-                        candidate, out_dir, name, archive_format
-                    )
+        if url_value and (hydrated := hydrated_path(url_value)) is not None:
+            return self._ensure_or_extract(hydrated, out_dir, name, archive_format)
 
         if not url_value:
             raise ExecutionError(
-                f"LoRA adapter '{name}' must include a valid url "
-                "when path/taskId is missing"
+                f"LoRA adapter '{name}' must include a valid url when its path is "
+                "missing"
             )
 
         download_root = out_dir / "_lora_cache" / name

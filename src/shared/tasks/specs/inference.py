@@ -101,9 +101,7 @@ def _inference_merge_key(
     ``system_prompt`` and the injected upstream results), its place in the workflow
     (``dependsOn`` and ``condition``) and its outputs (``output`` and ``postprocess``).
     A visual-embedding task never merges."""
-    if (model := spec.model) and (model.transformers or {}).get(
-        "mode"
-    ) == "visual-embedding":
+    if spec.model is not None and spec.model.visual_embedding:
         return None
     keyed = spec.model_dump(
         mode="json",

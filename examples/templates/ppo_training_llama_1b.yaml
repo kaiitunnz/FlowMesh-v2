@@ -73,12 +73,3 @@ spec:
   generation:
     max_new_tokens: 128
     temperature: 0.7
-
-  # Output configuration
-  output:
-    destination:
-      type: local
-    artifacts:
-      - results.json
-      - logs
-      - artifacts/checkpoints

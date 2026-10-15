@@ -69,9 +69,18 @@ class ReadyQueue:
         self.ready_index: set[str] = set()
         self.merge_key_by_task: dict[str, tuple[str | None, str | None]] = {}
         self.merge_buckets: dict[tuple[str, str | None], list[str]] = {}
+        # A queued task held back until a monotonic time, each due time once.
+        self.not_before: dict[str, float] = {}
+        self._due: list[tuple[float, str]] = []
 
-    def enqueue_ready_locked(self, task_id: str, *, front: bool = False) -> bool:
-        """Add a task to the ready queue if it is pending and not already queued."""
+    def enqueue_ready_locked(
+        self, task_id: str, *, front: bool = False, not_before: float | None = None
+    ) -> bool:
+        """Add a task to the ready queue if it is pending and not already queued.
+
+        With ``not_before``, a monotonic time, the task counts as queued at once but
+        is not handed out before then.
+        """
         record = self._tasks.get(task_id)
         if not record or record.status != TaskStatus.PENDING:
             return False
@@ -79,6 +88,40 @@ class ReadyQueue:
             return False
         if not self._epochs.is_epoch_ready_locked(record):
             return False
+        if not_before is not None and not_before > time.monotonic():
+            self.not_before[task_id] = not_before
+            heapq.heappush(self._due, (not_before, task_id))
+            self.ready_index.add(task_id)
+            record.last_queue_ts = time.time()
+            self._merge_bucket_add(task_id)
+            return True
+        self._queue_locked(task_id, front=front)
+        record.last_queue_ts = time.time()
+        self._merge_bucket_add(task_id)
+        return True
+
+    def queued_count(self) -> int:
+        """Return how many entries are queued, a held-back task among them."""
+        return len(self.ready_queue) + len(self.not_before)
+
+    def next_due(self) -> float | None:
+        """Return the monotonic time the earliest held-back task falls due, if any."""
+        while self._due and self.not_before.get(self._due[0][1]) != self._due[0][0]:
+            heapq.heappop(self._due)
+        return self._due[0][0] if self._due else None
+
+    def _release_due_locked(self) -> None:
+        now = time.monotonic()
+        while (due := self.next_due()) is not None and due <= now:
+            _, task_id = heapq.heappop(self._due)
+            del self.not_before[task_id]
+            if task_id in self._tasks:
+                self._queue_locked(task_id, front=False)
+            else:
+                self.ready_index.discard(task_id)
+
+    def _queue_locked(self, task_id: str, *, front: bool) -> None:
+        record = self._tasks[task_id]
         workflow_id = record.workflow_id
         if (
             workflow_id in self._epochs.workflow_in_epoch_order
@@ -100,11 +143,9 @@ class ReadyQueue:
         else:
             self.ready_queue.append(ready_entry)
         self.ready_index.add(task_id)
-        record.last_queue_ts = time.time()
-        self._merge_bucket_add(task_id)
-        return True
 
     def pop_ready_locked(self) -> str | None:
+        self._release_due_locked()
         while self.ready_queue:
             task_or_workflow_id, is_workflow = self.ready_queue.popleft()
             if is_workflow:
@@ -120,6 +161,9 @@ class ReadyQueue:
 
     def remove_from_ready_locked(self, task_id: str) -> None:
         if task_id not in self.ready_index:
+            return
+        if self.not_before.pop(task_id, None) is not None:
+            self.ready_index.discard(task_id)
             return
         record = self._tasks.get(task_id)
         if not record:

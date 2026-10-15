@@ -10,6 +10,7 @@ from shared.content.config import (
     DEFAULT_RELAY_TRANSFER_MAX_BYTES,
     DEFAULT_TRANSFER_WINDOW_BYTES,
     DEFAULT_UPLOAD_CONCURRENCY,
+    content_hydration_enabled,
 )
 from shared.network.peer_dial import connect_budget
 from shared.schemas.worker import SSHBackendName
@@ -165,7 +166,7 @@ WORKER_RESULTS_DIR: str = (
 )
 WORKER_PRIVATE_STATE_DIR: str = os.getenv("WORKER_PRIVATE_STATE_DIR", "").strip()
 WORKER_CONTENT_DIR: str = os.getenv("WORKER_CONTENT_DIR", "").strip()
-CONTENT_HYDRATION_ENABLED: bool = parse_bool_env("CONTENT_HYDRATION_ENABLED", False)
+CONTENT_HYDRATION_ENABLED: bool = content_hydration_enabled()
 CONTENT_CACHE_TTL_SEC: float = parse_float_env("CONTENT_CACHE_TTL_SEC", 0.0)
 CONTENT_CACHE_MAX_BYTES: int = parse_int_env("CONTENT_CACHE_MAX_BYTES", 0)
 CONTENT_HOLDER_TTL_SEC: float = parse_float_env("CONTENT_HOLDER_TTL_SEC", 300.0)
@@ -201,7 +202,7 @@ WORKER_TAGS: str = os.getenv("WORKER_TAGS", "")
 WORKER_HB_DIR: str = os.getenv("WORKER_HB_DIR") or os.path.join(
     tempfile.gettempdir(), "flowmesh_worker_health"
 )
-WORKER_UPLOAD_RESULTS: bool = parse_bool_env("WORKER_UPLOAD_RESULTS", False)
+MODEL_CLEANUP_AFTER_UPLOAD: bool = parse_bool_env("MODEL_CLEANUP_AFTER_UPLOAD", False)
 WORKER_EXECUTOR_IDLE_CLEANUP_SEC: float = parse_float_env(
     "WORKER_EXECUTOR_IDLE_CLEANUP_SEC", 60
 )

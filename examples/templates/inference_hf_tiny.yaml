@@ -28,10 +28,3 @@ spec:
     max_tokens: 16
     temperature: 0.1
     top_p: 0.95
-  output:
-    destination:
-      type: local
-    artifacts:
-      - results.json
-      - logs
-      - artifacts

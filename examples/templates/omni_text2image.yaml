@@ -25,10 +25,3 @@ spec:
 
   omni:
     output_format: png
-
-  output:
-    destination:
-      type: http
-    artifacts:
-      - results.json
-      - artifacts/

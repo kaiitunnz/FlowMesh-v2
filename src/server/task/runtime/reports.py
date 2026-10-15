@@ -6,6 +6,8 @@ from typing import Any
 from pydantic import ValidationError
 
 from shared.content import ContentReference
+from shared.tasks.artifact_binding import ArtifactBinding
+from shared.tasks.components.exports import ExportFailure, ExportFailureKind
 
 from ..models import (
     SETTLING_TASK_STATUSES,
@@ -28,6 +30,42 @@ def reported_reference(raw: Any) -> ContentReference | None:
         return None
 
 
+def reported_artifacts(raw: Any) -> list[ArtifactBinding] | None:
+    """Return the artifacts a worker reported publishing, or None for a report that does
+    not parse."""
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        return None
+    try:
+        return [ArtifactBinding.model_validate(item) for item in raw]
+    except ValidationError:
+        return None
+
+
+def export_failure(payload: dict[str, Any]) -> ExportFailure | None:
+    """Return why a completing agent could not copy out the exports it declared, if it
+    could not; a report that does not parse reads as a refusal."""
+    if (raw := payload.get("agent_export_failure")) is None:
+        return None
+    try:
+        return ExportFailure.model_validate(raw)
+    except ValidationError:
+        return ExportFailure(
+            kind=ExportFailureKind.UNSAFE, message="an unreadable export report"
+        )
+
+
+def reported_child_artifacts(
+    payload: dict[str, Any],
+) -> dict[str, list[ArtifactBinding] | None]:
+    """Return the artifacts a merged dispatch reported for its children, by child."""
+    raw = payload.get("child_artifacts") or {}
+    if not isinstance(raw, dict):
+        return {}
+    return {str(child_id): reported_artifacts(items) for child_id, items in raw.items()}
+
+
 def reset_to_pending(record: TaskRecord) -> None:
     """Clear what a task's last dispatch left on it, returning it to PENDING."""
     record.status = TaskStatus.PENDING
@@ -38,6 +76,15 @@ def reset_to_pending(record: TaskRecord) -> None:
     record.started_ts = None
     record.finished_ts = None
     record.error = None
+    clear_dispatched_inputs(record)
+
+
+def clear_dispatched_inputs(record: TaskRecord) -> None:
+    """Drop what a task's ended dispatch let its worker read from a peer."""
+    record.dispatched_artifacts = ()
+    record.dispatched_producers = ()
+    record.dispatched_objects = ()
+    record.members_pending = False
 
 
 def membership(record: TaskRecord) -> str:

@@ -5,8 +5,11 @@ from pathlib import Path
 
 from pydantic import SecretStr
 
-from shared.content import ObjectStoreConfig
-from shared.content.config import DEFAULT_TRANSFER_WINDOW_BYTES
+from shared.content.config import (
+    DEFAULT_TRANSFER_WINDOW_BYTES,
+    ObjectStoreConfig,
+    content_hydration_enabled,
+)
 from shared.content.wire import CHUNK_BYTES
 from shared.network.peer_dial import connect_budget
 from shared.tasks.specs import ModelBindingMode
@@ -218,7 +221,7 @@ class DispatchConfig:
     task_merge_max_batch_size: int = 4
     enable_context_reuse: bool = True
     worker_cache_ttl_sec: int = 3600
-    enable_stage_weight_stickiness: bool = False
+    enable_stage_weight_stickiness: bool = True
     no_worker_grace_sec: int = 60
 
     @classmethod
@@ -237,7 +240,7 @@ class DispatchConfig:
             enable_context_reuse=parse_bool_env("ENABLE_CONTEXT_REUSE", True),
             worker_cache_ttl_sec=max(0, parse_int_env("WORKER_CACHE_TTL_SEC", 3600)),
             enable_stage_weight_stickiness=parse_bool_env(
-                "ENABLE_STAGE_WEIGHT_STICKINESS", False
+                "ENABLE_STAGE_WEIGHT_STICKINESS", True
             ),
             no_worker_grace_sec=max(0, parse_int_env("TASK_NO_WORKER_GRACE_SEC", 60)),
         )
@@ -600,7 +603,7 @@ class ContentStoreConfig:
     @classmethod
     def from_env(cls) -> "ContentStoreConfig":
         return cls(
-            hydration_enabled=parse_bool_env("CONTENT_HYDRATION_ENABLED", False),
+            hydration_enabled=content_hydration_enabled(),
             grant_ttl_sec=parse_float_env("CONTENT_HYDRATION_GRANT_TTL_SEC", 60.0),
             holder_record_ttl_sec=parse_float_env("CONTENT_HOLDER_TTL_SEC", 300.0),
             access_grant_ttl_sec=max(

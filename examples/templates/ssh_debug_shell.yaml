@@ -19,6 +19,3 @@ spec:
   accessMode: direct
   env:
     HF_HOME: /mnt/hf
-  output:
-    destination:
-      type: http

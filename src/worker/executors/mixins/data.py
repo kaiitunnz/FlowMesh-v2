@@ -24,8 +24,11 @@ from ...connectors import get_connector_from_spec
 from ...utils.redaction import redact_urls
 from ..base_executor import ExecutionError
 from ..utils.artifacts import (
+    artifact_ref_text,
+    hydrated_artifact_ref,
+    image_embedding_expression,
     is_flowmesh_origin_url,
-    maybe_resolve_artifact_ref,
+    list_items_expression,
     resolve_artifact,
 )
 from ..utils.data_utils import normalize_prompt_payload
@@ -433,18 +436,10 @@ class DataMixin(GovernanceMixin):
             context: dict[str, BaseExecutorResult] | None = None
             root_node: str | None = None
             paths: ReadPaths = ()
-            if items is None:
-                expr = data.get("expr")
-                if not expr:
-                    node = data.get("node")
-                    path = data.get("path")
-                    if node and path:
-                        expr = f"{node}.{path}"
-                if expr:
-                    context = self._spec_upstream_results(spec)
-                    resolved_expr = expr.strip()
-                    items, paths = project_expression_paths(resolved_expr, context)
-                    root_node = resolved_expr.split(".", 1)[0] or None
+            if expr := list_items_expression(data):
+                context = self._spec_upstream_results(spec)
+                items, paths = project_expression_paths(expr, context)
+                root_node = expr.split(".", 1)[0] or None
             if not isinstance(items, list):
                 raise ExecutionError(
                     "spec.data.items must be a list or resolve to a list "
@@ -454,8 +449,9 @@ class DataMixin(GovernanceMixin):
                 items = [
                     (
                         [
-                            maybe_resolve_artifact_ref(
+                            hydrated_artifact_ref(
                                 member,
+                                spec,
                                 context,
                                 root_node,
                                 item_path(element_paths(paths, index), position),
@@ -463,8 +459,8 @@ class DataMixin(GovernanceMixin):
                             for position, member in enumerate(item)
                         ]
                         if isinstance(item, list)
-                        else maybe_resolve_artifact_ref(
-                            item, context, root_node, item_path(paths, index)
+                        else hydrated_artifact_ref(
+                            item, spec, context, root_node, item_path(paths, index)
                         )
                     )
                     for index, item in enumerate(items)
@@ -557,9 +553,7 @@ class DataMixin(GovernanceMixin):
                 prompts = [x if isinstance(x, str) else "" for x in items]
             else:
                 items = [
-                    maybe_resolve_artifact_ref(
-                        item, context, root_node, item_path(paths, index)
-                    )
+                    artifact_ref_text(item, context, root_node, item_path(paths, index))
                     for index, item in enumerate(items)
                 ]
                 prompts, apply_chat_template, found_system_prompt = (
@@ -696,25 +690,18 @@ class DataMixin(GovernanceMixin):
         image_embedding: Path | None = None
         if image_embedding_raw := data.get("image_embedding"):
             context = self._spec_upstream_results(spec)
-            expr = image_embedding_raw.get("expr")
-            node_hint: str | None = image_embedding_raw.get("node")
-            if not expr:
-                path_hint = image_embedding_raw.get("path")
-                if node_hint and path_hint:
-                    expr = f"{node_hint}.{path_hint}"
-            if not expr:
+            if (embedding := image_embedding_expression(image_embedding_raw)) is None:
                 raise ExecutionError(
                     "spec.data.image_embedding requires "
                     "'expr' or both 'node' and 'path'"
                 )
-            resolved_node = node_hint
-            if not resolved_node and isinstance(expr, str):
-                resolved_node = expr.split(".", 1)[0].strip() or None
+            expr, resolved_node = embedding
             image_embedding_spec, embedding_paths = project_expression_paths(
-                expr.strip(), context
+                expr, context
             )
-            artifact_source = maybe_resolve_artifact_ref(
+            artifact_source = hydrated_artifact_ref(
                 image_embedding_spec,
+                spec,
                 context,
                 resolved_node,
                 embedding_paths if isinstance(embedding_paths, tuple) else (),

@@ -202,7 +202,6 @@ class TestMergeKey:
                 "dependsOn": ["up"],
                 "condition": {"node": "up", "field": "output", "equals": "yes"},
             },
-            {"output": {"artifacts": ["rows.jsonl"]}},
             {
                 "postprocess": {
                     "jsonl_export": {"path": "rows.jsonl", "fields": {"a": "output"}}

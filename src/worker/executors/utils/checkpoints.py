@@ -1,40 +1,25 @@
 import logging
-import os
 import shutil
-import subprocess
 import tarfile
 import zipfile
-from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urljoin, urlparse
 
 import requests
 
-from shared.schemas.artifact import ArtifactContext
+from shared.schemas.artifact import CHECKPOINTS_ARTIFACT, ArtifactContext
 from shared.schemas.result import BaseExecutorResult, ResultEnvelope
 from shared.tasks.specs import TaskSpecStrictBase
 from shared.telemetry.propagation import inject_ambient_traceparent
 from shared.utils.atomic import atomic_write_text
 from shared.utils.http import add_auth_headers
-from shared.utils.nofollow import regular_files
-from shared.utils.parsing import parse_bool_env
 from shared.utils.redact import redact_url
 
+from ...content.artifact_inputs import ARTIFACT_INPUTS_DIR
 from ...utils.redaction import redact_urls
 from ..base_executor import ExecutionError, TaskReference
 from .artifacts import is_flowmesh_origin_url
-
-
-@dataclass(slots=True)
-class HTTPDestination:
-    """Resolved HTTP destination for posting task results / uploading artifacts."""
-
-    method: str
-    url: str
-    headers: dict[str, str] = field(default_factory=dict)
-    timeout: float = 30
-    ignore_error: bool = False
 
 
 def determine_resume_path(
@@ -58,47 +43,62 @@ def determine_resume_path(
     return None
 
 
+def hydrated_path(value: str) -> Path | None:
+    """Return the local path a reference to a published artifact rendered as, once
+    the worker hydrated it; None for a URL."""
+    if not value:
+        return None
+    path = Path(value)
+    return path if path.is_absolute() and path.exists() else None
+
+
+def load_identity(value: str) -> str:
+    """Return what a load names regardless of the task it was hydrated for: a hydrated
+    artifact as its digest and the path inside it, anything else as given."""
+    parts = PurePosixPath(value).parts
+    if ARTIFACT_INPUTS_DIR not in parts:
+        return value
+    return "/".join(parts[parts.index(ARTIFACT_INPUTS_DIR) + 1 :])
+
+
 def resolve_checkpoint_load(
     load_cfg: dict[str, Any], out_dir: Path, logger: logging.Logger | None = None
 ) -> Path:
-    source_type = str(load_cfg.get("type", "local")).lower()
-    # Local path hint (works for any source type)
-    hinted_path = load_cfg.get("path")
-    if hinted_path:
+    """Resolve the local path a ``checkpoint.load`` names, downloading it when it is
+    a URL.
+
+    A published artifact the worker hydrated resolves whatever ``type`` declares, and
+    ``base_url`` with ``task_id`` and ``filename`` fetches that artifact from another
+    deployment's download route.
+    """
+    log = logger or load_cfg.get("_logger")
+    url = str(load_cfg.get("url") or "")
+    if (local := hydrated_path(url)) is not None:
+        if log:
+            log.info("Using hydrated checkpoint: %s", local)
+        return local
+    if not url and (base_url := load_cfg.get("base_url")):
+        producer = load_cfg.get("task_id") or load_cfg.get("taskId")
+        filename = load_cfg.get("filename")
+        if not (producer and filename):
+            raise ExecutionError(
+                "checkpoint.load.base_url needs the task_id and filename of the "
+                "artifact to fetch"
+            )
+        url = urljoin(
+            str(base_url).rstrip("/") + "/",
+            f"api/v1/results/{quote(str(producer))}/files/{quote(str(filename))}",
+        )
+        load_cfg = {**load_cfg, "url": url, "type": "http"}
+
+    if hinted_path := load_cfg.get("path"):
         resolved = Path(str(hinted_path)).expanduser()
         if resolved.exists():
-            log = logger or load_cfg.get("_logger")
             if log:
                 log.info("Resolved checkpoint from local path: %s", resolved)
             return resolved
 
-    task_hint = load_cfg.get("taskId") or load_cfg.get("task_id")
-    if task_hint:
-        task_str = str(task_hint).strip()
-        if task_str:
-            base_dir = (
-                Path(os.getenv("RESULTS_DIR", "").strip() or "./results")
-                .expanduser()
-                .resolve()
-            )
-            artifacts_base = base_dir / task_str / "artifacts"
-            guesses = [
-                artifacts_base / "final_model",
-                artifacts_base / "final_model.tar.gz",
-                artifacts_base / "final_model.bin",
-                artifacts_base / "final_model.safetensors",
-                artifacts_base / "final_model.pt",
-                artifacts_base,
-            ]
-            for candidate in guesses:
-                if candidate.exists():
-                    log = logger or load_cfg.get("_logger")
-                    if log:
-                        log.info(
-                            "Resolved checkpoint from local task cache: %s", candidate
-                        )
-                    return candidate
-
+    source_type = str(load_cfg.get("type", "local")).lower()
     if source_type == "local":
         local_path = load_cfg.get("path") or load_cfg.get("uri")
         if not local_path:
@@ -108,35 +108,18 @@ def resolve_checkpoint_load(
         resolved = Path(str(local_path)).expanduser()
         if not resolved.exists():
             raise ExecutionError(f"Checkpoint path {resolved} not found")
-        log = logger or load_cfg.get("_logger")
         if log:
             log.info("Using local checkpoint path: %s", resolved)
         return resolved
 
     if source_type == "http":
-        url = load_cfg.get("url")
         if not url:
-            task_id = load_cfg.get("task_id")
-            filename = load_cfg.get("filename")
-            base_url = load_cfg.get("base_url") or os.getenv("FLOWMESH_BASE_URL")
-
-            if base_url and task_id and filename:
-                from urllib.parse import urljoin
-
-                base = base_url.rstrip("/") + "/"
-                artifact_path = f"api/v1/results/{task_id}/files/{filename}"
-                load_cfg = dict(load_cfg)
-                load_cfg["url"] = urljoin(base, artifact_path)
-            else:
-                raise ExecutionError(
-                    "checkpoint.load.url is required for HTTP checkpoints (set "
-                    "base_url or FLOWMESH_BASE_URL)"
-                )
-        log = logger or load_cfg.get("_logger")
-        if log:
-            log.info(
-                "Downloading checkpoint from %s", redact_url(str(load_cfg.get("url")))
+            raise ExecutionError(
+                "checkpoint.load needs a url, or the task_id of a task that published "
+                "the checkpoint"
             )
+        if log:
+            log.info("Downloading checkpoint from %s", redact_url(url))
         return download_and_unpack(load_cfg, out_dir)
 
     raise ExecutionError(f"Unsupported checkpoint load type '{source_type}'")
@@ -253,180 +236,26 @@ def select_extracted_subdir(extracted_dir: Path, subdir: str | None) -> Path:
     return extracted_dir
 
 
-def archive_model_dir(model_dir: Path, compression_level: int | None = None) -> Path:
-    archive_path = model_dir.parent / f"{model_dir.name}.tar.gz"
-    if archive_path.exists():
-        archive_path.unlink()
-
-    level = _resolve_compression_level(compression_level)
-    pigz_enabled = _should_use_pigz()
-    pigz_binary = (
-        shutil.which(os.getenv("MODEL_ARCHIVE_PIGZ_BIN", "").strip() or "pigz")
-        if pigz_enabled
-        else None
-    )
-    tar_binary = (
-        shutil.which(os.getenv("MODEL_ARCHIVE_TAR_BIN", "").strip() or "tar")
-        if pigz_binary
-        else None
-    )
-
-    if pigz_binary and tar_binary:
-        temp_tar = archive_path.with_suffix(".tar")
-        if temp_tar.exists():
-            temp_tar.unlink()
-        try:
-            subprocess.run(  # nosec B603 — argv list, no shell=True, absolute path via shutil.which()
-                [
-                    tar_binary,
-                    "-C",
-                    model_dir.parent.as_posix(),
-                    "-cf",
-                    temp_tar.as_posix(),
-                    model_dir.name,
-                ],
-                check=True,
-            )
-
-            pigz_cmd = [pigz_binary, "-f"]
-            pigz_threads = os.getenv("MODEL_ARCHIVE_PIGZ_THREADS")
-            if pigz_threads:
-                pigz_cmd.extend(["-p", pigz_threads])
-            if level is not None:
-                pigz_cmd.append(f"-{level}")
-            pigz_cmd.append(temp_tar.as_posix())
-            subprocess.run(
-                pigz_cmd, check=True
-            )  # nosec B603 — argv list, no shell=True, absolute path via shutil.which()
-
-            compressed_path = temp_tar.with_suffix(".tar.gz")
-            compressed_path.rename(archive_path)
-            return archive_path
-        except Exception:
-            # Fall back to python tarfile implementation below
-            if temp_tar.exists():
-                temp_tar.unlink(missing_ok=True)
-
-    tarfile_kwargs: dict[str, Any] = {"mode": "w:gz"}
-    if level is not None:
-        tarfile_kwargs["compresslevel"] = level
-    with tarfile.open(archive_path, **tarfile_kwargs) as tf:
-        tf.add(model_dir, arcname=model_dir.name)
-    return archive_path
-
-
-def _resolve_compression_level(level: int | None) -> int | None:
-    if level is not None:
-        return _clamp_compression(level)
-    env_value = os.getenv("MODEL_ARCHIVE_COMPRESSION_LEVEL")
-    if env_value is None:
-        return None
-    try:
-        return _clamp_compression(int(env_value))
-    except ValueError:
-        return None
-
-
-def _clamp_compression(level: int) -> int:
-    return max(0, min(level, 9))
-
-
-def _should_use_pigz() -> bool:
-    setting = os.getenv("MODEL_ARCHIVE_USE_PIGZ")
-    if setting is None:
-        return True
-    normalized = setting.strip().lower()
-    return normalized not in {"0", "false", "no", "off"}
-
-
-def get_http_destination(spec: TaskSpecStrictBase) -> HTTPDestination | None:
-    dest = spec.output and spec.output.destination
-    ignore_error = False
-    method = "POST"
-    url: str | None = None
-    headers: dict[str, str] = {}
-    timeout: float = 30.0
-
-    if dest and dest.type == "http":
-        if dest.method:
-            method = dest.method.upper()
-        url = dest.url
-        if dest.headers:
-            headers = dest.headers.copy()
-        if dest.timeoutSec is not None:
-            timeout = dest.timeoutSec
-    elif parse_bool_env("WORKER_UPLOAD_RESULTS", False):
-        ignore_error = True
-    else:
-        return None
-    if not url:
-        if base_url := os.getenv("FLOWMESH_BASE_URL"):
-            url = base_url.rstrip("/") + "/api/v1/results"
-        else:
-            return None
-    if is_flowmesh_origin_url(url):
-        add_auth_headers(headers)
-        inject_ambient_traceparent(headers)
-    return HTTPDestination(
-        method=method,
-        url=url,
-        headers=headers,
-        timeout=timeout,
-        ignore_error=ignore_error,
-    )
-
-
-def cleanup_artifact_path(
-    path: Path | None, logger: logging.Logger | None = None
-) -> None:
-    """Remove a local file or directory if it exists, ignoring missing paths."""
-    if not path:
-        return
-    try:
-        target = Path(path)
-    except TypeError:
-        return
-    try:
-        if not target.exists():
-            return
-        if target.is_dir():
-            shutil.rmtree(target)
-        else:
-            target.unlink()
-    except FileNotFoundError:
-        return
-    except Exception as exc:
-        if logger:
-            logger.warning("Failed to remove artifact at %s: %s", target, exc)
-
-
-def is_cleanup_enabled() -> bool:
-    setting = os.getenv("MODEL_CLEANUP_AFTER_UPLOAD")
-    if setting is None:
-        return False
-    normalized = setting.strip().lower()
-    return normalized not in {"0", "false", "no", "off"}
-
-
-def build_artifact_context(spec: TaskSpecStrictBase, out_dir: Path) -> ArtifactContext:
-    """Top-level ``_artifacts`` context. ``base_url`` is the destination
-    origin (scheme://host[:port]) for HTTP, else ``None``."""
-    base_dir = Path(out_dir).resolve().as_posix()
-    base_url: str | None = None
-    destination = get_http_destination(spec)
-    if destination is not None:
-        parsed = urlparse(destination.url)
-        if parsed.scheme and parsed.netloc:
-            base_url = f"{parsed.scheme}://{parsed.netloc.rpartition('@')[2]}"
-    return ArtifactContext(base_dir=base_dir, base_url=base_url)
+def archive_path_for(model_dir: Path) -> Path:
+    """Return where a published model directory's archive view is named, beside it."""
+    return model_dir.with_name(f"{model_dir.name}.tar.gz")
 
 
 def write_executor_result(
-    path: Path, task_id: str, spec: TaskSpecStrictBase, result: BaseExecutorResult
+    path: Path,
+    task_id: str,
+    result: BaseExecutorResult,
+    checkpoints: str | None = None,
 ) -> str:
-    """Stamp ``_artifacts`` onto ``result``, persist the envelope, and return it."""
+    """Stamp ``_artifacts`` onto ``result``, persist the envelope, and return it.
+
+    ``checkpoints`` is the revision of the last checkpoint the task published.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    result.artifacts_ = build_artifact_context(spec, path.parent)
+    result.artifacts_ = ArtifactContext(
+        task_id=task_id,
+        revisions={CHECKPOINTS_ARTIFACT: checkpoints} if checkpoints else {},
+    )
     # A model identifier may be a URL whose credential the dispatch restored.
     if isinstance(model := getattr(result, "model", None), str):
         setattr(result, "model", redact_url(model))
@@ -435,107 +264,47 @@ def write_executor_result(
     return envelope
 
 
-def maybe_upload_artifacts(
-    task: TaskReference,
-    out_dir: Path,
-    logger: logging.Logger | None = None,
-    skip_errors: bool = False,
-) -> list[str]:
-    """Upload files under `out_dir/artifacts/` when the task has an HTTP
-    destination; no-op otherwise. Each file's multipart filename is its
-    path relative to `out_dir/artifacts/`. Returns uploaded rel-paths."""
-    if not task.task_id:
-        raise ExecutionError("Task id missing; cannot upload artifacts")
-    out_dir = Path(out_dir).resolve()
-    artifacts_dir = out_dir / "artifacts"
-    destination = get_http_destination(task.spec)
-    if destination is None or not artifacts_dir.is_dir():
-        return []
-
-    base_url = destination.url.rstrip("/")
-    upload_url = f"{base_url}/{task.task_id}/files"
-    uploaded: list[str] = []
-
-    for rel_name, opened in regular_files(artifacts_dir):
-        try:
-            if isinstance(opened, OSError):
-                raise opened
-            with opened as fh:
-                response = requests.request(
-                    destination.method,
-                    upload_url,
-                    files={"file": (rel_name, fh, "application/octet-stream")},
-                    headers=destination.headers,
-                    timeout=destination.timeout,
-                )
-                response.raise_for_status()
-                size = os.fstat(fh.fileno()).st_size
-        except Exception as exc:
-            if not skip_errors:
-                raise ExecutionError(
-                    redact_urls(
-                        f"Artifact upload failed for {rel_name}: {exc}", upload_url
-                    ),
-                    retryable=True,
-                ) from exc
-            if logger:
-                logger.warning(
-                    "Failed to upload artifact %s: %s",
-                    rel_name,
-                    redact_urls(str(exc), upload_url),
-                )
-            continue
-        if logger:
-            logger.info("Uploaded artifact %s (%d bytes)", rel_name, size)
-        uploaded.append(rel_name)
-
-    return uploaded
+_TRACE_UPLOAD_TIMEOUT_SEC = 30.0
 
 
 def maybe_upload_traces(
     task: TaskReference,
     out_dir: Path,
+    server_base_url: str | None,
     logger: logging.Logger | None = None,
-    skip_errors: bool = False,
 ) -> list[str]:
-    """Upload trace JSONL files under `out_dir/logs/` to
-    `<api-base>/traces/tasks/{task_id}/{trace_type}` when the task has an HTTP
-    destination; no-op otherwise. The destination's `/results` artifact base
-    is swapped for `/traces`. Returns uploaded trace types."""
+    """Upload the trace JSONL files under `out_dir/logs/` to the server's
+    `/api/v1/traces/tasks/{task_id}/{trace_type}` when ``server_base_url`` names it.
+
+    A trace that fails to upload is logged and left out; the task's own work does not
+    depend on it. Returns the uploaded trace types.
+    """
     if not task.task_id:
         raise ExecutionError("Task id missing; cannot upload traces")
-    out_dir = Path(out_dir).resolve()
-    logs_dir = out_dir / "logs"
-    destination = get_http_destination(task.spec)
-    if destination is None or not logs_dir.is_dir():
+    logs_dir = Path(out_dir).resolve() / "logs"
+    base_url = (server_base_url or "").rstrip("/")
+    if not base_url or not logs_dir.is_dir():
         return []
 
-    upload_base = destination.url.rstrip("/").removesuffix("/results") + "/traces"
+    headers: dict[str, str] = {}
+    add_auth_headers(headers)
+    inject_ambient_traceparent(headers)
     uploaded: list[str] = []
-
     for trace_type in ("spans", "assets", "lineage"):
         file_path = logs_dir / f"{trace_type}.jsonl"
         if not file_path.is_file():
             continue
-        upload_url = f"{upload_base}/tasks/{task.task_id}/{trace_type}"
+        upload_url = f"{base_url}/api/v1/traces/tasks/{task.task_id}/{trace_type}"
         try:
             with file_path.open("rb") as fh:
-                response = requests.request(
-                    destination.method,
+                response = requests.post(
                     upload_url,
                     files={"file": (file_path.name, fh, "application/octet-stream")},
-                    headers=destination.headers,
-                    timeout=destination.timeout,
+                    headers=headers,
+                    timeout=_TRACE_UPLOAD_TIMEOUT_SEC,
                 )
                 response.raise_for_status()
         except Exception as exc:
-            if not skip_errors:
-                raise ExecutionError(
-                    redact_urls(
-                        f"Trace upload failed for {file_path}: {exc}", upload_url
-                    ),
-                    retryable=True,
-                ) from exc
             if logger:
                 logger.warning(
                     "Failed to upload trace %s: %s",

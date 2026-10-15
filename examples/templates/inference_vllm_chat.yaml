@@ -42,10 +42,3 @@ spec:
   inference:
     max_tokens: 64
     temperature: 0.0
-
-  output:
-    destination:
-      type: local
-    artifacts:
-      - results.json
-      - logs

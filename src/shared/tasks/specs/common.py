@@ -2,7 +2,14 @@ import json
 from enum import StrEnum
 from typing import Annotated, Any, ClassVar
 
-from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    SerializeAsAny,
+    model_validator,
+)
 
 from ...schemas.result import BaseExecutorResult
 from ...schemas.result.routed import RoutedValue
@@ -12,8 +19,6 @@ from ..components import (
     AdapterConfigTemplate,
     ModelConfig,
     ModelConfigTemplate,
-    OutputSpec,
-    OutputSpecTemplate,
     PostprocessSpec,
     PostprocessSpecTemplate,
     ResourcesSpec,
@@ -173,11 +178,11 @@ def _merge_key_in(key: str | None, context: dict[str, Any]) -> str | None:
 
 
 class TaskSpecStrictBase(StrictBaseModel, RetiredFieldsModel):
+    retired_fields: ClassVar[tuple[str, ...]] = ("output",)
     # The fields a submission may carry an inline credential in; extended by each
     # spec that adds one.
-    credential_fields: ClassVar[tuple[str, ...]] = ("output",)
+    credential_fields: ClassVar[tuple[str, ...]] = ()
     resources: ResourcesSpec | None = None
-    output: OutputSpec | None = None
     dependsOn: list[str] | None = None
     condition: ConditionSpec | None = None
     shard: ShardSpec | None = None
@@ -186,20 +191,21 @@ class TaskSpecStrictBase(StrictBaseModel, RetiredFieldsModel):
     upstreamResults: dict[str, UpstreamValue] | None = Field(
         default=None, alias="_upstreamResults"
     )
+    # The local path of each upstream artifact the worker hydrated for the spec's
+    # artifact refs, by producer task id and path; never sent.
+    _hydrated_artifacts: dict[tuple[str, str], str] = PrivateAttr(default_factory=dict)
+
+    def hydrated_artifact(self, task_id: str, path: str) -> str | None:
+        """Return the local path of task ``task_id``'s hydrated artifact ``path``."""
+        return self._hydrated_artifacts.get((task_id, path))
+
+    def record_hydrated_artifacts(self, paths: dict[tuple[str, str], str]) -> None:
+        self._hydrated_artifacts = dict(paths)
 
     @model_validator(mode="after")
     def _check_condition_depends_on(self) -> "TaskSpecStrictBase":
         _validate_condition_depends_on(self)
         return self
-
-    def get_artifacts(self) -> list[str]:
-        output = self.output
-        if output is None:
-            return []
-        artifacts = output.artifacts
-        if artifacts is None:
-            return []
-        return artifacts.copy()
 
     def validate_dispatchable(self) -> None:
         """Validate spec-internal invariants for a runnable task.
@@ -239,11 +245,11 @@ class TaskSpecStrictBase(StrictBaseModel, RetiredFieldsModel):
 
 
 class TaskSpecTemplateBase(TemplateBaseModel, RetiredFieldsModel):
+    retired_fields: ClassVar[tuple[str, ...]] = ("output",)
     # The fields a submission may carry an inline credential in; extended by each
     # spec that adds one.
-    credential_fields: ClassVar[tuple[str, ...]] = ("output",)
+    credential_fields: ClassVar[tuple[str, ...]] = ()
     resources: ResourcesSpec | None = None
-    output: OutputSpecTemplate | None = None
     dependsOn: list[str] | None = None
     condition: ConditionSpec | None = None
     shard: ShardSpecTemplate | None = None
@@ -256,15 +262,6 @@ class TaskSpecTemplateBase(TemplateBaseModel, RetiredFieldsModel):
     def _check_condition_depends_on(self) -> "TaskSpecTemplateBase":
         _validate_condition_depends_on(self)
         return self
-
-    def get_artifacts(self) -> list[str]:
-        output = self.output
-        if output is None:
-            return []
-        artifacts = output.artifacts
-        if artifacts is None:
-            return []
-        return artifacts.copy()
 
     def validate_dispatchable(self) -> None:
         """Validate spec-internal invariants for a runnable task.

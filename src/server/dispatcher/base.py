@@ -1,12 +1,13 @@
 import datetime
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
 from server.telemetry.tracing import NULL_CONTROL_TRACER, ControlPlaneTracer
+from shared.content import ContentReference
 from shared.private_state import OwnerFence, PrivateStateUnavailableReason
 from shared.schemas.artifact import ArtifactContext
 from shared.schemas.event import TaskEvent
@@ -21,12 +22,19 @@ from shared.schemas.result.binding import (
     upstream_value,
 )
 from shared.schemas.result.routed import routed_root
+from shared.schemas.worker import WorkerStatus
 from shared.tasks import (
     MergedChildTaskStrict,
-    TaskEnvelope,
     TaskEnvelopeStrict,
     TaskEnvelopeTemplate,
     TaskSpecStrict,
+)
+from shared.tasks.artifact_binding import (
+    ArtifactBinding,
+    ArtifactInputs,
+    model_artifact,
+    resolve_artifact_input,
+    resolve_artifact_path,
 )
 from shared.tasks.placeholders import PLACEHOLDER_PATTERN
 from shared.tasks.result_binding import ResultBinding
@@ -35,12 +43,14 @@ from shared.tasks.specs import (
     SSHSpecStrict,
     SSHSpecTemplate,
 )
-from shared.tasks.worker_message import WorkerStatus, WorkerTaskMessage
+from shared.tasks.specs.common import ModelSpecStrict
+from shared.tasks.worker_message import WorkerTaskMessage
 from shared.telemetry.semconv import ControlPlaneStage, ControlPlaneWindow
 from shared.utils.ids import new_dispatch_id
 
 from ..clients.redis import REDIS_CONN_ERRORS
 from ..content import ContentAccessBroker
+from ..content.directory import ContentHolderDirectory
 from ..registries.worker import Worker, WorkerRegistry
 from ..services.metrics import MetricsRecorder
 from ..task.credentials import credential_merge_key
@@ -52,7 +62,7 @@ from ..task.models import (
     TaskRecord,
     TaskStatus,
 )
-from ..task.results import ResultUnavailable
+from ..task.results import ResultUnavailable, ResultUnreadable
 from ..task.runtime import ScopedInput, TaskRuntime
 from ..task.v2.representations.plan import InferenceEmbodimentMenu
 from ..utils.time import now_iso
@@ -72,6 +82,16 @@ _NO_WORKER_BACKOFF_SEC = 0.5
 _YIELD_REQUEST_INTERVAL_SEC = 2.0
 _OWNER_WAIT_LOG_SEC = 30.0
 _ERROR_BACKOFF_SEC = 1.0
+# How long a consumer waits for the worker that just finished its producer, holding a
+# copy of what the producer published, to report itself idle.
+HOLDER_GRACE_SEC = 5.0
+# How often a consumer waiting for its holder is placed again.
+_HOLDER_RECHECK_SEC = 0.5
+# What a rendered checkpoint load drops: the names it was given by, and a source type
+# and local path the hydrated token replaces.
+_RENDERED_LOAD_KEYS = frozenset(
+    {"task_id", "taskId", "filename", "base_url", "type", "path", "uri"}
+)
 
 
 class StageReferenceNotReady(Exception):
@@ -80,6 +100,25 @@ class StageReferenceNotReady(Exception):
 
 class StageResultMissing(ValueError):
     """Raised when a settled stage a task references has no result to read."""
+
+
+def _ssh_input_producers(
+    spec: TaskSpecStrict,
+    upstream_results: dict[str, ResultBinding] | None,
+    context: dict[str, TaskRecord],
+) -> set[str]:
+    """Return the tasks whose published artifacts an SSH task's inputs stage."""
+    if not isinstance(spec, SSHSpecStrict) or not spec.inputs:
+        return set()
+    producers: set[str] = set()
+    for entry in spec.inputs:
+        stage = entry.stage.strip()
+        if (binding := (upstream_results or {}).get(stage)) is not None:
+            if binding.task_id is not None:
+                producers.add(binding.task_id)
+        elif (upstream := context.get(stage)) is not None:
+            producers.add(upstream.task_id)
+    return producers
 
 
 class Dispatcher:
@@ -97,7 +136,7 @@ class Dispatcher:
         reuse_cache_ttl_sec: int = 3600,
         lambda_config: dict[str, float] | None = None,
         selection_jitter_epsilon: float = 1e-3,
-        enable_stage_weight_stickiness: bool = False,
+        enable_stage_weight_stickiness: bool = True,
         no_worker_grace_sec: int = 60,
         metrics_recorder: MetricsRecorder | None = None,
         resident_capacity_enabled: bool = False,
@@ -105,8 +144,18 @@ class Dispatcher:
         embodiment_selector: EmbodimentSelector | None = None,
         content_access: ContentAccessBroker | None = None,
         control: ControlPlaneTracer | None = None,
+        content_holders: ContentHolderDirectory | None = None,
     ) -> None:
         self._runtime = runtime
+        self._content_holders = content_holders
+        # Each unsettled consumer's holder grace by producer settle: when its window
+        # closes, and whether it ended early, so a consumer never waits twice for one
+        # settle.
+        self._holder_graces: dict[tuple[str, str, str], tuple[float, bool]] = {}
+        # The one consumer waiting for each holder of a producer settle; the holder
+        # can take only one of them.
+        self._holder_waiters: dict[tuple[str, str, str], str] = {}
+        self._graces_pruned_at = 0.0
         self._worker_registry = worker_registry
         self._content_access = content_access
         self._logger = logger
@@ -130,16 +179,6 @@ class Dispatcher:
         self._owner_wait_since: dict[str, float] = {}
         self._yield_requested_at: dict[str, float] = {}
         self._owner_wait_logged: set[str] = set()
-        self._weight_reference_hints: tuple[str, ...] = (
-            "checkpoint",
-            "weight",
-            "weights",
-            "model",
-            "adapter",
-            "lora",
-            "load",
-            "artifact",
-        )
 
     def _wait_for_owner(self, task_id: str, owner: OwnerFence) -> None:
         """Account an owner-affine episode's wait on its busy holder.
@@ -604,49 +643,51 @@ class Dispatcher:
                 return False
             pool = free or pool
 
+        # A worker that could not reach an input of the task is passed over while
+        # another idle worker can take it: the input reads fine at control, so the
+        # fault is likely its own path to the store.
+        if record.avoided_worker is not None:
+            pool = [c for c in pool if c.id != record.avoided_worker] or pool
+
         # 5. Worker selection (best-fit scoring by default)
         selection_info: dict[str, Any] = {}
         worker: Worker | None = None
 
-        sticky_worker_id: str | None = None
-        if (not record.selected_worker) and self._stage_weight_stickiness_enabled:
-            sticky_worker_id = self._preferred_stage_worker(record, task)
+        holder = (
+            self._preferred_holder(task_id, pool)
+            if not record.selected_worker and self._stage_weight_stickiness_enabled
+            else None
+        )
+        if (
+            holder is None
+            and not record.selected_worker
+            and self._stage_weight_stickiness_enabled
+            and self._holder_settling(
+                task_id,
+                time.monotonic(),
+                lambda: self._waitable_workers(record, owner, failed_ids, relays_only),
+            )
+        ):
+            self._logger.debug(
+                "Waiting for %s's upstream artifact holder to settle", task_id
+            )
+            self.requeue_task(
+                task_id,
+                reason="holder_settling",
+                count_retry=False,
+                not_before=time.monotonic() + _HOLDER_RECHECK_SEC,
+            )
+            return False
+        if holder is not None:
+            worker = holder
             selection_info = {
-                "strategy": "stage_weight_affinity",
-                "sticky_worker": sticky_worker_id,
+                "strategy": "artifact_holder",
                 "candidate_pool": len(pool),
                 "chosen_metrics": {"score": 1.0},
             }
-
-        if sticky_worker_id:
-            sticky_candidate = next(
-                (item for item in pool if item.id == sticky_worker_id), None
+            self._logger.debug(
+                "Preferring artifact holder %s for %s", holder.id, task_id
             )
-            if sticky_candidate:
-                worker = sticky_candidate
-                self._logger.debug(
-                    "Using sticky worker %s for %s",
-                    sticky_worker_id,
-                    task_id,
-                )
-            else:
-                if self._should_wait_for_sticky_worker(record, sticky_worker_id):
-                    self._logger.debug(
-                        "Preferred worker %s busy for %s; waiting for availability",
-                        sticky_worker_id,
-                        task_id,
-                    )
-                    self.requeue_task(
-                        task_id, reason="sticky_worker_busy", count_retry=False
-                    )
-                    return False
-                else:
-                    self._logger.debug(
-                        "Preferred worker %s unavailable for %s; falling "
-                        "back to normal selection",
-                        sticky_worker_id,
-                        task_id,
-                    )
 
         preferred_pool: list[Worker] = []
         if worker is None and self._context_reuse_enabled:
@@ -720,12 +761,17 @@ class Dispatcher:
         task, scrub = credentialed
         context: dict[str, TaskRecord] = {}
         scoped: dict[str, ScopedInput] | None = None
+        dispatch_id = new_dispatch_id()
+        artifact_inputs = ArtifactInputs(dispatch_id)
         try:
             scoped = self._runtime.scoped_inputs(task_id)
             if scoped is None:
                 context = self._build_stage_context(record)
             rendered_task, upstream_results = self._resolve_stage_references(
-                task_id, task, context, scoped
+                task_id, task, context, scoped, artifact_inputs
+            )
+            rendered_task = self._render_checkpoint_load(
+                record, rendered_task, artifact_inputs
             )
         except StageReferenceNotReady as exc:
             self._logger.debug(
@@ -795,14 +841,58 @@ class Dispatcher:
             return True
 
         rendered_children = self._render_merged_children(
-            task_id, record, rendered_task.spec
+            task_id, record, rendered_task.spec, artifact_inputs
         )
+        upstream_artifacts = self._upstream_artifacts(
+            [
+                *(upstream_results or {}).values(),
+                *(
+                    binding
+                    for child in rendered_children or ()
+                    for binding in (child.upstream_results or {}).values()
+                ),
+            ]
+        )
+
+        staged = _ssh_input_producers(rendered_task.spec, upstream_results, context)
+        named = [
+            *artifact_inputs.bindings.values(),
+            *(
+                binding
+                for producer in sorted(staged)
+                for binding in upstream_artifacts.get(producer, ())
+            ),
+        ]
+        lent = [
+            binding
+            for producer, published in upstream_artifacts.items()
+            if producer not in staged
+            for binding in published
+        ]
+        try:
+            artifact_objects = self._runtime.artifact_input_objects(named, lent)
+        except ResultUnavailable as exc:
+            # Its worker may read a tree's members from a peer only once control knows
+            # them, so the task waits out the store like any input it consumes.
+            self._logger.warning(
+                "Task %s cannot reach an upstream artifact's manifest yet: %s",
+                task_id,
+                exc,
+            )
+            self._runtime.release_merge(task_id)
+            self.requeue_task(
+                task_id, reason="artifact_input_unavailable", count_retry=False
+            )
+            return False
+        except ResultUnreadable as exc:
+            self._runtime.release_merge(task_id)
+            self.fail_task(task_id, str(exc), payload={"error": str(exc)})
+            return True
 
         # 7. Build WorkerTaskMessage
         agent_episode = self._runtime.agent_episode_dispatch(
             task_id, OwnerFence(worker_id=worker.id, incarnation=worker.incarnation)
         )
-        dispatch_id = new_dispatch_id()
         message = WorkerTaskMessage(
             task_id=task_id,
             dispatch_id=dispatch_id,
@@ -818,6 +908,8 @@ class Dispatcher:
             shard_total=record.shard_total,
             merged_children=rendered_children,
             upstream_results=upstream_results,
+            artifact_inputs=artifact_inputs.bindings or None,
+            upstream_artifacts=upstream_artifacts or None,
             input_element=self._runtime.input_element(task_id),
             credential_pointers=self._runtime.credential_pointers(
                 [task_id, *(child.task_id for child in rendered_children or ())]
@@ -835,6 +927,12 @@ class Dispatcher:
         )
 
         # 8. Give the task what it reads and writes its content under, then publish it
+        self._runtime.note_artifact_inputs(
+            task_id,
+            list(artifact_inputs.bindings.values()),
+            upstream_artifacts,
+            artifact_objects,
+        )
         match self._runtime.begin_publish(
             task_id, worker, dispatch_id, input_preparation=preparing
         ):
@@ -960,7 +1058,9 @@ class Dispatcher:
                 continue
             try:
                 success = self.dispatch_once(task_id)
-                if not success:
+                # A task held back until a time of its own paces itself; the rest
+                # of the queue goes on.
+                if not success and not self._runtime.held_back(task_id):
                     time.sleep(_NO_WORKER_BACKOFF_SEC)
             except REDIS_CONN_ERRORS as exc:
                 # Control Redis dropped. The connection pool reconnects on the next
@@ -992,7 +1092,11 @@ class Dispatcher:
             )
 
     def _render_merged_children(
-        self, task_id: str, record: TaskRecord, parent_spec: TaskSpecStrict
+        self,
+        task_id: str,
+        record: TaskRecord,
+        parent_spec: TaskSpecStrict,
+        artifact_inputs: ArtifactInputs,
     ) -> list[MergedChildTaskStrict] | None:
         """Render the children merged into a dispatch.
 
@@ -1018,9 +1122,20 @@ class Dispatcher:
                 self._runtime.release_merged_child(task_id, child_id, None)
                 continue
             child_task, scrub = credentialed
+            # A child that leaves the merge takes the tokens its rendering made with
+            # it, so the dispatch neither hydrates nor lends what only it named.
+            mark = artifact_inputs.mark()
+            kept = len(rendered)
             try:
                 resolved, child_upstream = self._resolve_stage_references(
-                    child_id, child_task, self._build_stage_context(child_record)
+                    child_id,
+                    child_task,
+                    self._build_stage_context(child_record),
+                    None,
+                    artifact_inputs,
+                )
+                resolved = self._render_checkpoint_load(
+                    child_record, resolved, artifact_inputs
                 )
                 resolved.spec.validate_dispatchable()
                 if (condition := resolved.spec.condition) is not None and str(
@@ -1074,6 +1189,9 @@ class Dispatcher:
                     scrub(str(exc)),
                 )
                 self._runtime.release_merged_child(task_id, child_id, None)
+            finally:
+                if len(rendered) == kept:
+                    artifact_inputs.rollback(mark)
         return rendered or None
 
     def requeue_task(
@@ -1085,15 +1203,21 @@ class Dispatcher:
         holder: str | None = None,
         count_retry: bool = True,
         extra_payload: dict[str, Any] | None = None,
+        not_before: float | None = None,
     ) -> DispatchEnd:
-        """Return a task to the ready queue, spending an attempt when ``count_retry``.
+        """Return a task to the ready queue, spending an attempt when ``count_retry``,
+        not to be handed out before ``not_before``, a monotonic time, when given.
 
         Only a task ``holder`` holds is returned, and a settled one stays as it is. A
         task being cancelled settles CANCELLED, and one whose last attempt this spends
         fails. Returns what the return did to the task.
         """
         end = self._runtime.return_dispatch(
-            task_id, holder, increment_retry=count_retry, front=front
+            task_id,
+            holder,
+            increment_retry=count_retry,
+            front=front,
+            not_before=not_before,
         )
         if end is DispatchEnd.EXHAUSTED:
             record = self._runtime.get_record(task_id)
@@ -1240,103 +1364,262 @@ class Dispatcher:
         max_score = max(score for _, score in scored)
         return [worker for worker, score in scored if score == max_score]
 
-    def _preferred_stage_worker(
-        self, record: TaskRecord, task: TaskEnvelope
-    ) -> str | None:
-        if not record or not record.graph_node_name:
+    def _preferred_holder(self, task_id: str, pool: list[Worker]) -> Worker | None:
+        """Return an idle worker in ``pool`` that holds a copy of what the task's
+        upstream tasks published, largest first; None when none does.
+
+        The preference draws from the idle pool alone, so a busy or departed holder
+        leaves the task to normal selection.
+        """
+        if self._content_holders is None or not pool:
             return None
-        task_type = (record.task_type or "").strip().lower()
-        if task_type.startswith("lora"):
-            return None
+        by_id = {worker.id: worker for worker in pool}
         try:
-            info = self._runtime.describe_task(record.task_id)
-            depends_on = info.depends_on if info else None
+            objects = self._upstream_artifact_objects(task_id)
         except Exception:
-            depends_on = None
-        if not depends_on:
+            # A preference never fails a dispatch; normal selection places the task.
+            self._logger.debug(
+                "Upstream artifacts of %s unreadable", task_id, exc_info=True
+            )
             return None
-        for dep_id in depends_on:
-            dep_record = self._runtime.get_record(dep_id)
-            if not dep_record or not dep_record.assigned_worker:
-                continue
-            stage_refs = [dep_record.graph_node_name, dep_id]
-            for ref in stage_refs:
-                if not ref:
-                    continue
-                if self._spec_has_weight_reference(task, ref):
-                    return dep_record.assigned_worker
+        for reference in objects:
+            try:
+                holders = self._content_holders.holders(
+                    reference.authorization_scope, reference.content_digest
+                )
+            except Exception:
+                self._logger.debug(
+                    "Holders of %s unreadable", reference.content_digest, exc_info=True
+                )
+                return None
+            for record in holders:
+                worker = by_id.get(record.worker_id)
+                if worker is not None and worker.incarnation == record.generation:
+                    return worker
         return None
 
-    def _spec_has_weight_reference(
-        self, task: TaskEnvelope, stage_identifier: str
-    ) -> bool:
-        token = f"${{{stage_identifier}.result"
-        return self._search_weight_reference(task, token, tuple())
+    def _upstream_artifact_objects(self, task_id: str) -> list[ContentReference]:
+        """Return the largest object of each final artifact the task's direct upstream
+        tasks published, largest first."""
+        return [
+            reference for reference, _ in self._upstream_artifact_producers(task_id)
+        ]
 
-    def _search_weight_reference(
-        self, value: Any, token: str, path: tuple[str, ...]
+    def _upstream_artifact_producers(
+        self, task_id: str
+    ) -> list[tuple[ContentReference, str]]:
+        """Return the largest object of each final artifact the task's direct upstream
+        tasks published, with the task that published it, largest first."""
+        scoped = self._runtime.scoped_inputs(task_id)
+        if scoped is not None:
+            producers = {
+                producer
+                for entry in scoped.values()
+                if (producer := entry.task_id or entry.binding.task_id)
+            }
+        else:
+            info = self._runtime.describe_task(task_id)
+            producers = set(info.depends_on) if info is not None else set()
+        objects: dict[tuple[str, str, str], tuple[ContentReference, str]] = {}
+        for producer in sorted(producers):
+            for binding in self._runtime.final_artifacts(producer).values():
+                if binding.largest is None:
+                    continue
+                objects.setdefault(
+                    binding.largest.identity, (binding.largest, producer)
+                )
+        return sorted(
+            objects.values(), key=lambda found: found[0].size_bytes, reverse=True
+        )
+
+    def _holder_settling(
+        self, task_id: str, now: float, waitable: Callable[[], set[str]]
     ) -> bool:
-        if isinstance(value, BaseModel):
-            for key, sub in value:
-                next_path = path + (str(key).lower(),)
-                if self._search_weight_reference(sub, token, next_path):
-                    return True
-        elif isinstance(value, dict):
-            for key, sub in value.items():
-                next_path = path + (str(key).lower(),)
-                if self._search_weight_reference(sub, token, next_path):
-                    return True
-        elif isinstance(value, list):
-            for item in value:
-                if self._search_weight_reference(item, token, path):
-                    return True
-        elif isinstance(value, str):
-            if token in value:
-                lowered = value.lower()
-                if any(hint in path for hint in self._weight_reference_hints) or any(
-                    hint in lowered for hint in self._weight_reference_hints
-                ):
-                    return True
+        """Return whether the task should wait for the worker that just finished one
+        of its producers and holds a copy of what it published.
+
+        The holder must be a live, uncordoned worker the task can be placed on,
+        reserved for no other dispatch, whose producer succeeded under
+        ``HOLDER_GRACE_SEC`` ago. A consumer waits at most ``HOLDER_GRACE_SEC`` per
+        producer settle, never twice for one, and only one consumer waits per holder.
+        """
+        if self._content_holders is None:
+            return False
+        self._prune_holder_graces(now)
+        try:
+            found = self._upstream_artifact_producers(task_id)
+        except Exception:
+            self._logger.debug(
+                "Upstream artifacts of %s unreadable", task_id, exc_info=True
+            )
+            return False
+        by_producer: dict[str, list[ContentReference]] = {}
+        for reference, producer in found:
+            by_producer.setdefault(producer, []).append(reference)
+        candidates: set[str] | None = None
+        for producer, references in by_producer.items():
+            record = self._runtime.get_record(producer)
+            if (
+                record is None
+                or record.status != TaskStatus.DONE
+                or (worker_id := record.assigned_worker) is None
+                or record.succeeded_monotonic is None
+                or now - record.succeeded_monotonic >= HOLDER_GRACE_SEC
+            ):
+                continue
+            key = (task_id, producer, record.dispatch_id or "")
+            if (grace := self._holder_graces.get(key)) is not None:
+                closes, ended = grace
+                if ended or now >= closes:
+                    continue
+            slot = (producer, key[2], worker_id)
+            waiter = self._holder_waiters.get(slot)
+            if (
+                waiter is not None
+                and waiter != task_id
+                and self._waiting((waiter, producer, key[2]), now)
+            ):
+                self._holder_graces[key] = (now + HOLDER_GRACE_SEC, True)
+                continue
+            if candidates is None:
+                candidates = waitable()
+            settling = worker_id in candidates and any(
+                self._settling_holder(
+                    reference, worker_id, record.dispatch_id, grace is not None
+                )
+                for reference in references
+            )
+            if worker_id not in candidates:
+                self._logger.debug(
+                    "Not waiting for holder %s: %s cannot be placed on it",
+                    worker_id,
+                    task_id,
+                )
+            if not settling:
+                if grace is not None:
+                    self._holder_graces[key] = (grace[0], True)
+                continue
+            if grace is None:
+                self._holder_graces[key] = (now + HOLDER_GRACE_SEC, False)
+            self._holder_waiters[slot] = task_id
+            return True
         return False
 
-    def _should_wait_for_sticky_worker(self, record, worker_id: str) -> bool:
-        if not record or not worker_id:
-            return False
-        task_type = (record.task_type or "").strip().lower()
-        if not task_type:
-            return False
-        if task_type.startswith("lora"):
-            return False
-        category = (record.category or "").strip().lower()
-        if category != "training":
-            return False
-        try:
-            worker = self._worker_registry.get_worker(worker_id)
-        except Exception:
-            worker = None
-        if not worker:
-            return False
-        try:
-            if self._worker_registry.is_worker_stale(worker_id):
-                return False
-            if self._worker_registry.is_cordoned(worker):
-                return False
-        except Exception:
-            return False
-        if worker.status is WorkerStatus.IDLE:
-            return False
-        return True
+    def _waiting(self, key: tuple[str, str, str], now: float) -> bool:
+        """Return whether the grace under ``key`` is open: neither ended nor closed."""
+        grace = self._holder_graces.get(key)
+        return grace is not None and not grace[1] and now < grace[0]
 
-    # ------------------------------------------------------------------ #
-    # Stage reference handling
-    # ------------------------------------------------------------------ #
+    def _prune_holder_graces(self, now: float) -> None:
+        """Drop graces whose window has closed, at most once per window.
+
+        A closed grace is never reopened: its producer's own window has passed too.
+        """
+        if now - self._graces_pruned_at < HOLDER_GRACE_SEC:
+            return
+        self._graces_pruned_at = now
+        self._holder_graces = {
+            key: grace for key, grace in self._holder_graces.items() if now < grace[0]
+        }
+        self._holder_waiters = {
+            slot: waiter
+            for slot, waiter in self._holder_waiters.items()
+            if (waiter, slot[0], slot[1]) in self._holder_graces
+        }
+
+    def _waitable_workers(
+        self,
+        record: TaskRecord,
+        owner: OwnerFence | None,
+        failed_ids: set[str],
+        relays_only: bool,
+    ) -> set[str]:
+        """Return the workers a task can be placed on once free: its private state's
+        owner when it has one, else every eligible worker it has not failed or avoided.
+        """
+        if owner is not None:
+            return {owner.worker_id}
+        eligible = self.eligible_worker_ids(record, relay=relays_only) - failed_ids
+        return eligible - {record.avoided_worker} if record.avoided_worker else eligible
+
+    def _settling_holder(
+        self,
+        reference: ContentReference,
+        worker_id: str,
+        dispatch_id: str | None,
+        waited: bool,
+    ) -> bool:
+        """Return whether ``worker_id`` holds ``reference`` on its live, uncordoned
+        incarnation and is reserved for no dispatch but ``dispatch_id``, the one that
+        just ended on it.
+
+        An idle holder settles only before the first wait: it went idle after this
+        pass read the idle pool, so the next pass reads it there, and one it then does
+        not take is not waited for.
+        """
+        try:
+            unsettled = self._unsettled_holder(
+                reference, worker_id, dispatch_id, waited
+            )
+        except Exception:
+            self._logger.debug(
+                "Holder %s of %s unreadable",
+                worker_id,
+                reference.content_digest,
+                exc_info=True,
+            )
+            return False
+        if unsettled is not None:
+            self._logger.debug(
+                "Not waiting for holder %s of %s: it %s",
+                worker_id,
+                reference.content_digest,
+                unsettled,
+            )
+        return unsettled is None
+
+    def _unsettled_holder(
+        self,
+        reference: ContentReference,
+        worker_id: str,
+        dispatch_id: str | None,
+        waited: bool,
+    ) -> str | None:
+        """Return why ``worker_id`` is no settling holder of ``reference``, or None."""
+        assert self._content_holders is not None
+        held = [
+            h
+            for h in self._content_holders.holders(
+                reference.authorization_scope, reference.content_digest
+            )
+            if h.worker_id == worker_id
+        ]
+        if not held:
+            return "holds no copy"
+        if (worker := self._worker_registry.get_worker(worker_id)) is None:
+            return "is gone"
+        if all(h.generation != worker.incarnation for h in held):
+            return "holds the copy on another incarnation"
+        if worker.status == WorkerStatus.IDLE and waited:
+            return "is idle but was not taken"
+        if worker.status not in (WorkerStatus.BUSY, WorkerStatus.IDLE):
+            return f"is {worker.status}"
+        if self._worker_registry.is_worker_stale(worker_id):
+            return "is stale"
+        if self._worker_registry.is_cordoned(worker):
+            return "is cordoned"
+        reservation = self._worker_registry.reservation(worker_id)
+        if reservation is not None and reservation.dispatch_id != dispatch_id:
+            return f"is reserved for {reservation.dispatch_id}"
+        return None
 
     def _resolve_stage_references(
         self,
         task_id: str,
         task: TaskEnvelopeTemplate,
         context: dict[str, TaskRecord],
-        scoped: dict[str, ScopedInput] | None = None,
+        scoped: dict[str, ScopedInput] | None,
+        artifact_inputs: ArtifactInputs,
     ) -> tuple[TaskEnvelopeStrict, dict[str, ResultBinding] | None]:
         """Render a task's placeholders and name each upstream value it receives.
 
@@ -1351,13 +1634,18 @@ class Dispatcher:
                 values: dict[str, BaseExecutorResult] = {}
                 resolved_task = self._resolve_placeholders(
                     task,
-                    lambda expr: self._resolve_scoped_reference(expr, scoped, values),
+                    lambda expr: self._resolve_scoped_reference(
+                        expr, scoped, values, artifact_inputs
+                    ),
                 )
             upstream = {name: entry.binding for name, entry in scoped.items()}
         else:
             if context and task.has_placeholder():
                 resolved_task = self._resolve_placeholders(
-                    task, lambda expr: self._resolve_reference(expr, context)
+                    task,
+                    lambda expr: self._resolve_reference(
+                        expr, context, artifact_inputs
+                    ),
                 )
             upstream = self._upstream_bindings(context, task_id) if context else {}
         return TaskEnvelopeStrict.model_validate(resolved_task), upstream or None
@@ -1388,11 +1676,12 @@ class Dispatcher:
         expr: str,
         scoped: dict[str, ScopedInput],
         values: dict[str, BaseExecutorResult],
+        artifact_inputs: ArtifactInputs,
     ) -> Any:
-        """The value a placeholder reads from a scoped input: ``${name}`` the value
-        whole, ``${name.path}`` a part of it, and ``${name.task_id}`` the identity of
-        the task whose whole result it is. ``values`` holds each input already read
-        for the task."""
+        """Return the value a placeholder reads from a scoped input: ``${name}`` the
+        value whole, ``${name.path}`` a part of it, and ``${name.task_id}`` the
+        identity of the task whose whole result it is. ``values`` holds each input
+        already read for the task."""
         name, dot, path = expr.strip().partition(".")
         name = name.strip()
         entry = scoped.get(name)
@@ -1407,7 +1696,7 @@ class Dispatcher:
         if steps and (value := self._dig_result_path(value, steps)) is None:
             raise ValueError(f"Missing value for reference '{expr.strip()}'")
         if rendered := self._render_artifact_ref(
-            value, artifact_context(upstream, steps)
+            value, artifact_context(upstream, steps), artifact_inputs
         ):
             return rendered
         return value.model_dump(mode="json") if isinstance(value, BaseModel) else value
@@ -1455,7 +1744,12 @@ class Dispatcher:
             keys.append(record.graph_node_name)
         return tuple(keys)
 
-    def _resolve_reference(self, expr: str, context: dict[str, TaskRecord]) -> Any:
+    def _resolve_reference(
+        self,
+        expr: str,
+        context: dict[str, TaskRecord],
+        artifact_inputs: ArtifactInputs,
+    ) -> Any:
         expr = expr.strip()
         if not expr:
             raise ValueError("Empty stage reference")
@@ -1476,23 +1770,147 @@ class Dispatcher:
         value = self._dig_result_path(envelope.result, path.split("."))
         if value is None:
             raise ValueError(f"Missing value for reference '{expr}'")
-        # If the referenced value is an artifact ref (an ``ArtifactRef`` or a
-        # legacy ``{path: ...}`` dict), render it as a full URL (when base_url
-        # is set) or an absolute filesystem path using the producing stage's
-        # top-level _artifacts context.
-        if rendered := self._render_artifact_ref(value, envelope.result.artifacts_):
+        if rendered := self._render_artifact_ref(
+            value, envelope.result.artifacts_, artifact_inputs
+        ):
             return rendered
         return value
 
-    @staticmethod
-    def _render_artifact_ref(value: Any, context: ArtifactContext | None) -> str | None:
+    def _render_artifact_ref(
+        self,
+        value: Any,
+        context: ArtifactContext | None,
+        artifact_inputs: ArtifactInputs,
+    ) -> str | None:
+        """Return the token an artifact ref renders as: the producer's published
+        artifact, which the task's worker hydrates and names by its local path.
+
+        A model archive renders as the tree it archives, which every loader takes as
+        a directory, and a ref to a training task's checkpoints renders as the last
+        checkpoint it published.
+        """
         if (
             context is None
-            or not context.base_dir
+            or context.task_id is None
             or (path := artifact_ref_path(value)) is None
         ):
             return None
-        return context.url_for(path)
+        if (revision := context.revision_of(path)) is not None:
+            binding = self._runtime.artifact_binding(
+                context.task_id, revision, path.split("/", 1)[0]
+            )
+            found = resolve_artifact_path(
+                {binding.key: binding} if binding is not None else {}, revision, path
+            )
+        else:
+            found = resolve_artifact_input(
+                self._runtime.final_artifacts(context.task_id), path
+            )
+        if found is None:
+            raise ValueError(
+                f"task {context.task_id} published no artifact named {path!r}"
+            )
+        return artifact_inputs.token(*found)
+
+    def _render_checkpoint_load(
+        self,
+        record: TaskRecord,
+        task: TaskEnvelopeStrict,
+        artifact_inputs: ArtifactInputs,
+    ) -> TaskEnvelopeStrict:
+        """Return the task with each model it loads by task id named by the token of
+        that task's published artifact, which its worker hydrates.
+
+        A ``checkpoint.load`` naming ``task_id`` (or ``taskId``) loads its ``filename``,
+        or the producer's model when it names none; a LoRA adapter naming ``task_id``
+        loads the producer's model. A load with a ``url`` or ``base_url`` is fetched as
+        it names.
+        """
+        spec = task.spec
+        update: dict[str, Any] = {}
+        checkpoint = getattr(spec, "checkpoint", None)
+        if isinstance(checkpoint, dict) and isinstance(
+            load := checkpoint.get("load"), dict
+        ):
+            if (
+                not load.get("url")
+                and not load.get("base_url")
+                and (producer := load.get("task_id") or load.get("taskId"))
+            ):
+                binding, inner = self._producer_model(
+                    record, str(producer), load.get("filename")
+                )
+                rendered = {
+                    key: value
+                    for key, value in load.items()
+                    if key not in _RENDERED_LOAD_KEYS
+                }
+                rendered["url"] = artifact_inputs.token(binding, inner)
+                update["checkpoint"] = {**checkpoint, "load": rendered}
+        if isinstance(spec, ModelSpecStrict) and spec.model and spec.model.adapters:
+            adapters = [
+                (
+                    adapter.model_copy(
+                        update={
+                            "task_id": None,
+                            "url": artifact_inputs.token(
+                                *self._producer_model(
+                                    record, adapter.task_id, None, adapter=True
+                                )
+                            ),
+                        }
+                    )
+                    if adapter.task_id and not adapter.url and not adapter.path
+                    else adapter
+                )
+                for adapter in spec.model.adapters
+            ]
+            if adapters != spec.model.adapters:
+                update["model"] = spec.model.model_copy(update={"adapters": adapters})
+        if not update:
+            return task
+        return task.model_copy(update={"spec": spec.model_copy(update=update)})
+
+    def _producer_model(
+        self, record: TaskRecord, producer: str, filename: Any, adapter: bool = False
+    ) -> tuple[ArtifactBinding, str]:
+        """Return the published artifact a load by ``producer``'s task id names, in
+        the consumer's own organization."""
+        bindings = self._runtime.final_artifacts(producer)
+        if filename:
+            found = resolve_artifact_input(bindings, str(filename))
+            if found is None:
+                raise ValueError(
+                    f"task {producer} published no artifact named {filename!r}"
+                )
+        else:
+            found = (
+                model_artifact(
+                    bindings,
+                    producer,
+                    "name the adapter to load by its path instead of task_id",
+                )
+                if adapter
+                else model_artifact(bindings, producer)
+            ), ""
+        if found[0].reference.authorization_scope != record.org_id:
+            raise ValueError(f"task {producer} published no artifact to load")
+        return found
+
+    def _upstream_artifacts(
+        self, bindings: Iterable[ResultBinding]
+    ) -> dict[str, list[ArtifactBinding]]:
+        """Return the final artifacts of each producer an upstream value in
+        ``bindings`` reads, by producer task id, for the artifact refs in those values
+        a worker loads itself."""
+        producers: set[str] = set()
+        for binding in bindings:
+            producers |= binding.producers()
+        found: dict[str, list[ArtifactBinding]] = {}
+        for producer in sorted(producers):
+            if finals := list(self._runtime.final_artifacts(producer).values()):
+                found[producer] = finals
+        return found
 
     def _upstream_bindings(
         self, context: dict[str, TaskRecord], current_task_id: str

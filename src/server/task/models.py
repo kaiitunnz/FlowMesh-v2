@@ -1,16 +1,28 @@
 import hashlib
+import logging
 import time
 from enum import StrEnum
 from typing import Any, NamedTuple, Self
 
-from pydantic import BaseModel, Field, computed_field
+from pydantic import (
+    BaseModel,
+    Field,
+    ValidationError,
+    computed_field,
+    field_validator,
+    model_validator,
+)
 
 from shared.content import ContentReference
 from shared.tasks import TaskEnvelopeTemplate, TaskType
+from shared.tasks.artifact_binding import ArtifactBinding
+from shared.tasks.credentials import holds_pointer
 from shared.tasks.worker_message import HardwareUsage
 
 from ..orchestration.tool_dispatch import FacadeTurnGroup
 from ..utils.time import now_iso
+
+_logger = logging.getLogger(__name__)
 
 TRAINING_TASK_TYPES = {
     "sft",
@@ -317,6 +329,54 @@ class TaskRecord(BaseModel):
         description="Why a conditional task settled without running, when it did.",
         exclude=True,
     )
+    has_artifacts: bool = Field(
+        default=False,
+        description="Whether the task has published an artifact.",
+        exclude=True,
+    )
+    artifacts: dict[tuple[str, str], ArtifactBinding] = Field(
+        default_factory=dict,
+        description="The task's published artifacts by revision and name.",
+        exclude=True,
+    )
+    dispatched_artifacts: tuple[ArtifactBinding, ...] = Field(
+        default=(),
+        description="Published artifacts the task's current dispatch names by token.",
+        exclude=True,
+    )
+    dispatched_producers: tuple[str, ...] = Field(
+        default=(),
+        description="Upstream tasks whose final sets the task's current dispatch "
+        "carries.",
+        exclude=True,
+    )
+    dispatched_objects: tuple[frozenset[tuple[str, str, str]], ...] = Field(
+        default=(),
+        description="Identities of every object the dispatched artifacts hold.",
+        exclude=True,
+    )
+    avoided_worker: str | None = Field(
+        default=None,
+        description="Worker that could not reach an input; placement passes it over.",
+        exclude=True,
+    )
+    succeeded_monotonic: float | None = Field(
+        default=None,
+        description="The control plane's monotonic time when the task's success "
+        "committed.",
+        exclude=True,
+    )
+    members_pending: bool = Field(
+        default=False,
+        description="Whether a restored dispatch's tree members are still being read.",
+        exclude=True,
+    )
+    unwritten_artifacts: list[ArtifactBinding] = Field(
+        default_factory=list,
+        description="Accepted artifacts the task's next record write adds to its "
+        "catalog.",
+        exclude=True,
+    )
     credential_refs: dict[str, str] | None = Field(
         default=None,
         description="The vault ref of each inline credential masked in the spec, by "
@@ -329,6 +389,31 @@ class TaskRecord(BaseModel):
         "episode, durable so a restart-replayed completion still routes its whole "
         "ordered membership.",
     )
+
+    @field_validator("dispatched_artifacts", mode="before")
+    @classmethod
+    def _drop_unreadable_dispatched_artifacts(cls, value: Any) -> Any:
+        if not isinstance(value, (list, tuple)):
+            return ()
+        kept = []
+        for item in value:
+            try:
+                kept.append(ArtifactBinding.model_validate(item))
+            except ValidationError:
+                _logger.warning("Dropping a dispatched artifact that no longer reads")
+        return tuple(kept)
+
+    @model_validator(mode="after")
+    def _drop_unheld_credential_refs(self) -> Self:
+        # A ref into a field the spec does not hold has nowhere to be restored at
+        # dispatch.
+        if self.credential_refs:
+            self.credential_refs = {
+                pointer: ref
+                for pointer, ref in self.credential_refs.items()
+                if holds_pointer(self.task.spec, pointer)
+            }
+        return self
 
     @computed_field  # type: ignore[prop-decorator]
     @property

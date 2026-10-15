@@ -30,14 +30,13 @@ from shared.schemas.result import ImageClassificationTrainingResult
 from shared.tasks.specs import ImageClassificationTrainingSpecStrict
 from shared.tasks.task_type import TaskType
 
+from ..content.artifacts import checkpoint_spool_dir
 from ..utils.logging import configure_hf_library_logging
 from .base_executor import ExecutionError, Executor, ExecutorTask
-from .mixins.training import TrainingMixin
+from .utils.checkpoint_spool import CheckpointSpool
 from .utils.checkpoints import (
-    archive_model_dir,
+    archive_path_for,
     determine_resume_path,
-    get_http_destination,
-    maybe_upload_artifacts,
     write_executor_result,
 )
 from .utils.huggingface import pick_torch_dtype
@@ -45,7 +44,7 @@ from .utils.huggingface import pick_torch_dtype
 logger = logging.getLogger("worker.image_classification")
 
 
-class ImageClassificationTrainingExecutor(TrainingMixin, Executor):
+class ImageClassificationTrainingExecutor(Executor):
     name = "image_classification_training_executor"
     supported_task_types = frozenset({TaskType.IMAGE_CLASSIFICATION_TRAINING})
     runs_on_visible_gpus = True
@@ -207,6 +206,7 @@ class ImageClassificationTrainingExecutor(TrainingMixin, Executor):
                 data_collator=_image_collate,
                 processing_class=processor,
                 compute_metrics=_compute_accuracy if eval_dataset is not None else None,
+                callbacks=[CheckpointSpool(checkpoint_spool_dir(out_dir))],
             )
             self._current_trainer = trainer
 
@@ -242,12 +242,7 @@ class ImageClassificationTrainingExecutor(TrainingMixin, Executor):
                 processor.save_pretrained(model_path)
                 final_model_path = model_path
                 logger.info("Saved fine-tuned model to %s", model_path)
-                if get_http_destination(spec):
-                    final_archive_path = archive_model_dir(model_path)
-                    logger.info(
-                        "Archived fine-tuned model to %s for HTTP delivery",
-                        final_archive_path,
-                    )
+                final_archive_path = archive_path_for(model_path)
 
             training_time = time.time() - start_time
             final_model: ArtifactRef | None = None
@@ -280,14 +275,6 @@ class ImageClassificationTrainingExecutor(TrainingMixin, Executor):
                 final_model_archive=final_model_archive,
             )
 
-            maybe_upload_artifacts(task, out_dir, logger=logger)
-            self._cleanup_local_artifacts(
-                task,
-                checkpoint_dir,
-                final_model_path,
-                final_archive_path,
-            )
-
             self._current_trainer = None
             self._current_model = None
             self._current_processor = None
@@ -317,7 +304,7 @@ class ImageClassificationTrainingExecutor(TrainingMixin, Executor):
             checkpoints_dir=ArtifactRef(path="checkpoints"),
             resume_from_path=resume_path.as_posix() if resume_path else None,
         )
-        write_executor_result(out_dir / "results.json", task.task_id, task.spec, result)
+        write_executor_result(out_dir / "results.json", task.task_id, result)
         if caught_exc is not None:
             raise ExecutionError(
                 error_msg or "Image classification training failed"

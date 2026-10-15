@@ -41,13 +41,6 @@ spec:
             items:
               - "A futuristic city with flying cars at night, cyberpunk style, high detail"
 
-          output:
-            destination:
-              type: http
-            artifacts:
-              - results.json
-              - images/
-
       - name: image-embedding
         dependsOn: ["diffusion"]
         spec:
@@ -64,14 +57,6 @@ spec:
             type: list
             node: diffusion
             path: images
-
-          output:
-            destination:
-              type: http
-              timeoutSec: 1800
-            artifacts:
-              - results.json
-              - visual_embeddings.pt
 
       - name: vlm-inference
         dependsOn: ["image-embedding"]
@@ -103,9 +88,3 @@ spec:
           inference:
             max_tokens: 512
             temperature: 0.7
-
-          output:
-            destination:
-              type: http
-            artifacts:
-              - results.json

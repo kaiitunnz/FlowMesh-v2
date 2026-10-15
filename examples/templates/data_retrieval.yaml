@@ -66,9 +66,3 @@ spec:
             max_steps: 10
             output_format: jsonl
             verify: false
-
-  output:
-    destination:
-      type: local
-    artifacts:
-      - results.json

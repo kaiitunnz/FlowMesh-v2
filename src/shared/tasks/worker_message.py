@@ -22,6 +22,7 @@ from shared.tasks import (
     TaskEnvelopeStrict,
     TaskSpecStrict,
 )
+from shared.tasks.artifact_binding import ArtifactBinding
 from shared.tasks.components import TaskMetadata
 from shared.tasks.merged import MergedChildTaskStrict
 from shared.tasks.result_binding import ResultBinding, ResultElementRef
@@ -60,9 +61,20 @@ class WorkerTaskMessage(BaseModel):
         default=None,
         description="Upstream task IDs by stage name.",
     )
+    artifact_inputs: dict[str, ArtifactBinding] | None = Field(
+        default=None,
+        description="Published artifacts the task's spec names by token, by token key.",
+    )
     upstream_results: dict[str, ResultBinding] | None = Field(
         default=None,
         description="Upstream stage results by stage name.",
+    )
+    upstream_artifacts: dict[str, list[ArtifactBinding]] | None = Field(
+        default=None,
+        description=(
+            "Final artifacts of each producer an upstream value reads, by producer "
+            "task id."
+        ),
     )
     input_element: ResultElementRef | None = Field(
         default=None,
@@ -137,6 +149,7 @@ class WorkerTaskMessage(BaseModel):
     # envelope bytes, and the fan-out element as a one-item tuple.
     _upstream_envelopes: dict[str, bytes] = PrivateAttr(default_factory=dict)
     _element: tuple[Any] | None = PrivateAttr(default=None)
+    _staged_inputs: dict[str, str] = PrivateAttr(default_factory=dict)
 
     @property
     def spec(self) -> TaskSpecStrict:
@@ -148,6 +161,14 @@ class WorkerTaskMessage(BaseModel):
         """Keep what the worker hydrated for the consumers that read it raw."""
         self._upstream_envelopes = dict(envelopes)
         self._element = element
+
+    def record_staged_inputs(self, staged: dict[str, str]) -> None:
+        """Keep where the worker staged each upstream task's published artifacts."""
+        self._staged_inputs = dict(staged)
+
+    def staged_input(self, task_id: str) -> str | None:
+        """Return the directory an upstream task's artifacts were staged in, or None."""
+        return self._staged_inputs.get(task_id)
 
     def upstream_envelope(self, stage: str) -> bytes | None:
         """The stored envelope bytes of an upstream stage, once hydrated."""

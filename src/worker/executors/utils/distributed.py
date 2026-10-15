@@ -28,7 +28,7 @@ from pydantic import BaseModel
 from torch.distributed.elastic.multiprocessing.errors import ChildFailedError
 from torch.distributed.run import main as _torchrun_main
 
-from shared.utils.manifest import scratch_dir
+from shared.utils.task_output import scratch_dir
 
 from ..base_executor import ExecutionError
 from .collective import loopback_collective_env

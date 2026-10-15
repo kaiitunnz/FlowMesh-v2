@@ -183,6 +183,7 @@ class DispatchFence:
         record.status = TaskStatus.DISPATCHED
         record.assigned_worker = publish.worker_id
         record.dispatch_id = publish.dispatch_id
+        record.avoided_worker = None
         if publish.dispatch_id is not None:
             held = (publish.worker_id, publish.dispatch_id)
             self._reservations.hold_dispatch_locked(task_id, held)

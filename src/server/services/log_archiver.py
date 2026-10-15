@@ -8,8 +8,8 @@ from threading import Event
 from typing import Any
 
 from shared.schemas.result import result_file_path
-from shared.utils.manifest import LOGS_DIR, prepare_output_dir, sync_manifest
 from shared.utils.nofollow import PathRefused, open_append, open_dir
+from shared.utils.task_output import LOGS_DIR, prepare_output_dir
 
 from ..clients.redis import (
     TASK_LOGS_STREAM_PREFIX,
@@ -165,7 +165,7 @@ class TaskLogArchiver:
             try:
                 if not self._drain_task(task_id, now):
                     continue
-                if not self._finalize_manifest(task_id, maybe_state, now):
+                if not self._finalize_logs(task_id, maybe_state, now):
                     continue
                 maybe_state.done = True
                 self._disposed(task_id)
@@ -366,16 +366,11 @@ class TaskLogArchiver:
                 if not self._flush_buffer(task_id, now):
                     return False
 
-    def _finalize_manifest(
+    def _finalize_logs(
         self, task_id: str, state: _TaskArchiveState, now: float
     ) -> bool:
-        """Write the task's manifest and drop its stream checkpoint; return False to
-        try again later, the checkpoint kept so a restart finalizes it too."""
-        record = self._runtime.get_record(task_id)
-        expected_artifacts: list[str] = []
-        if record:
-            expected_artifacts = record.task.spec.get_artifacts()
-        expected_artifacts.append("logs/logs.jsonl")
+        """Ensure the task's log file exists and drop its stream checkpoint; return
+        False to retry later, keeping the checkpoint so a restart finalizes it too."""
         base_dir = self._base_dir(task_id)
         self._ensure_checkpointed(task_id, state)
         try:
@@ -385,14 +380,13 @@ class TaskLogArchiver:
                 open_append(logs_fd, _LOGS_NAME),
             ):
                 pass
-            sync_manifest(base_dir, task_id, expected_artifacts)
         except PathRefused as exc:
-            self._logger.warning("Not writing the manifest for %s: %s", task_id, exc)
+            self._logger.warning("Not finalizing the logs of %s: %s", task_id, exc)
         except Exception as exc:
-            if self._retry_later(task_id, state, now, "Writing the manifest", exc):
+            if self._retry_later(task_id, state, now, "Finalizing the logs", exc):
                 return False
             self._logger.error(
-                "Not writing the manifest for %s after %.0f s of failures: %s",
+                "Not finalizing the logs of %s after %.0f s of failures: %s",
                 task_id,
                 now - (state.first_failure_ts or now),
                 exc,

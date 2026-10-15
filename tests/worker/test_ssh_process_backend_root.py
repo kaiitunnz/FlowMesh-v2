@@ -188,8 +188,9 @@ def test_a_session_logs_in_as_its_own_account_and_reaches_only_its_own_data(
         ResolvedSSHInput(
             stage="up",
             task_id="tsk-up",
-            source_path=upstream,
+            results_root=worker.results_dir,
             mount_path="/mnt/flowmesh/inputs/up",
+            staged_path=upstream,
         )
     ]
     backend = ProcessSessionBackend(worker)

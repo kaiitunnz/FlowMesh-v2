@@ -15,7 +15,7 @@ from shared.resident.reports import (
     ResidentOpOutcome,
     ResidentRouteObservation,
 )
-from shared.schemas.command import InterruptMessage
+from shared.schemas.command import InterruptMessage, MediatedOpMessage
 from shared.schemas.event import (
     Event,
     NodeEvent,
@@ -40,7 +40,7 @@ from ..clients.redis import (
     task_log_closed_key,
     task_log_stream_key,
 )
-from ..content import ContentAccessBroker, ContentHydrationAuthority
+from ..content import ContentAccessBroker, ContentHydrationAuthority, HydrationDenial
 from ..dispatcher import Dispatcher
 from ..hooks import (
     RESOURCE_REGISTRARS,
@@ -71,6 +71,7 @@ from ..task.models import (
     serve_engine_reported,
 )
 from ..task.runtime import TaskRuntime, TransitionNotDurable
+from ..task.runtime.reports import export_failure
 from ..utils.logging import log_node_event, log_worker_event
 from ..utils.time import now_iso
 from .metrics import MetricsRecorder
@@ -164,6 +165,7 @@ class EventMonitor:
         self._server_base_url = self._validate_server_base_url(server_base_url)
         self._content_authority = content_authority
         self._content_access = content_access
+        self._warned_cache_off: set[str] = set()
         self._finalizer = WorkflowFinalizer(
             redis_client=redis_client,
             runtime=runtime,
@@ -502,6 +504,20 @@ class EventMonitor:
             key: value for key, value in payload.items() if key != "input_resolution"
         }
 
+    def _handle_artifact_published(
+        self, event: TaskEvent, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bind a reported checkpoint publication and keep it out of the task's
+        updates."""
+        if (published := payload.get("artifact_published")) is None:
+            return payload
+        self._runtime.record_artifact_published(
+            event.task_id, event.worker_id, published, event.dispatch_id
+        )
+        return {
+            key: value for key, value in payload.items() if key != "artifact_published"
+        }
+
     def handle_task_event(self, event: TaskEvent) -> None:
         with self._runtime.event_tail(event.task_id):
             self._handle_task_event(event)
@@ -530,6 +546,7 @@ class EventMonitor:
                     self._unapplied(event, EventEffect.STALE)
                     return
                 payload = self._handle_input_resolution(event, payload)
+                payload = self._handle_artifact_published(event, payload)
                 payload = self._handle_ssh_task_update(
                     event.task_id, worker_id, payload
                 )
@@ -550,6 +567,43 @@ class EventMonitor:
                 # Count only a settling success; one that yields the lane back would
                 # tally several times for one task.
                 settles = self._runtime.success_settles_task(event.task_id, payload)
+                if settles:
+                    payload = self._runtime.without_unaccepted_children(
+                        event.task_id, payload
+                    )
+                if settles and (
+                    refusal := self._runtime.artifact_refusal(event.task_id, payload)
+                ):
+                    # A success whose publications cannot all be bound would settle
+                    # with artifacts its result names missing.
+                    self._handle_task_failed(
+                        event.model_copy(
+                            update={
+                                "type": "TASK_FAILED",
+                                "error": f"artifacts_unaccepted: {refusal}",
+                                "retryable": False,
+                            }
+                        ),
+                        worker_id,
+                        payload,
+                    )
+                    return
+                if settles and (failure := export_failure(payload)) is not None:
+                    # The completion ends the agent, so the exports it declared are
+                    # its output; one it could not copy out fails it. Re-running the
+                    # agent's commands to reproduce them is not authorized.
+                    self._handle_task_failed(
+                        event.model_copy(
+                            update={
+                                "type": "TASK_FAILED",
+                                "error": f"{failure.kind}: {failure.message}",
+                                "retryable": False,
+                            }
+                        ),
+                        worker_id,
+                        payload,
+                    )
+                    return
                 success = self._runtime.mark_succeeded(
                     event.task_id, worker_id, payload, event.ts, event.dispatch_id
                 )
@@ -971,6 +1025,8 @@ class EventMonitor:
                     request_id=int(event.payload["request_id"]),
                     peer_only=bool(event.payload.get("peer_only")),
                 )
+            case "CONTENT_HYDRATION_REQUEST":
+                self._refuse_hydration(worker_id, int(event.payload["request_id"]))
             case "CONTENT_ROUTE_OBSERVATION" if self._content_authority is not None:
                 self._content_authority.on_route_observation(
                     worker_id,
@@ -1081,6 +1137,30 @@ class EventMonitor:
                         dispatch_id,
                         task_id,
                     )
+
+    def _refuse_hydration(self, worker_id: str, request_id: int) -> None:
+        """Refuse a peer hydration at once while control has the content cache off,
+        so the worker goes straight to the store."""
+        if worker_id not in self._warned_cache_off:
+            self._warned_cache_off.add(worker_id)
+            self._logger.warning(
+                "Worker %s runs the content cache but control does not; its reads "
+                "go to the store",
+                worker_id,
+            )
+        if (worker := self._worker_registry.get_worker(worker_id)) is None:
+            return
+        self._worker_registry.publish_mediated_op(
+            worker,
+            MediatedOpMessage(
+                worker_id=worker_id,
+                frame_kind="content_grant_denied",
+                payload={
+                    "request_id": request_id,
+                    "reason": HydrationDenial.CACHE_OFF.value,
+                },
+            ),
+        )
 
     def _revoke_orphan_run(self, worker_id: str, event: WorkerEvent) -> None:
         """Revoke a dispatch a worker reports running that control does not hold, once

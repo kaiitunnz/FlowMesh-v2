@@ -14,7 +14,7 @@ from shared.content import (
     SharedFilesystemObjectStore,
 )
 from shared.harness.adapter import HarnessResult, HarnessResultKind
-from shared.schemas.result import BaseExecutorResult
+from shared.schemas.result import BaseExecutorResult, ResultEnvelope
 from shared.tasks import MergedChildTaskStrict
 from shared.tasks.task_type import TaskType
 from tests.worker.factories import (
@@ -22,6 +22,7 @@ from tests.worker.factories import (
     make_worker_task_message,
     no_mediated_op,
 )
+from worker.content.artifacts import checkpoint_spool_dir, spool_checkpoint
 from worker.executors.base_executor import Executor
 from worker.executors.episode_support import EpisodeStepResult
 from worker.runner import Runner
@@ -86,6 +87,7 @@ def _run(
         executors={"echo": executor, "default": executor},
         default_executor=executor,
         logger=MagicMock(),
+        owner="w1",
     ).start()
     return lifecycle, plane
 
@@ -187,3 +189,146 @@ def test_a_merged_parent_stores_only_its_own_result(tmp_path: Path) -> None:
 
     assert merged["tsk-1"]["result"] == alone["tsk-1"]["result"]
     assert merged["tsk-c"]["result"]["value"] == "child"
+
+
+class _Producing(_Returning):
+    """Leaves artifacts in the task's output, as a trainer does."""
+
+    def run(self, task: Any, out_dir: Path) -> BaseExecutorResult:
+        model = out_dir / "artifacts" / "final_model"
+        model.mkdir(parents=True, exist_ok=True)
+        (model / "weights.bin").write_bytes(b"weights")
+        return self.result
+
+
+def _run_producing(
+    tmp_path: Path, store: FabricObjectStore, cleanup: bool = False
+) -> MagicMock:
+    lifecycle = MagicMock()
+    lifecycle.worker_id = "wrk-test"
+    lifecycle.cost_per_hour = 1.0
+    lifecycle.client.create_task_log_emitter.return_value = None
+    lifecycle.client.iter_interrupts.return_value = []
+    lifecycle.client.iter_stops.return_value = []
+    lifecycle.client.next_mediated_op.side_effect = no_mediated_op
+    lifecycle.content_plane = _Plane(store)
+    msg = make_worker_task_message(
+        {"taskType": "echo"},
+        task_type=TaskType.ECHO,
+        task_id="tsk-1",
+        content_scope="org-a",
+    )
+    executor = _Producing(BaseExecutorResult())
+    Runner(
+        lifecycle=lifecycle,
+        task_stream=[msg],
+        results_dir=tmp_path / "out",
+        hardware=make_worker_hardware(),
+        executors={"echo": executor, "default": executor},
+        default_executor=executor,
+        logger=MagicMock(),
+        cleanup_after_publish=cleanup,
+    ).start()
+    return lifecycle
+
+
+@pytest.mark.parametrize("cleanup", [False, True])
+def test_success_reports_the_artifacts_it_published(
+    tmp_path: Path, cleanup: bool
+) -> None:
+    store = SharedFilesystemObjectStore(tmp_path / "cas")
+
+    metadata = _metadata(_run_producing(tmp_path, store, cleanup))
+
+    (binding,) = metadata["artifacts"]
+    assert binding["name"] == "final_model" and binding["kind"] == "tree"
+    assert store.hydrate(ContentReference.model_validate(binding["reference"]))
+    local = tmp_path / "out" / "tsk-1" / "artifacts" / "final_model"
+    assert local.exists() is not cleanup
+
+
+def test_artifacts_the_store_refuses_fail_the_task_retryably(tmp_path: Path) -> None:
+    class _NoFiles(SharedFilesystemObjectStore):
+        def write_file(self, scope: str, path: Path, **kwargs: Any) -> Any:
+            raise ContentStoreError("store unreachable")
+
+    lifecycle = _run_producing(tmp_path, _NoFiles(tmp_path / "cas"))
+
+    lifecycle.set_succeeded.assert_not_called()
+    assert lifecycle.set_failed.call_args.kwargs["retryable"] is True
+
+
+class _Training(_Returning):
+    """Saves a checkpoint mid-run, as a trainer's save callback hands it over."""
+
+    def run(self, task: Any, out_dir: Path) -> BaseExecutorResult:
+        checkpoint = out_dir / "artifacts" / "checkpoints" / "checkpoint-5"
+        checkpoint.mkdir(parents=True, exist_ok=True)
+        (checkpoint / "model.bin").write_bytes(b"step five")
+        spool_checkpoint(checkpoint, checkpoint_spool_dir(out_dir), 5)
+        return self.result
+
+
+def test_a_training_task_reports_its_checkpoints_as_it_runs_and_at_success(
+    tmp_path: Path,
+) -> None:
+    lifecycle = MagicMock()
+    lifecycle.worker_id = "wrk-test"
+    lifecycle.cost_per_hour = 1.0
+    lifecycle.client.create_task_log_emitter.return_value = None
+    lifecycle.client.iter_interrupts.return_value = []
+    lifecycle.client.iter_stops.return_value = []
+    lifecycle.client.next_mediated_op.side_effect = no_mediated_op
+    lifecycle.content_plane = _Plane(SharedFilesystemObjectStore(tmp_path / "cas"))
+    msg = make_worker_task_message(
+        {"taskType": "echo"},
+        task_type=TaskType.ECHO,
+        task_id="tsk-1",
+        content_scope="org-a",
+    ).model_copy(update={"task_type": TaskType.SFT.value})
+    executor = _Training(BaseExecutorResult())
+    Runner(
+        lifecycle=lifecycle,
+        task_stream=[msg],
+        results_dir=tmp_path / "out",
+        hardware=make_worker_hardware(),
+        executors={"sft": executor, "default": executor},
+        default_executor=executor,
+        logger=MagicMock(),
+    ).start()
+
+    revisions = {(b["name"], b["revision"]) for b in _metadata(lifecycle)["artifacts"]}
+    assert ("checkpoints", "step-5") in revisions
+    envelope = ResultEnvelope.model_validate_json(
+        lifecycle.content_plane.store.hydrate(
+            ContentReference.model_validate(_metadata(lifecycle)["result_reference"])
+        )
+    )
+    assert envelope.result.artifacts_ is not None
+    assert envelope.result.artifacts_.revisions == {"checkpoints": "step-5"}
+    updates = [
+        call.args[1]
+        for call in lifecycle.notify_task_update.call_args_list
+        if "artifact_published" in call.args[1]
+    ]
+    assert [u["artifact_published"][0]["revision"] for u in updates] == ["step-5"]
+    assert not (tmp_path / "out" / "tsk-1" / ".checkpoint-spool").exists()
+
+
+def test_a_starting_worker_clears_the_working_dirs_a_crash_left(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "kept").write_bytes(b"not the worker's")
+    left = tmp_path / "out" / "tsk-old"
+    for name in (".artifact-inputs", ".ssh-inputs", ".checkpoint-spool"):
+        (left / name / "x").mkdir(parents=True)
+    (left / ".export-staging").symlink_to(outside)
+    (left / "artifacts").mkdir()
+    (left / ".working-owner").write_text("w1")
+
+    _run(tmp_path, BaseExecutorResult(), SharedFilesystemObjectStore(tmp_path / "cas"))
+
+    assert sorted(p.name for p in left.iterdir()) == [".working-owner", "artifacts"]
+    assert (outside / "kept").read_bytes() == b"not the worker's"

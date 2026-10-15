@@ -37,17 +37,6 @@ spec:
     task_type: CAUSAL_LM
     use_rslora: false
 
-  output:
-    destination:
-      type: http
-      method: POST
-      timeoutSec: 15
-      headers:
-        Authorization: Bearer dev-token
-    artifacts:
-      - results.json
-      - final_lora
-
   stages:
     - name: gsm8k-stage
       spec:

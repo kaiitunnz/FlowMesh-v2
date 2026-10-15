@@ -22,8 +22,7 @@ import requests
 import worker
 from shared.schemas.worker import SSHBackendName
 from shared.tasks.worker_message import WorkerHardware
-from shared.utils.http import auth_headers
-from shared.utils.manifest import ARTIFACTS_DIR, RESULTS_NAME
+from shared.utils.task_output import ARTIFACTS_DIR, RESULTS_NAME
 from worker.config import WorkerConfig
 from worker.executors.utils.docker import (
     DockerUnavailableError,
@@ -54,7 +53,7 @@ from ..config import (
     normalize_mount_path,
     reserve_mount_path,
 )
-from ..inputs import RESULT_BUNDLE_TIMEOUT_SEC, result_bundle_url, stage_inputs_locally
+from ..inputs import stage_inputs_locally
 
 try:
     from docker import DockerClient
@@ -511,15 +510,12 @@ class DockerSessionBackend(SSHSessionBackend):
         for resolved in request.resolved_inputs:
             dst = shlex.quote(f"/dst/{resolved.task_id}")
             commands.append(f"mkdir -p {dst}")
-            if resolved.source_path.exists():
-                src = shlex.quote(f"/src/{resolved.task_id}")
+            if resolved.staged_path is not None:
+                # The worker staged the upstream's artifacts under the task's own
+                # output, which lies in the results volume mounted at /src.
+                rel = resolved.staged_path.relative_to(resolved.results_root)
+                src = shlex.quote(f"/src/{rel.as_posix()}")
                 commands.append(f"cp -a {src}/. {dst}/")
-            elif resolved.has_artifacts:
-                commands.append(
-                    self._build_remote_stage_command(
-                        resolved.task_id, include_results=resolved.results is None
-                    )
-                )
             if resolved.results is not None:
                 hydrated[resolved.task_id] = resolved.results
                 src = shlex.quote(f"{_HYDRATED_RESULTS_ROOT}/{resolved.task_id}")
@@ -551,16 +547,6 @@ class DockerSessionBackend(SSHSessionBackend):
                 )
             raise
         return volume_name
-
-    @staticmethod
-    def _build_remote_stage_command(task_id: str, include_results: bool) -> str:
-        url = shlex.quote(result_bundle_url(task_id, include_results))
-        header_parts = [
-            f"--header {shlex.quote(f'{k}: {v}')}" for k, v in auth_headers().items()
-        ]
-        header_prefix = f"{' '.join(header_parts)} " if header_parts else ""
-        timeout = int(RESULT_BUNDLE_TIMEOUT_SEC)
-        return f"wget -qO- -T {timeout} -t 1 {header_prefix}{url} | tar -xz -C /dst"
 
     @staticmethod
     def _cleanup_mount_plan(client: DockerClient, mount_plan: SSHMountPlan) -> None:

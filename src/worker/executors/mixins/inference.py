@@ -16,8 +16,9 @@ from shared.schemas.result import BaseExecutorResult, InferenceItem, InferenceIt
 from shared.tasks.specs import InferenceSpecStrict
 from shared.utils.json import to_json_serializable
 
+from ...config import WorkerConfig
 from ..base_executor import ExecutionError, ExecutorTask
-from ..utils.checkpoints import maybe_upload_artifacts, maybe_upload_traces
+from ..utils.checkpoints import maybe_upload_traces
 from .data import DataMixin, InferenceEntry, PromptInput
 
 logger = logging.getLogger(__name__)
@@ -61,6 +62,8 @@ def produced_items(task_id: str, payloads: list[dict[str, Any]]) -> list[Inferen
 
 class InferenceMixin(DataMixin):
     """Shared helpers for inference-style executors."""
+
+    _config: WorkerConfig
 
     def _get_tokenizer(self) -> Any | None:
         return None
@@ -237,26 +240,20 @@ class InferenceMixin(DataMixin):
             value = cfg.get("default")
         return value
 
-    def _upload_outputs(
+    def _upload_traces(
         self, task: ExecutorTask, result: BaseExecutorResult, out_dir: Path
     ) -> None:
-        """Upload the artifacts and traces of the task and of each merged child it
-        returned a result for, each from its own output directory. A child whose own
-        upload fails is left out of the result."""
-        maybe_upload_artifacts(task, out_dir, logger=logger)
-        maybe_upload_traces(task, out_dir, logger=logger)
+        """Upload the traces of the task and of each merged child it returned a
+        result for, each from its own output directory."""
+        maybe_upload_traces(task, out_dir, self._config.server_base_url, logger=logger)
         for child in task.merged_children or []:
-            if child.task_id not in result.children:
-                continue
-            child_dir = out_dir.parent / child.task_id
-            try:
-                maybe_upload_artifacts(child, child_dir, logger=logger)
-                maybe_upload_traces(child, child_dir, logger=logger)
-            except ExecutionError as exc:
-                logger.warning(
-                    "Leaving merged child %s out of the result: %s", child.task_id, exc
+            if child.task_id in result.children:
+                maybe_upload_traces(
+                    child,
+                    out_dir.parent / child.task_id,
+                    self._config.server_base_url,
+                    logger=logger,
                 )
-                del result.children[child.task_id]
 
     def _maybe_export_jsonl(
         self,

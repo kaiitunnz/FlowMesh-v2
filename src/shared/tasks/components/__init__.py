@@ -12,12 +12,6 @@ from .model import (
     ModelSource,
     ModelSourceTemplate,
 )
-from .output import (
-    OutputDestination,
-    OutputDestinationTemplate,
-    OutputSpec,
-    OutputSpecTemplate,
-)
 from .postprocess import (
     JsonlExportSpec,
     JsonlExportSpecTemplate,
@@ -42,10 +36,6 @@ __all__ = [
     "ModelConfigTemplate",
     "ModelSource",
     "ModelSourceTemplate",
-    "OutputDestination",
-    "OutputDestinationTemplate",
-    "OutputSpec",
-    "OutputSpecTemplate",
     "PostprocessSpec",
     "PostprocessSpecTemplate",
     "ResourcesSpec",

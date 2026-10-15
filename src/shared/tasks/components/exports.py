@@ -1,0 +1,106 @@
+"""What an agent may publish from its workspace when it completes.
+
+An agent declares each path of its workspace it exports, and the name the export
+publishes under. A path that names credential material a harness or a tool keeps in a
+workspace, or the private-state fabric's own markers, is never exported: compilation
+refuses it as declared, and the worker refuses a declared directory holding one.
+"""
+
+from enum import StrEnum
+
+from pydantic import BaseModel, ConfigDict, field_validator
+
+from shared.content import is_member_path
+from shared.schemas.artifact import CHECKPOINTS_ARTIFACT
+from shared.utils.task_output import RESULTS_NAME
+
+# Paths, relative to the workspace, that are never exported, nor anything under them.
+EXCLUDED_EXPORT_PATHS: tuple[str, ...] = (
+    ".attachment",
+    ".unsealable",
+    ".git-credentials",
+    ".netrc",
+    ".ssh",
+    ".aws",
+    ".docker/config.json",
+    ".npmrc",
+    ".pypirc",
+    ".config/gh/hosts.yml",
+    ".config/gcloud",
+    ".kube/config",
+)
+
+
+def excluded_export_path(path: str) -> str | None:
+    """Return the excluded path ``path`` is or lies under, or None."""
+    for excluded in EXCLUDED_EXPORT_PATHS:
+        if path == excluded or path.startswith(f"{excluded}/"):
+            return excluded
+    return None
+
+
+# Published names an export may not take or lie under: a task's checkpoints and the
+# name its result downloads as.
+RESERVED_EXPORT_NAMES: tuple[str, ...] = (CHECKPOINTS_ARTIFACT, RESULTS_NAME)
+
+
+def reserved_export_name(name: str) -> str | None:
+    """Return the reserved name ``name`` is or lies under, or None."""
+    top = name.split("/", 1)[0]
+    return top if top in RESERVED_EXPORT_NAMES else None
+
+
+def _member_path(value: str) -> str:
+    if not is_member_path(value):
+        raise ValueError(f"{value!r} is not a relative path of plain segments")
+    return value
+
+
+class AgentExport(BaseModel):
+    """One workspace path an agent publishes when it completes, under ``name``."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    path: str
+    name: str | None = None
+    optional: bool = False
+    """Whether the agent completes without this export when its path does not exist."""
+
+    @field_validator("path", "name")
+    @classmethod
+    def _plain(cls, value: str | None) -> str | None:
+        return value if value is None else _member_path(value)
+
+    @property
+    def published_name(self) -> str:
+        return self.name or self.path
+
+
+class ExportFailureKind(StrEnum):
+    """Why a completing agent's exports could not be published."""
+
+    MISSING = "ExportMissing"
+    """A declared path, or the workspace, does not exist."""
+    UNSAFE = "ExportUnsafe"
+    """A path the fabric never exports, or one an agent could plant to reach past its
+    workspace or alias other bytes."""
+    UNAVAILABLE = "ExportUnavailable"
+    """The worker could not write the copy, as when its disk is full."""
+
+
+class ExportFailure(BaseModel):
+    """A completing agent's export failure: its kind and message."""
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: ExportFailureKind
+    message: str
+
+
+__all__ = [
+    "AgentExport",
+    "EXCLUDED_EXPORT_PATHS",
+    "ExportFailure",
+    "ExportFailureKind",
+    "excluded_export_path",
+]

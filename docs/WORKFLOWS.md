@@ -179,6 +179,33 @@ destination or port policy — and an egress-enabled command is an external effe
 the author owns: a failure before the episode's next seal may run it again, and
 the fabric neither deduplicates nor compensates it.
 
+An agent publishes files from its workspace by declaring them as `exports`, each a
+workspace path, an optional artifact `name` (the path by default), and an `optional` flag:
+
+```yaml
+- name: coder
+  spec:
+    taskType: agent
+    task: write the report
+    harness: { backend: codex, version: v1 }
+    exports:
+      - { path: out/report.md }
+      - { path: build/dist, name: dist }
+      - { path: out/notes.md, optional: true }
+    v2:
+      authority: { invoke: ["sandbox.execute"], delegate: [] }
+```
+
+When the agent completes, its worker copies each path into the task's artifacts under
+its name: `dist` publishes as a tree, and `out/report.md` downloads at `out/report.md`
+from the `out` tree.
+
+Submission refuses an export of a credential path such as `.ssh/`, two exports whose
+names overlap, and an export named under `checkpoints` or `results.json`. At
+completion, a missing path, a link, a special file, a file with a second hard link, or
+a credential file inside an exported directory fails the agent; a missing optional
+export is skipped instead.
+
 ### Structured regions
 
 In the graph form, a node carries a `region` instead of a `spec`. Regions wire
@@ -342,12 +369,14 @@ name inside a template, and a task's named input at the root. Inside a template,
 iteration and child. A template input, a projected input, or a region's value has
 no task, so `${name.task_id}` on one is refused at submission.
 
-A file a task produces, such as fine-tuned weights or an adapter, travels as an
-artifact reference inside its result. A consumer reading that reference, on any
-path a value takes, receives where to download the producer's file from: a URL on
-the server when the producer declares an `http` `output.destination`, else a path
-on the producer's node, which a task on another worker cannot read. A stored
-result or published output keeps the reference and its producer's `_artifacts`.
+A file a task produces, such as fine-tuned weights or an adapter, is an artifact the
+task publishes, and its result names it by a reference (`{path: ...}`). A consumer
+reading that reference, on any path a value takes, receives the producer's
+published artifact: a placeholder renders it as the local path the consumer's worker
+hydrates it to, a model archive as the directory of the model it archives, and an
+agent's input as its download path. A reference to a path its producer did not publish fails the consumer.
+A stored result or published output keeps the reference and its producer's
+`_artifacts`.
 
 Each task a template runs reports where it ran as `occurrence` in its task
 information: the template member, the child it belongs to, and the iteration of

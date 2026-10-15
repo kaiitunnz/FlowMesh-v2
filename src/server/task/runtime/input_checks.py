@@ -2,6 +2,7 @@
 
 import logging
 import threading
+import time
 from dataclasses import dataclass, replace
 
 from shared.content import ContentReference
@@ -21,12 +22,18 @@ class _InputCheck:
     worker_id: str
     dispatch_id: str | None
     references: tuple[ContentReference, ...]
+    # The artifact members among them, which control checks for presence and size
+    # only; their worker's verified read judges their bytes.
+    members: frozenset[ContentReference] = frozenset()
     # Why control found an input unreadable, once it has; the task then fails as a
     # report of the dispatch that could not read it.
     unreadable: str | None = None
 
 
 INPUT_VERDICT_REPORT = "TASK_FAILED:input_unreadable"
+# A task whose inputs read fine at control is placed again no sooner than this, so a
+# worker that keeps failing to read them is not handed the task in a tight loop.
+INPUT_RECHECK_PACE_SEC = 1.0
 
 
 def _input_verdict(task_id: str, check: _InputCheck) -> TaskEvent:
@@ -114,7 +121,11 @@ class InputChecks:
                 "Task %s runs again: control reads the inputs its worker could not",
                 task_id,
             )
-            if self._ready.enqueue_ready_locked(task_id, front=False):
+            if self._ready.enqueue_ready_locked(
+                task_id,
+                front=False,
+                not_before=time.monotonic() + INPUT_RECHECK_PACE_SEC,
+            ):
                 self._cv.notify_all()
             self._committer.commit_locked(task_id)
             del self.input_checks[task_id]
@@ -132,14 +143,16 @@ class InputChecks:
         pending = self._committer.unacknowledged.get(task_id)
         return pending is not None and pending.report == INPUT_VERDICT_REPORT
 
-    def verify_inputs(
-        self, references: tuple[ContentReference, ...]
-    ) -> ResultUnreadable | Exception | None:
-        """Why control cannot read these objects either, or None when it reads them."""
+    def verify_inputs(self, check: _InputCheck) -> ResultUnreadable | Exception | None:
+        """Return why control cannot read a check's objects either, or None when it
+        reads them."""
         pending: Exception | None = None
-        for reference in references:
+        for reference in check.references:
             try:
-                self._results.verify(reference)
+                if reference in check.members:
+                    self._results.verify_stored(reference)
+                else:
+                    self._results.verify(reference)
             except ResultUnreadable as exc:
                 return exc
             except Exception as exc:
@@ -153,11 +166,12 @@ class InputChecks:
         worker_id: str,
         dispatch_id: str | None,
         references: tuple[ContentReference, ...],
+        members: frozenset[ContentReference] = frozenset(),
     ) -> None:
         """Keep a returned task out of the queue until control has read its inputs."""
         self._ready.remove_from_ready_locked(record.task_id)
         self.input_checks[record.task_id] = _InputCheck(
-            worker_id, dispatch_id, references
+            worker_id, dispatch_id, references, members
         )
         self._redrive.drive_now(record.workflow_id)
 

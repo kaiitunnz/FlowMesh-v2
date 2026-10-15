@@ -49,9 +49,3 @@ spec:
             # return_body is a JSON backdoor: keep raw text when JSON isn't usable.
             return_body: true
             raise_for_status: true
-
-  output:
-    destination:
-      type: http
-    artifacts:
-      - results.json

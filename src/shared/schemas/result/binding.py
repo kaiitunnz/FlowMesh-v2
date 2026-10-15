@@ -14,7 +14,7 @@ from pydantic import BaseModel, ValidationError
 from shared.content import ContentReference
 from shared.tasks.result_binding import BindingKind, ResultBinding, ResultElementRef
 
-from ..artifact import ArtifactContext, ArtifactRef
+from ..artifact import ArtifactContext, ArtifactRef, artifact_download_path
 from ._base import BaseExecutorResult
 from .catalog import ResultEnvelope
 from .routed import RoutedValue, routed_root
@@ -297,10 +297,12 @@ def binding_text(
         value = scoped_value(binding, envelope_of)
     except IndexError:
         return None
-    if (ref := artifact_ref_path(value)) is not None and (
-        context := artifact_contexts(binding, envelope_of).get(())
-    ) is not None:
-        return context.url_for(ref)
+    if (
+        (ref := artifact_ref_path(value)) is not None
+        and (context := artifact_contexts(binding, envelope_of).get(())) is not None
+        and context.task_id is not None
+    ):
+        return artifact_download_path(context.task_id, ref, context.revision_of(ref))
     if isinstance(value, BaseModel):
         value = value.model_dump(mode="json")
     return _stringify(value)

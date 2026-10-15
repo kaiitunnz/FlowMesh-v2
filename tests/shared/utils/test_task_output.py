@@ -1,6 +1,5 @@
 """Tests for the shared manifest helpers."""
 
-import json
 import stat
 import threading
 from pathlib import Path
@@ -8,16 +7,14 @@ from unittest.mock import patch
 
 import pytest
 
-from shared.utils.manifest import (
+from shared.utils.nofollow import PathRefused
+from shared.utils.task_output import (
     ARTIFACTS_DIR,
     LOGS_DIR,
-    MANIFEST_NAME,
     SCRATCH_DIR,
     prepare_output_dir,
     scratch_dir,
-    sync_manifest,
 )
-from shared.utils.nofollow import PathRefused
 
 
 def _race(fn, *, threads: int = 8) -> list[BaseException]:
@@ -107,16 +104,3 @@ class TestScratchDir:
             path = scratch_dir(tmp_path)
         assert stat.S_IMODE(path.stat().st_mode) == 0o0777
         assert stat.S_IMODE((tmp_path / SCRATCH_DIR).stat().st_mode) == 0o0777
-
-
-class TestSyncManifest:
-    def test_manifest_is_group_and_other_writable(self, tmp_path: Path) -> None:
-        sync_manifest(tmp_path, "t-1", expected=[])
-        mode = stat.S_IMODE((tmp_path / MANIFEST_NAME).stat().st_mode)
-        assert mode & 0o0066 == 0o0066
-
-    def test_second_call_overwrites_first(self, tmp_path: Path) -> None:
-        sync_manifest(tmp_path, "t-1", expected=[])
-        sync_manifest(tmp_path, "t-2", expected=[])
-        data = json.loads((tmp_path / MANIFEST_NAME).read_text())
-        assert data["task_id"] == "t-2"

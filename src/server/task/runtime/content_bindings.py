@@ -1,11 +1,19 @@
 """Which content a task is bound to read, and the result it is bound to."""
 
 import logging
+import time
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from opentelemetry.metrics import Meter, NoOpMeter
+
 from shared.content import ContentReference
+from shared.tasks.artifact_binding import (
+    ArtifactBinding,
+    ArtifactBindings,
+    ArtifactKind,
+)
 from shared.tasks.result_binding import (
     BindingKind,
     ResultBinding,
@@ -74,11 +82,18 @@ class ContentBindings:
         engines: dict[str, OrchestrationEngine],
         original_deps: dict[str, set[str]],
         logger: logging.Logger,
+        meter: Meter | None = None,
     ) -> None:
         self._tasks = tasks
         self._engines = engines
         self._original_deps = original_deps
         self._logger = logger
+        self._publication_conflicts = (meter or NoOpMeter("flowmesh")).create_counter(
+            "flowmesh.artifact.publication_conflicts",
+            unit="{publication}",
+            description="Publications refused because their revision and name "
+            "already name other bytes.",
+        )
 
     def consumes_locked(self, record: TaskRecord, reference: ContentReference) -> bool:
         """Whether a task is bound to exactly this object as one of its inputs."""
@@ -341,6 +356,99 @@ class ContentBindings:
             return
         record.result_reference = self.accepted_reference(record, reference)
 
+    def bind_artifacts_locked(
+        self,
+        record: TaskRecord,
+        bindings: Sequence[ArtifactBinding],
+        dispatch_id: str | None,
+    ) -> list[ArtifactBinding]:
+        """Accept a task's reported publications; returns those newly accepted.
+
+        The first publication of a revision and name is kept: the same bytes again
+        change nothing, and different bytes are refused. An archive is accepted only
+        over a tree of the same revision already accepted.
+        """
+        published_at = ts_to_iso(time.time())
+        accepted: list[ArtifactBinding] = []
+        ordered = sorted(bindings, key=lambda b: b.kind is ArtifactKind.ARCHIVE)
+        for binding in ordered:
+            if not self._publishable(record, binding):
+                continue
+            if (existing := record.artifacts.get(binding.key)) is not None:
+                if not existing.same_publication(binding):
+                    self._publication_conflicts.add(1)
+                    self._logger.warning(
+                        "Task %s published %s at %s as %s, which already names %s; "
+                        "keeping the first",
+                        record.task_id,
+                        binding.name,
+                        binding.revision,
+                        binding.reference.content_digest,
+                        existing.reference.content_digest,
+                    )
+                continue
+            stamped = binding.accepted(dispatch_id, published_at)
+            record.artifacts[binding.key] = stamped
+            record.unwritten_artifacts.append(stamped)
+            record.has_artifacts = True
+            accepted.append(stamped)
+        return accepted
+
+    def artifact_refusal_locked(
+        self, record: TaskRecord, bindings: Sequence[ArtifactBinding] | None
+    ) -> str | None:
+        """Return why a task's reported publications cannot be accepted whole, or None.
+
+        A report that does not parse, a publication outside the task's scope, and an
+        archive over no tree of its revision are refused; a revision and name already
+        accepted is not, since its first publication stands.
+        """
+        if bindings is None:
+            return f"task {record.task_id} reported artifacts that do not parse"
+        trees = {
+            binding.key: binding
+            for binding in bindings
+            if binding.kind is ArtifactKind.TREE
+        }
+        for binding in bindings:
+            if (reason := self._refusal(record, binding, trees)) is not None:
+                return reason
+        return None
+
+    def _refusal(
+        self,
+        record: TaskRecord,
+        binding: ArtifactBinding,
+        reported_trees: ArtifactBindings,
+    ) -> str | None:
+        scopes = {binding.reference.authorization_scope}
+        if binding.largest is not None:
+            scopes.add(binding.largest.authorization_scope)
+        if scopes != {record.org_id}:
+            return (
+                f"task {record.task_id} published {binding.name} outside its scope "
+                f"{record.org_id}"
+            )
+        if binding.kind is ArtifactKind.ARCHIVE:
+            key = (binding.revision, binding.of or "")
+            tree = record.artifacts.get(key) or reported_trees.get(key)
+            if (
+                tree is None
+                or tree.kind is not ArtifactKind.TREE
+                or tree.reference.identity != binding.reference.identity
+            ):
+                return (
+                    f"task {record.task_id} published archive {binding.name} over "
+                    f"no tree {binding.of} it published"
+                )
+        return None
+
+    def _publishable(self, record: TaskRecord, binding: ArtifactBinding) -> bool:
+        if (reason := self._refusal(record, binding, {})) is not None:
+            self._logger.error("%s; not binding it", reason)
+            return False
+        return True
+
     def accepted_reference(
         self, record: TaskRecord, reference: ContentReference | None
     ) -> ContentReference | None:
@@ -375,9 +483,15 @@ class ContentBindings:
     def consumed_inputs_locked(
         self, record: TaskRecord, references: Sequence[ContentReference]
     ) -> tuple[ContentReference, ...]:
-        """The named objects the task consumes, each once."""
+        """Return the named objects the task consumes, each once: a bound input, or an
+        object its dispatch's artifact inputs name or hold. Every named object counts
+        while a restored dispatch's tree members are still being read."""
         return tuple(
             reference
             for reference in dict.fromkeys(references)
-            if self.consumes_locked(record, reference)
+            if record.members_pending
+            or self.consumes_locked(record, reference)
+            or any(
+                reference.identity in objects for objects in record.dispatched_objects
+            )
         )

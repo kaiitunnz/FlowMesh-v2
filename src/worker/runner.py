@@ -1,6 +1,7 @@
 """Task runner that executes assignments relayed by the server."""
 
 import logging
+import os
 import socket
 import threading
 import time
@@ -15,6 +16,7 @@ from shared.content import (
     ContentReference,
     ContentStoreError,
     FabricObjectStore,
+    WriteCancelled,
 )
 from shared.harness.adapter import HarnessResultKind
 from shared.inference import (
@@ -30,13 +32,17 @@ from shared.network.mtls import MutualTlsMaterial
 from shared.network.relay_frame import SSH_FRAME_KIND
 from shared.outcome import FabricContentStore
 from shared.schemas.result import RESULT_MEDIA_TYPE, BaseExecutorResult
+from shared.tasks.artifact_binding import (
+    ArtifactBinding,
+    ArtifactKind,
+    latest_revision,
+)
 from shared.tasks.credentials import dispatched_credentials
 from shared.tasks.specs import (
     EmbeddingSpecStrict,
     InferenceBackend,
     InferenceSpecStrict,
     SSHSpecStrict,
-    TaskSpecStrictBase,
 )
 from shared.tasks.task_type import TaskType
 from shared.tasks.worker_message import HardwareUsage, WorkerHardware, WorkerTaskMessage
@@ -57,11 +63,22 @@ from shared.tools.contract import MediatedOperationPermit
 from shared.tools.model.schema import MODEL_INTERFACE
 from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
 from shared.utils.hardware import available_devices, gpus_fit_dispatch
-from shared.utils.manifest import prepare_output_dir, sync_manifest
+from shared.utils.nofollow import PathRefused, open_dir, open_regular, remove_below
 from shared.utils.recent import RecentSet
 from shared.utils.redact import credential_scrubber
+from shared.utils.task_output import ARTIFACTS_DIR, clear_directory, prepare_output_dir
 from shared.utils.time import now_iso
 
+from .content.artifact_inputs import artifact_inputs_dir, ssh_inputs_dir
+from .content.artifacts import (
+    ArtifactChanged,
+    ArtifactPublisher,
+    ReservedArtifactName,
+    checkpoint_spool_dir,
+    declared_archives,
+)
+from .content.checkpoints import CheckpointPublishFailed, CheckpointUploader
+from .content.exports import EXPORT_STAGING_DIR
 from .content.inputs import TaskInputHydrator, input_unreadable, read_input
 from .egress import MediatedEgressSidecar, ModelEgress, SearchEgress
 from .executors.base_executor import ExecutionError, Executor, TaskCancelledError
@@ -75,6 +92,17 @@ from .model_turn import HeldModelEgress, ModelTurnRendezvous, ResponsesFacade
 from .resident.lane_host import ResidentLaneHost
 from .telemetry import otel
 from .utils.logging import TaskLogEmitter
+
+# Task types whose trainers save checkpoints that publish as they are saved.
+_TRAINING_TASK_TYPES = frozenset(
+    {
+        TaskType.SFT,
+        TaskType.LORA_SFT,
+        TaskType.DPO,
+        TaskType.PPO,
+        TaskType.IMAGE_CLASSIFICATION_TRAINING,
+    }
+)
 
 
 def _publishes_result(result: BaseExecutorResult) -> bool:
@@ -130,6 +158,36 @@ def _declared_result(
     return None if outputs is None else canonical_result(request, outputs)
 
 
+_WORKING_OWNER = ".working-owner"
+_OWNER_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+def _mark_working_owner(out_dir: Path, owner: str) -> None:
+    """Record ``owner`` as the worker running in ``out_dir``, replacing any earlier
+    record without following a link."""
+    with open_dir(out_dir) as fd:
+        try:
+            os.unlink(_WORKING_OWNER, dir_fd=fd)
+        except FileNotFoundError:
+            pass
+        written = os.open(_WORKING_OWNER, _OWNER_FLAGS, 0o600, dir_fd=fd)
+        with os.fdopen(written, "w", encoding="utf-8") as record:
+            record.write(owner)
+
+
+def _working_owner(out_dir: Path) -> str | None:
+    """Return the worker recorded as running in ``out_dir``, or None when none is."""
+    try:
+        with open_dir(out_dir) as fd:
+            opened = open_regular(fd, _WORKING_OWNER)
+            if opened is None:
+                return None
+            with opened:
+                return opened.read(256).decode("utf-8", errors="replace")
+    except OSError:
+        return None
+
+
 class Runner:
     def __init__(
         self,
@@ -151,6 +209,8 @@ class Runner:
         peer_listener_sock: socket.socket | None = None,
         telemetry: TelemetryConfig | None = None,
         gpu_binding_task_types: frozenset[TaskType] = frozenset(),
+        cleanup_after_publish: bool = False,
+        owner: str = "",
     ):
         otel.configure(telemetry or DISABLED_TELEMETRY_CONFIG)
         self.lifecycle = lifecycle
@@ -160,7 +220,13 @@ class Runner:
         self.executors = executors
         self.logger = logger
         self.default_executor = default_executor
-        self._input_hydrator = TaskInputHydrator(lifecycle.content_plane)
+        self._cleanup_after_publish = cleanup_after_publish
+        # TODO: an alias is unique per node, not per shared results directory.
+        # The alias marks the task directories whose working directories it may clear.
+        self._owner = owner
+        self._input_hydrator = TaskInputHydrator(
+            lifecycle.content_plane, cancelled=self._task_ending
+        )
         self._peer_enabled = peer_enabled
         self._peer_connect_budget_sec = peer_connect_budget_sec
         self._peer_material = peer_material
@@ -689,6 +755,18 @@ class Runner:
             raise TaskCancelledError(ended)
         return stop_pending
 
+    def _task_ending(self, task_id: str) -> bool:
+        """Return whether a cancel, a revoke of the task's dispatch, or the worker's
+        shutdown has ended the task's run."""
+        with self._cancel_lock:
+            dispatch_id = self._current_dispatch_id
+            return (
+                task_id in self._pending_cancels
+                or dispatch_id in self._cancelled_dispatches
+                or dispatch_id in self._revoked_dispatches
+                or self._shutdown_requested.is_set()
+            )
+
     def _ended_before_execution_locked(self, task_id: str) -> str | None:
         cancelled = (
             task_id in self._pending_cancels
@@ -794,17 +872,95 @@ class Runner:
             ):
                 return executor.run(msg, out_dir)
 
+    def _clear_working_dirs(self) -> None:
+        """Remove the working directories this worker's crashed runs left in the task
+        directories it last marked."""
+        if not self._owner:
+            return
+        try:
+            task_dirs = list(os.scandir(self.results_dir))
+        except FileNotFoundError:
+            return
+        for entry in task_dirs:
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+            out_dir = Path(entry.path)
+            if _working_owner(out_dir) != self._owner:
+                continue
+            for working in (
+                artifact_inputs_dir(out_dir),
+                ssh_inputs_dir(out_dir),
+                checkpoint_spool_dir(out_dir),
+                out_dir / EXPORT_STAGING_DIR,
+            ):
+                remove_below(working)
+
     def _resolve_output_dir(self, task_id: str) -> Path:
-        """Prepare and return the canonical output directory for a task's results."""
+        """Prepare and return the canonical output directory for a task's results,
+        marked as the one this worker runs the task in."""
         out_dir = self.results_dir / task_id
         prepare_output_dir(out_dir)
+        if self._owner:
+            try:
+                _mark_working_owner(out_dir, self._owner)
+            except OSError as exc:
+                self.logger.warning(
+                    "Could not mark %s as this worker's: %s", task_id, exc
+                )
         return out_dir
+
+    def _checkpoint_uploader(
+        self, msg: WorkerTaskMessage, out_dir: Path
+    ) -> CheckpointUploader | None:
+        """Publish a training task's checkpoints as its trainer saves them."""
+        if msg.task_type not in _TRAINING_TASK_TYPES:
+            return None
+        store = self._object_store(msg)
+        if store is None:
+            return None
+        spool = checkpoint_spool_dir(out_dir)
+        remove_below(spool)
+        task_id = msg.task_id
+
+        def report(binding: ArtifactBinding) -> None:
+            self.lifecycle.notify_task_update(
+                task_id, {"artifact_published": [binding.model_dump(mode="json")]}
+            )
+
+        uploader = CheckpointUploader(
+            store,
+            msg.content_scope,
+            spool,
+            report,
+            self.logger,
+            cancelled=lambda: self._task_ending(task_id),
+        )
+        uploader.start()
+        return uploader
+
+    def _drain_checkpoints(
+        self, task_id: str, uploader: CheckpointUploader | None
+    ) -> list[ArtifactBinding]:
+        if uploader is None:
+            return []
+        try:
+            return uploader.drain()
+        except CheckpointPublishFailed as exc:
+            if self._task_ending(task_id):
+                raise TaskCancelledError(
+                    f"Task {task_id} ended while publishing its checkpoints"
+                ) from exc
+            raise ExecutionError(
+                f"task {task_id} could not publish a checkpoint: {exc}",
+                retryable=True,
+            ) from exc
 
     def _write_results(
         self,
         msg: WorkerTaskMessage,
         out_dir: Path,
         result: BaseExecutorResult | None,
+        checkpoints: list[ArtifactBinding] | None = None,
     ) -> dict[str, Any]:
         """Store a task's result and each merged child's, returning their references.
 
@@ -817,48 +973,116 @@ class Runner:
             return {}
         own = result.model_copy(update={"children": {}})
         declared = _declared_result(own, msg.resolved_contract) or own
+        artifacts = (
+            self._publish_artifacts(msg, msg.task_id, out_dir, own)
+            if _publishes_result(own)
+            else []
+        )
         reference = self._write_single_result(
-            msg, msg.task_id, msg.spec, out_dir, declared
+            msg, msg.task_id, out_dir, declared, latest_revision(checkpoints)
         )
         if reference is None:
             return {}
         references: dict[str, Any] = {
             "result_reference": reference.model_dump(mode="json")
         }
+        artifacts += [binding.model_dump(mode="json") for binding in checkpoints or ()]
+        if artifacts:
+            references["artifacts"] = artifacts
         child_lookup = {entry.task_id: entry for entry in msg.merged_children or []}
         children: dict[str, Any] = {}
+        child_artifacts: dict[str, Any] = {}
         for child_id, child_result in result.children.items():
             child_info = child_lookup.get(child_id)
             if child_info is None:
                 continue
+            child_dir = self._resolve_output_dir(child_id)
+            published = self._publish_artifacts(msg, child_id, child_dir, child_result)
             child_reference = self._write_single_result(
-                msg,
-                child_id,
-                child_info.spec,
-                self._resolve_output_dir(child_id),
-                child_result,
+                msg, child_id, child_dir, child_result
             )
             if child_reference is not None:
                 children[child_id] = child_reference.model_dump(mode="json")
+                if published:
+                    child_artifacts[child_id] = published
         if children:
             references["child_result_references"] = children
+        if child_artifacts:
+            references["child_artifacts"] = child_artifacts
         return references
+
+    def _publish_artifacts(
+        self,
+        msg: WorkerTaskMessage,
+        task_id: str,
+        out_dir: Path,
+        result: BaseExecutorResult,
+    ) -> list[dict[str, Any]]:
+        """Publish what a task left under its artifacts directory, returning the
+        bindings its success reports.
+
+        Every file is in the shared store before this returns, so the success that
+        reports these bindings names bytes that outlive this worker.
+        """
+        artifacts_dir = out_dir / ARTIFACTS_DIR
+        if not artifacts_dir.is_dir() or not any(artifacts_dir.iterdir()):
+            return []
+        store = self._object_store(msg)
+        if store is None:
+            raise ExecutionError(
+                f"task {task_id} produced artifacts and this worker reaches no fabric "
+                "content store to publish them in",
+                retryable=True,
+            )
+        publisher = ArtifactPublisher(
+            store, msg.content_scope, cancelled=lambda: self._task_ending(task_id)
+        )
+        started = time.monotonic()
+        try:
+            bindings = publisher.publish_final(
+                artifacts_dir,
+                declared_archives(result),
+                step_revisions=msg.task_type in _TRAINING_TASK_TYPES,
+            )
+        except WriteCancelled as exc:
+            raise TaskCancelledError(
+                f"Task {task_id} ended while publishing its artifacts"
+            ) from exc
+        except (ReservedArtifactName, PathRefused) as exc:
+            raise ExecutionError(
+                f"task {task_id} could not publish its artifacts: {exc}",
+                retryable=False,
+            ) from exc
+        except (ContentStoreError, ArtifactChanged, OSError) as exc:
+            raise ExecutionError(
+                f"task {task_id} could not publish its artifacts: {exc}",
+                retryable=True,
+            ) from exc
+        self.logger.info(
+            "Published %d artifact(s) of task %s (%d bytes) in %.1f s",
+            len(bindings),
+            task_id,
+            sum(b.size_bytes for b in bindings if b.kind is not ArtifactKind.ARCHIVE),
+            time.monotonic() - started,
+        )
+        if self._cleanup_after_publish:
+            clear_directory(artifacts_dir)
+        return [binding.model_dump(mode="json") for binding in bindings]
 
     def _write_single_result(
         self,
         msg: WorkerTaskMessage,
         task_id: str,
-        spec: TaskSpecStrictBase,
         out_dir: Path,
         payload: BaseExecutorResult | None,
+        checkpoints: str | None = None,
     ) -> ContentReference | None:
         if payload is None:
             return None
         out_dir.mkdir(parents=True, exist_ok=True)
         envelope = write_executor_result(
-            out_dir / "results.json", task_id, spec, payload
+            out_dir / "results.json", task_id, payload, checkpoints
         )
-        sync_manifest(out_dir, task_id, spec.get_artifacts())
         if not _publishes_result(payload):
             return None
         store = self._object_store(msg)
@@ -1141,6 +1365,7 @@ class Runner:
         self._mediated_op_thread = None
 
     def start(self) -> None:
+        self._clear_working_dirs()
         self._start_idle_checker()
         self._start_interrupt_monitor()
         self._start_mediated_op_router()
@@ -1209,6 +1434,13 @@ class Runner:
                     self._current_task_id = task_id
                     self._refuse_if_gpu_is_held(msg)
                     self._input_hydrator.hydrate(msg)
+                    self._input_hydrator.install_artifacts(
+                        msg, artifact_inputs_dir(out_dir)
+                    )
+                    self._input_hydrator.install_upstream_artifacts(
+                        msg, artifact_inputs_dir(out_dir)
+                    )
+                    self._input_hydrator.stage_ssh_inputs(msg, ssh_inputs_dir(out_dir))
                     if msg.input_preparation:
                         self._raise_if_cancel_pending(task_id)
                         self.lifecycle.notify_task_started(
@@ -1326,8 +1558,13 @@ class Runner:
                         # it here, under the lock the stop's delivery reads it with.
                         if self._begin_execution(task_id):
                             executor_to_run.stop(task_id)
+                    uploader = self._checkpoint_uploader(msg, out_dir)
                     try:
                         out = self._run_executor(executor_to_run, msg, out_dir)
+                    except BaseException:
+                        if uploader is not None:
+                            uploader.abort()
+                        raise
                     finally:
                         # A cancel past this point would wait in the warm executor and
                         # end the task's next dispatch.
@@ -1336,7 +1573,8 @@ class Runner:
                     executor_returned = True
                     if isinstance(out, EpisodeStepResult):
                         unreported_step = out
-                    references = self._write_results(msg, out_dir, out)
+                    checkpoints = self._drain_checkpoints(task_id, uploader)
+                    references = self._write_results(msg, out_dir, out, checkpoints)
                     metadata = self._build_task_metadata(
                         task_type,
                         dispatched_at,
@@ -1362,6 +1600,10 @@ class Runner:
                         if out.private_state is not None:
                             metadata["agent_episode_private_state"] = (
                                 out.private_state.model_dump(mode="json")
+                            )
+                        if out.export_failure is not None:
+                            metadata["agent_export_failure"] = (
+                                out.export_failure.model_dump(mode="json")
                             )
                     self.lifecycle.set_succeeded(task_id, metadata=metadata)
                     unreported_step = None
@@ -1440,6 +1682,8 @@ class Runner:
                             self._stopped_dispatches.discard(dispatch_id)
                     with self._active_executor_lock:
                         self._active_executor_last_used_at = time.time()
+                    remove_below(artifact_inputs_dir(out_dir))
+                    remove_below(ssh_inputs_dir(out_dir))
                     self.lifecycle.set_idle(task_id)
                     if task_log_emitter is not None:
                         if log_handler_attached:

@@ -13,6 +13,7 @@ from pydantic import (
 )
 
 from ...sandbox import SANDBOX_RUNTIMES, SandboxEgressMode
+from ..components.exports import AgentExport
 from ..task_type import TaskType
 from .common import (
     ModelSpecStrict,
@@ -277,6 +278,7 @@ class AgentSpecStrict(TaskSpecStrictBase):
     harness: AgentHarnessSpec | None = None
     model_binding: AgentModelBindingSpec | None = None
     sandbox: AgentSandboxSpec | None = None
+    exports: list[AgentExport] | None = None
 
 
 class AgentSpecTemplate(TaskSpecTemplateBase):
@@ -292,6 +294,7 @@ class AgentSpecTemplate(TaskSpecTemplateBase):
     harness: AgentHarnessSpec | None = None
     model_binding: AgentModelBindingSpec | None = None
     sandbox: AgentSandboxSpec | None = None
+    exports: list[AgentExport] | None = None
 
 
 class DataProfilingSpecStrict(TaskSpecStrictBase):

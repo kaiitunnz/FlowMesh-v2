@@ -74,15 +74,6 @@ def test_a_forbidden_image_fetch_quotes_no_token():
     assert _TOKEN not in str(raised.value)
 
 
-def test_an_upload_destination_is_recorded_without_its_userinfo(tmp_path: Path):
-    spec = mock.MagicMock()
-    spec.output.destination = mock.MagicMock(
-        type="http", url=f"https://u:{_TOKEN}@sink.example/results"
-    )
-    context = checkpoints.build_artifact_context(spec, tmp_path)
-    assert context.base_url == "https://sink.example"
-
-
 _QDRANT = f"https://reader:{_TOKEN}@qdrant.example:6333"
 
 
@@ -143,11 +134,10 @@ def test_connector_errors_quote_no_connection_credential():
 
 
 def test_a_result_records_its_model_identifier_without_a_credential(tmp_path: Path):
-    spec = make_worker_task_message({"taskType": "echo"}).spec
     result = InferenceResult(model=_URL)
 
     envelope = checkpoints.write_executor_result(
-        tmp_path / "results.json", "tsk-1", spec, result
+        tmp_path / "results.json", "tsk-1", result
     )
 
     assert _TOKEN not in envelope

@@ -62,11 +62,3 @@ spec:
     packing: false
     fp16: false
     bf16: true
-
-  output:
-    destination:
-      type: local
-    artifacts:
-      - results.json
-      - logs
-      - artifacts/lora_adapter

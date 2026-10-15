@@ -11,84 +11,76 @@ import pytest
 
 from shared.schemas.artifact import ArtifactContext
 from shared.schemas.result import BaseExecutorResult
+from shared.tasks import TaskType
+from shared.tasks.specs import EchoSpecStrict
 from worker.executors.base_executor import ExecutionError
 from worker.executors.utils import artifacts as artifacts_module
 from worker.executors.utils.artifacts import (
-    artifact_to_source,
+    artifact_ref_source,
+    artifact_ref_text,
+    hydrated_artifact_ref,
     is_flowmesh_origin_url,
-    maybe_resolve_artifact_ref,
     resolve_artifact,
 )
 
 
-class TestArtifactToSource:
-    def test_url_resolution(self, tmp_path: Path) -> None:
-        upstream = BaseExecutorResult(
-            _artifacts=ArtifactContext(
-                base_dir=(tmp_path / "producer-tid").as_posix(),
-                base_url="http://host:8010",
-            ),
-        )
-        url = artifact_to_source({"path": "a.png"}, {"producer": upstream}, "producer")
-        assert url == "http://host:8010/api/v1/results/producer-tid/files/a.png"
+def _upstream() -> dict[str, BaseExecutorResult]:
+    return {
+        "producer": BaseExecutorResult(_artifacts=ArtifactContext(task_id="tsk-prod"))
+    }
 
-    def test_local_file_takes_fast_path(self, tmp_path: Path) -> None:
-        task_root = tmp_path / "producer-tid"
-        (task_root / "artifacts").mkdir(parents=True)
-        (task_root / "artifacts" / "a.png").write_bytes(b"\x89PNG")
-        upstream = BaseExecutorResult(
-            _artifacts=ArtifactContext(
-                base_dir=task_root.as_posix(),
-                base_url="http://host:8010",
-            )
-        )
-        resolved = artifact_to_source(
-            {"path": "a.png"}, {"producer": upstream}, "producer"
-        )
-        assert resolved == (task_root / "artifacts" / "a.png").as_posix()
 
-    def test_local_only_upstream_returns_local_path(self, tmp_path: Path) -> None:
-        task_root = tmp_path / "producer-tid"
-        upstream = BaseExecutorResult(
-            _artifacts=ArtifactContext(base_dir=task_root.as_posix())
+class TestArtifactRefSource:
+    def test_names_the_producer_and_path(self) -> None:
+        assert artifact_ref_source({"path": "a.png"}, _upstream(), "producer") == (
+            "tsk-prod",
+            "a.png",
         )
-        resolved = artifact_to_source(
-            {"path": "a.png"}, {"producer": upstream}, "producer"
+
+    def test_a_pre_upgrade_context_names_no_producer(self) -> None:
+        upstream = BaseExecutorResult.model_validate(
+            {"_artifacts": {"base_dir": "/results/tsk-old", "base_url": "http://x"}}
         )
-        assert resolved == (task_root / "artifacts" / "a.png").as_posix()
+        with pytest.raises(ExecutionError, match="_artifacts context is missing"):
+            artifact_ref_source({"path": "a.png"}, {"producer": upstream}, "producer")
 
     def test_missing_context_raises(self) -> None:
         with pytest.raises(ExecutionError, match="_artifacts context is missing"):
-            artifact_to_source(
+            artifact_ref_source(
                 {"path": "a.png"}, {"producer": BaseExecutorResult()}, "producer"
             )
 
     def test_missing_path_raises(self) -> None:
         with pytest.raises(ExecutionError, match="non-empty 'path' field"):
-            artifact_to_source({}, {"producer": BaseExecutorResult()}, "producer")
+            artifact_ref_source({"path": ""}, _upstream(), "producer")
+
+    def test_other_values_name_nothing(self) -> None:
+        for value in ("hello", 42, [1, 2], {"url": "http://x"}):
+            assert artifact_ref_source(value, None, None) is None
 
 
-class TestMaybeResolveArtifactRef:
-    def test_passes_through_non_dict(self) -> None:
-        assert maybe_resolve_artifact_ref("hello", None, None) == "hello"
-        assert maybe_resolve_artifact_ref(42, None, None) == 42
-        assert maybe_resolve_artifact_ref([1, 2], None, None) == [1, 2]
+class TestArtifactRefs:
+    def test_a_hydrated_ref_is_its_local_path(self) -> None:
+        spec = EchoSpecStrict(taskType=TaskType.ECHO)
+        spec.record_hydrated_artifacts({("tsk-prod", "a.png"): "/in/a.png"})
 
-    def test_passes_through_dict_without_path(self) -> None:
-        value = {"url": "http://x"}
-        assert maybe_resolve_artifact_ref(value, None, None) is value
-
-    def test_resolves_path_dict(self, tmp_path: Path) -> None:
-        upstream = BaseExecutorResult(
-            _artifacts=ArtifactContext(
-                base_url="http://host:8010",
-                base_dir=(tmp_path / "producer-tid").as_posix(),
-            )
+        assert (
+            hydrated_artifact_ref({"path": "a.png"}, spec, _upstream(), "producer")
+            == "/in/a.png"
         )
-        out = maybe_resolve_artifact_ref(
-            {"path": "a.png"}, {"producer": upstream}, "producer"
+        assert hydrated_artifact_ref("plain", spec, None, None) == "plain"
+
+    def test_a_ref_nothing_hydrated_is_unreadable(self) -> None:
+        spec = EchoSpecStrict(taskType=TaskType.ECHO)
+
+        with pytest.raises(ExecutionError, match="input_unreadable.*no artifact"):
+            hydrated_artifact_ref({"path": "a.png"}, spec, _upstream(), "producer")
+
+    def test_a_ref_as_text_names_its_published_artifact(self) -> None:
+        assert (
+            artifact_ref_text({"path": "a.png"}, _upstream(), "producer")
+            == "/api/v1/results/tsk-prod/files/a.png"
         )
-        assert out == "http://host:8010/api/v1/results/producer-tid/files/a.png"
 
 
 class TestResolveArtifact:

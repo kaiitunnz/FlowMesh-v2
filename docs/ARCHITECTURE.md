@@ -125,13 +125,14 @@ src/
     tools/                External-tool contract and search backends
     utils/                JSON, parsing, time, ids
   worker/
+    content/              Content plane: cache, peer hydration, inputs, artifact publication
     docker/               Worker Dockerfiles (CPU + GPU)
     executors/            Executor implementations
       harness/              agent-episode harness backends (scripted, codex) + registry
       mixins/               data, governance, inference, training
       utils/                artifacts, checkpoints, data_utils, distributed,
                             graph_templates, huggingface, safe_eval
-    runner.py             Task lifecycle (execute, write results, upload artifacts)
+    runner.py             Task lifecycle (execute, write results, publish artifacts)
     ssh_relay/            Endpoint registry and lane serving relayed SSH connections
 cli/                    Typer CLI (`flowmesh`)
 hook/                   Plugin hook protocol interfaces
@@ -525,9 +526,10 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   copy, a holder that is gone, or a transfer that breaks costs a read from the shared
   store, not a failure. A transfer holds a window of the object, never the whole, and a
   copy that turns out not to be the object ends the transfer refused and is dropped. A
-  worker keeps a copy of whatever it reads from a peer or the store. Enable the cache
-  and its transfers with `CONTENT_HYDRATION_ENABLED=true` (which requires the network
-  plane). See [`NETWORK_PLANE.md`](NETWORK_PLANE.md).
+  worker keeps a copy of whatever it reads from a peer or the store. The cache and its
+  transfers are on wherever the network plane is; `CONTENT_HYDRATION_ENABLED=false` turns
+  them off. A worker with the cache on under a control with it off reads from the store.
+  See [`NETWORK_PLANE.md`](NETWORK_PLANE.md).
 - **Task results.** A task's result lives in the shared content store: its worker writes
   the result envelope there under the task's store access before it reports success, and
   the success binds that reference once, at the commit that settles the task, so a retry,
@@ -536,16 +538,35 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   item settled with — and a v1 task onto its record. Every result the control plane reads
   — the result, bundle, and output routes, stage references, conditions, fan-out
   cardinality, and an agent's input budget — resolves that binding and reads the verified
-  envelope from the store; the results directory keeps only a task's logs and artifacts.
-  A task that outlives its store access has it renewed while it still runs on the worker
-  asking.
+  envelope from the store; the results directory keeps only a task's logs and uploaded
+  traces. A task that outlives its store access has it renewed while it still runs on
+  the worker asking.
+- **Task artifacts.** Before a task reports success, its worker publishes what the task
+  leaves under its artifacts directory into the shared content store: a file as one
+  object, a directory as a tree manifest naming its files, and each model archive its
+  result declares as a `.tar.gz` view the root builds from the tree on download. Success
+  binds the task's `final` set, and a training run publishes each checkpoint it saves as
+  `step-<n>` while it runs. Each name is published once per revision and its first
+  publication stands, so a retry never replaces what an earlier attempt published. The
+  catalog is stored with the task's record, so a freed workflow's artifacts list and
+  download too. A consumer's worker hydrates each upstream artifact its task reads before
+  the task runs, as it does any consumed value; a model archive loads as the directory it
+  archives. A dispatch waits out a store outage for a tree its spec loads, and fails on a
+  missing one. A training run's save waits while two checkpoints are publishing, and a
+  run whose checkpoint cannot be published stops at its next save and fails.
+- **Agent exports.** An agent declares workspace paths to publish as `exports`. When the
+  agent completes, its worker copies them out of the quiesced workspace into the task's
+  artifacts, which publish like any other. A missing export fails the agent unless it is
+  declared optional, and an unsafe one always does, publishing nothing; see
+  [`WORKFLOWS.md`](WORKFLOWS.md).
 - **Consumed values by reference.** A dispatch names each upstream value its task
   consumes by reference, and the task's worker hydrates each through its content cache
   before anything validates or runs the task. A worker that cannot reach the store names
   the inputs it could not read. Control re-reads each named input the task consumes with
   its own store access: it holds the task while it cannot reach the store either, fails
   it when the content is missing or corrupt, and otherwise queues it again, in every case
-  without spending an attempt or blaming the worker.
+  without spending an attempt or blaming the worker. Its next placement passes over that
+  worker while another idle worker can take it.
 - **Published outputs.** A leaf declares `result: {visibility: published}` to publish its
   value, and a spawn region declares it to publish its children's results as a collection
   keyed by child index within each spawning scope. A spawn whose input failed publishes
@@ -573,11 +594,12 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   A batch the dispatcher releases before sending it, or whose parent is cancelled,
   returns its children still mergeable.
   Disable with `ENABLE_TASK_MERGE=false`.
-- **Stage stickiness** (`ENABLE_STAGE_WEIGHT_STICKINESS=true`) — the
-  dispatcher pins stages that reference an upstream stage's checkpoint
-  to the worker that produced it, falling back to normal selection when
-  unavailable or stale. Mostly relevant for training pipelines reusing
-  on-disk checkpoints.
+- **Upstream artifact placement** (`ENABLE_STAGE_WEIGHT_STICKINESS`, on by default) —
+  the dispatcher prefers an idle worker holding a cached copy of a task's upstream
+  artifacts, and waits up to 5 s for the worker that just produced them to go idle. One
+  consumer at a time waits per holder, the wait spends no attempt and holds up no other
+  task, and a task pinned to workers skips the preference. It needs the worker content
+  cache (`CONTENT_HYDRATION_ENABLED`).
 - **Context reuse.** Workers report cached models/datasets in their
   `WorkerHardware`. The dispatcher's `_cached_worker_candidates` filters
   to workers whose cache covers the task's references; entries older

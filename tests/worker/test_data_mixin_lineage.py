@@ -11,6 +11,7 @@ import pytest
 from PIL import Image
 
 from shared.schemas.result import BaseExecutorResult
+from shared.tasks.specs import InferenceSpecStrict
 from worker.executors.mixins import data as data_mixin_module
 from worker.executors.mixins.data import DataMixin
 from worker.executors.utils import artifacts
@@ -138,15 +139,14 @@ def test_dump_to_governance_with_merged_children(tmp_path: Path) -> None:
         ]
 
 
-def test_extract_source_data_ids_from_upstream_artifacts(tmp_path: Path) -> None:
-    """Upstream task IDs are recovered from each result's _artifacts.base_dir
-    (the producer's output dir), since the payload carries no ID itself."""
+def test_extract_source_data_ids_from_upstream_artifacts() -> None:
+    """Upstream task IDs are the producers each result's _artifacts names."""
     mixin = _Mixin()
     upstream_a = BaseExecutorResult.model_validate(
-        {"_artifacts": {"base_dir": (tmp_path / "results" / "tsk-up-a").as_posix()}}
+        {"_artifacts": {"task_id": "tsk-up-a"}}
     )
     upstream_b = BaseExecutorResult.model_validate(
-        {"_artifacts": {"base_dir": (tmp_path / "results" / "tsk-up-b").as_posix()}}
+        {"_artifacts": {"task_id": "tsk-up-b"}}
     )
     no_ctx = BaseExecutorResult()
     spec = cast(
@@ -162,42 +162,45 @@ def test_extract_source_data_ids_from_upstream_artifacts(tmp_path: Path) -> None
 
 
 def test_collect_prompts_resolves_grouped_image_artifact_refs_after_flatten(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    mixin = _Mixin()
-    upstream_dir = tmp_path / "upstream-task"
-    artifacts_dir = upstream_dir / "artifacts" / "images"
-    artifacts_dir.mkdir(parents=True)
-    for name, color in (("a.png", "red"), ("b.png", "green"), ("c.png", "blue")):
-        Image.new("RGB", (2, 2), color=color).save(artifacts_dir / name)
+    def _no_http(*_: Any, **__: Any) -> None:
+        raise AssertionError("a hydrated artifact ref is read from disk")
 
+    monkeypatch.setattr(artifacts.requests, "get", _no_http)
     result = BaseExecutorResult.model_validate(
         {
             "images": [
                 [{"path": "images/a.png"}, {"path": "images/b.png"}],
                 [{"path": "images/c.png"}],
             ],
-            "_artifacts": {"base_dir": upstream_dir.as_posix()},
+            "_artifacts": {"task_id": "tsk-up"},
         }
     )
-    spec = cast(
-        Any,
-        SimpleNamespace(
-            data={"type": "list", "expr": "vision.images"},
-            inference={},
-            upstreamResults={"vision": result},
-        ),
+    spec = InferenceSpecStrict.model_validate(
+        {
+            "taskType": "inference",
+            "model": {
+                "source": {"identifier": "vlm"},
+                "transformers": {"mode": "visual-embedding"},
+            },
+            "data": {"type": "list", "expr": "vision.images"},
+            "_upstreamResults": {"vision": result},
+        }
     )
+    colors = {"a.png": "red", "b.png": "green", "c.png": "blue"}
+    hydrated: dict[tuple[str, str], str] = {}
+    for name, color in colors.items():
+        (local := tmp_path / name).write_bytes(_png_bytes(color))
+        hydrated[("tsk-up", f"images/{name}")] = local.as_posix()
 
-    entry = mixin._collect_prompts_for_spec(spec, "tsk-vision", fetch_images=True)
+    assert artifacts.data_artifact_refs(spec) == list(hydrated)
+    spec.record_hydrated_artifacts(hydrated)
+    entry = _Mixin()._collect_prompts_for_spec(spec, "tsk-vision", fetch_images=True)
 
     assert entry.image_group_sizes == [2, 1]
-    assert len(entry.images) == 3
-    assert all(image is not None for image in entry.images)
-    assert [image.size for image in entry.images if image is not None] == [
-        (2, 2),
-        (2, 2),
-        (2, 2),
+    assert [image.getpixel((0, 0)) for image in entry.images if image] == [
+        Image.new("RGB", (1, 1), color).getpixel((0, 0)) for color in colors.values()
     ]
 
 

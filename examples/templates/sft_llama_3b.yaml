@@ -66,9 +66,3 @@ spec:
       bf16:
         enabled: true
       wall_clock_breakdown: false
-
-  output:
-    destination:
-      type: local
-    artifacts:
-      - results.json

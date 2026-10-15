@@ -13,9 +13,16 @@ from server.registries.worker import WorkerRegistry
 from server.task.models import TaskRecord, TaskStatus
 from server.task.parser import parse_workflow
 from server.task.runtime import TaskRuntime
-from shared.content import reference_for
+from shared.content import TREE_MEDIA_TYPE, reference_for
 from shared.schemas.result import ResultEnvelope
 from shared.tasks import TaskEnvelopeTemplate, TaskType
+from shared.tasks.artifact_binding import (
+    ArchiveFacts,
+    ArtifactBinding,
+    ArtifactInputs,
+    ArtifactKind,
+    final_set,
+)
 from shared.tasks.result_binding import ResultBinding
 from shared.tasks.specs import SSHSpecStrict
 
@@ -30,6 +37,10 @@ class _DummyRuntime:
         self.tasks = tasks
         self._depends_on = depends_on or {}
         self._results = results or {}
+        self.artifacts: dict[str, dict[tuple[str, str], ArtifactBinding]] = {}
+
+    def final_artifacts(self, task_id: str) -> dict[tuple[str, str], ArtifactBinding]:
+        return final_set(self.artifacts.get(task_id) or {})
 
     def read_result(self, task_id: str) -> ResultEnvelope | None:
         envelope = self._results.get(task_id)
@@ -142,7 +153,7 @@ def test_dispatcher_resolves_ssh_input_stage_names_from_local_stage_names() -> N
     context = dispatcher._build_stage_context(current)
     dispatcher._validate_ssh_inputs(current, spec, context)
     _, upstream_results = dispatcher._resolve_stage_references(
-        current.task_id, current.task, context
+        current.task_id, current.task, context, None, ArtifactInputs("dsp-1")
     )
 
     assert upstream_results is not None
@@ -330,69 +341,69 @@ def test_upstream_bindings_exclude_unrelated_completed_stages(
     assert set(upstream_results) == {"preprocess"}
 
 
-def test_stage_reference_uses_payload_root_for_local_and_http_results(
-    tmp_path: Path,
-) -> None:
-    local_dir = tmp_path / "task-local"
-    http_dir = tmp_path / "task-http"
+def test_stage_reference_renders_the_producers_published_artifact() -> None:
+    tree = ArtifactBinding(
+        name="final_lora",
+        kind=ArtifactKind.TREE,
+        reference=reference_for("org", b"tree", media_type=TREE_MEDIA_TYPE),
+        size_bytes=4,
+    )
+    archive = ArtifactBinding(
+        name="final_lora.tar.gz",
+        kind=ArtifactKind.ARCHIVE,
+        reference=tree.reference,
+        size_bytes=30,
+        of="final_lora",
+        archive=ArchiveFacts(
+            sha256="ab" * 32, crc32=1, size_bytes=30, top="final_lora"
+        ),
+    )
+    archived = {"final_lora_archive": {"path": "final_lora.tar.gz"}}
     results: dict[str, dict[str, Any]] = {
-        "task-local": {
-            "task_id": "task-local",
-            "result": {
-                "final_lora_archive": {"path": "final_lora.tar.gz"},
-                "_artifacts": {"base_dir": local_dir.as_posix(), "base_url": None},
-            },
+        "task-new": {
+            "task_id": "task-new",
+            "result": {**archived, "_artifacts": {"task_id": "task-new"}},
         },
-        "task-http": {
-            "task_id": "task-http",
-            "worker_id": "worker-1",
-            "metadata": None,
-            "received_at": "2026-05-10T00:00:00+00:00",
+        "task-old": {
+            "task_id": "task-old",
             "result": {
-                "final_lora_archive": {"path": "final_lora.tar.gz"},
+                **archived,
                 "_artifacts": {
-                    "base_dir": http_dir.as_posix(),
+                    "base_dir": "/results/task-old",
                     "base_url": "http://flowmesh.example",
                 },
             },
         },
     }
-
-    local_record = TaskRecord(
-        task_id="task-local",
-        workflow_id="wf-1",
-        owner_id="owner",
-        raw_yaml="raw",
-        task=_task_template(TaskType.ECHO),
-        status=TaskStatus.DONE,
-        task_type="echo",
-        local_name="local",
-    )
-    http_record = TaskRecord(
-        task_id="task-http",
-        workflow_id="wf-1",
-        owner_id="owner",
-        raw_yaml="raw",
-        task=_task_template(TaskType.ECHO),
-        status=TaskStatus.DONE,
-        task_type="echo",
-        local_name="http",
-    )
+    records = {
+        name: TaskRecord(
+            task_id=f"task-{name}",
+            workflow_id="wf-1",
+            owner_id="owner",
+            raw_yaml="raw",
+            task=_task_template(TaskType.ECHO),
+            status=TaskStatus.DONE,
+            task_type="echo",
+            local_name=name,
+        )
+        for name in ("new", "old")
+    }
+    runtime = _DummyRuntime({}, results=results)
+    runtime.artifacts["task-new"] = {tree.key: tree, archive.key: archive}
     dispatcher = Dispatcher(
-        runtime=cast(TaskRuntime, _DummyRuntime({}, results=results)),
+        runtime=cast(TaskRuntime, runtime),
         worker_registry=cast(WorkerRegistry, object()),
         logger=logging.getLogger("test-stage-reference-root"),
     )
+    inputs = ArtifactInputs("dsp-1")
 
-    local_value = dispatcher._resolve_reference(
-        "local.final_lora_archive", {"local": local_record}
+    rendered = dispatcher._resolve_reference(
+        "new.final_lora_archive", {"new": records["new"]}, inputs
     )
-    http_value = dispatcher._resolve_reference(
-        "http.final_lora_archive", {"http": http_record}
+    pre_upgrade = dispatcher._resolve_reference(
+        "old.final_lora_archive", {"old": records["old"]}, inputs
     )
 
-    assert local_value == (local_dir / "artifacts" / "final_lora.tar.gz").as_posix()
-    assert (
-        http_value
-        == "http://flowmesh.example/api/v1/results/task-http/files/final_lora.tar.gz"
-    )
+    assert rendered == "flowmesh-artifact:[dsp-1.0]"
+    assert inputs.bindings == {"dsp-1.0": tree}
+    assert pre_upgrade == {"path": "final_lora.tar.gz"}

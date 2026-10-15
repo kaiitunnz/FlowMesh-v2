@@ -84,7 +84,7 @@ from shared.tasks.task_type import TaskType
 from .base_executor import ExecutionError, Executor, ExecutorTask
 from .mixins.data import InferenceEntry
 from .mixins.inference import InferenceMixin, PreparedInferenceEntry, produced_items
-from .utils.checkpoints import resolve_checkpoint_load
+from .utils.checkpoints import load_identity, resolve_checkpoint_load
 from .utils.collective import loopback_collective_env
 
 logger = logging.getLogger(__name__)
@@ -280,10 +280,10 @@ Summary:"""
         checkpoint_cfg: dict[str, Any],
         spec: InferenceSpecStrict,
     ) -> dict[str, Any]:
-        return {
-            **self._base_reuse_key(spec),
-            "checkpoint": copy.deepcopy(checkpoint_cfg),
-        }
+        checkpoint = copy.deepcopy(checkpoint_cfg)
+        if isinstance(url := checkpoint.get("url"), str):
+            checkpoint["url"] = load_identity(url)
+        return {**self._base_reuse_key(spec), "checkpoint": checkpoint}
 
     def _extra_llm_kwargs(self, spec: InferenceSpecStrict) -> dict[str, Any]:
         return {}
@@ -365,36 +365,16 @@ Summary:"""
 
         local_checkpoint_dir: Path | None = None
         if checkpoint_cfg:
-            load_cfg_local = dict(checkpoint_cfg)
-            load_cfg_local["_logger"] = logger
-            cfg_type = str(load_cfg_local.get("type", "http")).lower()
-            if cfg_type == "http" and not (
-                load_cfg_local.get("path")
-                or load_cfg_local.get("taskId")
-                or load_cfg_local.get("task_id")
-            ):
-                local_checkpoint_dir = None
-            else:
-                if cfg_type == "http":
-                    load_cfg_local["type"] = "local"
-                try:
-                    path = resolve_checkpoint_load(
-                        load_cfg_local, Path(tempfile.gettempdir()), logger=logger
-                    )
-                    candidate_path = Path(path) if path else None
-                    if (
-                        candidate_path
-                        and candidate_path.exists()
-                        and candidate_path.is_dir()
-                    ):
-                        local_checkpoint_dir = candidate_path
-                        logger.info(
-                            "Resolved model checkpoint locally: %s",
-                            local_checkpoint_dir,
-                        )
-                except Exception as exc:
-                    logger.debug("Local checkpoint resolution failed: %s", exc)
-                    local_checkpoint_dir = None
+            local_checkpoint_dir = resolve_checkpoint_load(
+                {**checkpoint_cfg, "_logger": logger},
+                Path(tempfile.gettempdir()),
+                logger=logger,
+            )
+            if not local_checkpoint_dir.is_dir():
+                raise ExecutionError(
+                    f"checkpoint.load resolved to {local_checkpoint_dir}, which is not "
+                    "a model directory"
+                )
 
         if local_checkpoint_dir is not None:
             logger.info(
@@ -966,7 +946,7 @@ Summary:"""
             task_id, task.workflow_id, out_dir, owner_id=task.owner_id
         ):
             result = self._run_inner(task, out_dir)
-        self._upload_outputs(task, result, out_dir)
+        self._upload_traces(task, result, out_dir)
         return result
 
     @staticmethod

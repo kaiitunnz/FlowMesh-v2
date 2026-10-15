@@ -240,6 +240,7 @@ if IS_ROOT_NODE:
         control=CONTROL_TRACER,
         tracer=SERVER_TRACER,
         telemetry=config.telemetry,
+        meter=SERVER_METER,
         content_scope_authority=FINALIZATION_INDEX.assign_scope,
         n8n=config.n8n,
     )
@@ -386,6 +387,13 @@ if IS_ROOT_NODE:
         logger=logger,
     )
 
+    CONTENT_HOLDERS = (
+        ContentHolderDirectory(
+            REDIS_CLIENT, record_ttl_sec=config.content_store.holder_record_ttl_sec
+        )
+        if config.content_store.hydration_enabled and WORKER_REGISTRY is not None
+        else None
+    )
     DISPATCHER = create_dispatcher(
         config.dispatch,
         RUNTIME,
@@ -396,6 +404,7 @@ if IS_ROOT_NODE:
         resident_admission_slots=config.orchestration.resident.admission_slots,
         content_access=CONTENT_ACCESS,
         control=CONTROL_TRACER,
+        content_holders=CONTENT_HOLDERS,
     )
 
     _pf_cfg = config.port_forward
@@ -433,11 +442,9 @@ if IS_ROOT_NODE:
         )
 
     CONTENT_AUTHORITY: ContentHydrationAuthority | None = None
-    if config.content_store.hydration_enabled and WORKER_REGISTRY is not None:
+    if CONTENT_HOLDERS is not None and WORKER_REGISTRY is not None:
         CONTENT_AUTHORITY = ContentHydrationAuthority(
-            ContentHolderDirectory(
-                REDIS_CLIENT, record_ttl_sec=config.content_store.holder_record_ttl_sec
-            ),
+            CONTENT_HOLDERS,
             WORKER_REGISTRY,
             authorizes=RUNTIME.content_binding_authorizes,
             grant_ttl_sec=config.content_store.grant_ttl_sec,

@@ -15,7 +15,9 @@ from server.dispatcher.base import Dispatcher
 from server.registries.worker import WorkerRegistry
 from server.task.runtime import ScopedInput
 from server.task.v2.compiler.diagnostics import CompileError
+from shared.content import reference_for
 from shared.schemas.result import RoutedValue
+from shared.tasks.artifact_binding import ArtifactBinding, ArtifactInputs, ArtifactKind
 from shared.tasks.worker_message import WorkerTaskMessage
 from shared.utils.json import normalize_numbers
 from tests.server.orchestration.control_flow import compile_text
@@ -23,7 +25,7 @@ from tests.server.task.test_runtime_control_flow import _TS, _Run, _workflow
 from tests.worker.factories import FakeContentPlane
 from worker.content.inputs import TaskInputHydrator
 from worker.executors.mixins.data import DataMixin
-from worker.executors.utils.artifacts import maybe_resolve_artifact_ref
+from worker.executors.utils.artifacts import artifact_ref_source
 from worker.executors.utils.expressions import project_expression
 
 _ECHO = "{taskType: echo, data: {type: list, items: [x]}}"
@@ -41,8 +43,13 @@ def _dispatch(run: _Run, name: str) -> tuple[dict[str, Any], WorkerTaskMessage]:
         worker_registry=cast(WorkerRegistry, object()),
         logger=logging.getLogger("scoped-inputs"),
     )
+    inputs = ArtifactInputs("dsp-1")
     rendered, upstream = dispatcher._resolve_stage_references(
-        task_id, record.task, {}, run.runtime.scoped_inputs(task_id)
+        task_id,
+        record.task,
+        {},
+        run.runtime.scoped_inputs(task_id),
+        inputs,
     )
     message = WorkerTaskMessage(
         task_id=task_id,
@@ -53,6 +60,9 @@ def _dispatch(run: _Run, name: str) -> tuple[dict[str, Any], WorkerTaskMessage]:
         assigned_worker="wkr-1",
         dispatched_at=_TS,
         upstream_results=upstream,
+        artifact_inputs=inputs.bindings or None,
+        upstream_artifacts=dispatcher._upstream_artifacts((upstream or {}).values())
+        or None,
     )
     wire = message.model_dump(mode="json", exclude_none=True, by_alias=True)
     delivered = WorkerTaskMessage.model_validate(normalize_numbers(wire))
@@ -526,10 +536,14 @@ async def test_a_root_task_fed_by_tasks_reads_the_same_through_records_or_edges(
         logger=logging.getLogger("scoped-inputs"),
     )
     by_records, record_bindings = dispatcher._resolve_stage_references(
-        task_id, record.task, dispatcher._build_stage_context(record)
+        task_id,
+        record.task,
+        dispatcher._build_stage_context(record),
+        None,
+        ArtifactInputs("dsp-1"),
     )
     by_edges, edge_bindings = dispatcher._resolve_stage_references(
-        task_id, record.task, {}, through_edges
+        task_id, record.task, {}, through_edges, ArtifactInputs("dsp-1")
     )
     assert by_edges == by_records
     assert by_records.spec.model_dump()["data"]["items"] == [
@@ -570,6 +584,7 @@ async def test_a_root_task_reads_a_named_input_of_a_task() -> None:
         record.task,
         dispatcher._build_stage_context(record),
         run.runtime.scoped_inputs(task_id),
+        ArtifactInputs("dsp-1"),
     )
     assert rendered.spec.model_dump()["data"]["items"] == ["v", "v"]
     assert upstream is not None and upstream["src"].path == ("inner",)
@@ -592,11 +607,8 @@ async def test_the_refine_loop_example_reads_its_exit_value_at_the_root() -> Non
     ]
 
 
-_ARTIFACTS = {"base_dir": "/results/tsk-producer", "base_url": "http://fm.example"}
-
-
 @pytest.mark.anyio
-async def test_an_artifact_ref_in_a_part_of_a_result_resolves_alike_on_both_sides() -> (
+async def test_an_artifact_ref_in_a_part_of_a_result_names_one_published_artifact() -> (
     None
 ):
     run = await _Run().start(_workflow(f"""
@@ -608,16 +620,36 @@ async def test_an_artifact_ref_in_a_part_of_a_result_resolves_alike_on_both_side
           taskType: echo
           data: {{type: list, items: ["${{img.image}}"]}}
 """))
-    run.run("gen", {"inner": {"image": {"path": "img.png"}}, "_artifacts": _ARTIFACTS})
+    producer = next(t for t in run.ready if run.name(t) == "gen")
+    record = run.runtime.get_record(producer)
+    assert record is not None
+    image = ArtifactBinding(
+        name="img.png",
+        kind=ArtifactKind.FILE,
+        reference=reference_for(record.org_id, b"png"),
+        size_bytes=3,
+    )
+    run.run(
+        "gen",
+        {"inner": {"image": {"path": "img.png"}}, "_artifacts": {"task_id": producer}},
+        [image],
+    )
     spec, message = _dispatch(run, "use")
     context = message.task.spec.upstreamResults or {}
 
-    worker = maybe_resolve_artifact_ref(
+    worker = artifact_ref_source(
         project_expression("img.image", context), context, "img"
     )
-    assert spec["data"]["items"] == [worker]
-    assert worker == "http://fm.example/api/v1/results/tsk-producer/files/img.png"
-    assert DataMixin()._extract_source_data_ids(message.task.spec) == ["tsk-producer"]
+    key = "dsp-1.0"
+    assert spec["data"]["items"] == [f"flowmesh-artifact:[{key}]"]
+    assert message.artifact_inputs is not None
+    assert message.artifact_inputs[key].reference == image.reference
+    assert worker == (producer, "img.png")
+    assert message.upstream_artifacts is not None
+    assert [b.reference for b in message.upstream_artifacts[producer]] == [
+        image.reference
+    ]
+    assert DataMixin()._extract_source_data_ids(message.task.spec) == [producer]
 
 
 @pytest.mark.anyio

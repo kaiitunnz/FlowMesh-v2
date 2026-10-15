@@ -6,6 +6,7 @@ from shared.content import ContentStoreError, FabricObjectStore
 from shared.harness import DeliveredOutcome, HarnessResult
 from shared.private_state import PrivateStateSealReport
 from shared.schemas.result import BaseExecutorResult
+from shared.tasks.components.exports import ExportFailure
 from shared.tools.facade import FacadeTurnGroup
 
 from .base_executor import ExecutionError
@@ -21,13 +22,16 @@ class EpisodeStepResult(BaseExecutorResult):
     ``value`` is the episode's declared output on a completion step, readable over REST.
     ``facade_group`` is a turn group a worker facade captured on this step, carried with
     the completion so control routes it ordered-with the turn. ``private_state`` reports
-    the generation this holder sealed at the step's quiescence fence.
+    the generation this holder sealed at the step's quiescence fence. ``export_failure``
+    says why a completion's declared exports could not be copied out, which fails the
+    task only if the completion ends it.
     """
 
     harness_result: HarnessResult
     value: str | None = None
     facade_group: FacadeTurnGroup | None = None
     private_state: PrivateStateSealReport | None = None
+    export_failure: ExportFailure | None = None
 
 
 def discard_step_captures(

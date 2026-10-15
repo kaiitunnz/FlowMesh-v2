@@ -39,19 +39,11 @@ class WorkerConfig(BaseModel):
     log_level: str = env.LOG_LEVEL
     """Logging level for the worker"""
     flowmesh_url: str = env.FLOWMESH_BASE_URL
-    """FlowMesh HTTP base URL required to build artifact download links"""
+    """FlowMesh HTTP base URL workers upload traces and resolve finalizations through"""
     worker_cost_per_hour: float | None = None
     """Hourly cost in USD"""
-    model_archive_use_pigz: bool | None = None
-    """Whether to use pigz for model archive compression"""
-    model_archive_compression_level: int | None = None
-    """Gzip compression level (0-9)"""
-    model_archive_pigz_threads: int | None = None
-    """Number of threads for pigz compression"""
-    model_archive_pigz_bin: str | None = None
-    """Path to pigz binary"""
-    model_archive_tar_bin: str | None = None
-    """Path to tar binary"""
+    model_cleanup_after_upload: bool = env.MODEL_CLEANUP_AFTER_UPLOAD
+    """Whether a worker deletes a task's local artifacts once they are published"""
     network_bandwidth: float | None = None
     """Bandwidth in bytes per second to throttle HTTP uploads"""
     hf_token: SecretStr | None = parse_secret_env("HF_TOKEN")
@@ -62,9 +54,6 @@ class WorkerConfig(BaseModel):
     """Comma-separated list of models to pre-download during worker startup"""
     nebula_api_token: SecretStr | None = parse_secret_env("NEBULA_API_TOKEN")
     """Nebula API token"""
-    upload_results: bool = env.WORKER_UPLOAD_RESULTS
-    """Whether to always upload results to the server if spec.output.destination
-    is unspecified."""
     executor_idle_cleanup_sec: float = env.WORKER_EXECUTOR_IDLE_CLEANUP_SEC
     """Seconds an executor may sit idle before the worker unloads it"""
     foreign_gpu_gate: bool = env.WORKER_FOREIGN_GPU_GATE
@@ -399,17 +388,10 @@ class WorkerAdapter(ABC):
             "LOG_LEVEL": config.log_level,
             "WORKER_COST_PER_HOUR": to_env_str(config.worker_cost_per_hour),
             "FLOWMESH_BASE_URL": config.flowmesh_url,
-            "MODEL_ARCHIVE_USE_PIGZ": to_env_str(config.model_archive_use_pigz),
-            "MODEL_ARCHIVE_COMPRESSION_LEVEL": to_env_str(
-                config.model_archive_compression_level
-            ),
-            "MODEL_ARCHIVE_PIGZ_THREADS": to_env_str(config.model_archive_pigz_threads),
-            "MODEL_ARCHIVE_PIGZ_BIN": to_env_str(config.model_archive_pigz_bin),
-            "MODEL_ARCHIVE_TAR_BIN": to_env_str(config.model_archive_tar_bin),
+            "MODEL_CLEANUP_AFTER_UPLOAD": to_env_str(config.model_cleanup_after_upload),
             "WORKER_NETWORK_BANDWIDTH_BYTES_PER_SEC": to_env_str(
                 config.network_bandwidth
             ),
-            "WORKER_UPLOAD_RESULTS": to_env_str(config.upload_results),
             "WORKER_EXECUTOR_IDLE_CLEANUP_SEC": to_env_str(
                 config.executor_idle_cleanup_sec
             ),

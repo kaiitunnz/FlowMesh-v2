@@ -27,10 +27,3 @@ spec:
     sample_rate: 24000
     speaker: Vivian
     language: Auto
-
-  output:
-    destination:
-      type: http
-    artifacts:
-      - results.json
-      - artifacts/

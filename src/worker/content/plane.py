@@ -196,6 +196,31 @@ class WorkerContentPlane:
             keep=lambda lane, _: lane.keep_file(reference, dest),
         )
 
+    def materialize_to(
+        self, task_id: str, reference: ContentReference, dest: Path
+    ) -> None:
+        """Put the object's verified bytes at ``dest`` for a reader to load.
+
+        Where this worker keeps a copy, ``dest`` links to it, so what a task reads
+        counts against the cache's own bounds.
+        """
+        lane = self._lane
+        if lane is None:
+            self.hydrate_to(task_id, reference, dest)
+            return
+
+        def link() -> None:
+            lane.link_local(reference, dest)
+
+        if not isinstance(self._attempt(reference, link), _Missed):
+            return
+        staged = dest.with_name(f"{dest.name}.fetching")
+        self.hydrate_to(task_id, reference, staged)
+        if not isinstance(self._attempt(reference, link), _Missed):
+            staged.unlink(missing_ok=True)
+            return
+        staged.rename(dest)
+
     def open(
         self,
         task_id: str,

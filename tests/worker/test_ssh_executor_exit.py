@@ -153,7 +153,6 @@ def _run(
         ),
         patch.object(DockerSessionBackend, "_cleanup_mount_plan") as cleanup,
         patch.object(ex, "emit_update"),
-        patch.object(ssh_module, "maybe_upload_artifacts"),
     ):
         try:
             return ex.run(_task(max_bytes, ttl_sec), tmp_path / "out")
