@@ -59,7 +59,8 @@ async with AsyncFlowMesh(base_url="...", api_key="...") as client:
   published, `client.results.download_file(task_id, path, output_path)` for one
   artifact, and `client.results.get_bundle(task_id, output_path, include=["all"])`
   for the tar.gz. Each artifact read takes `revision=` (`final` by default, or a
-  checkpoint's `step-<n>`).
+  checkpoint's `step-<n>`). A listed artifact carries its `durability`; reading one
+  still uploading raises `ArtifactPendingError`, and a lost one `ArtifactLostError`.
 - **Fetch and analyze traces** — `client.traces.fetch(wf_id, "spans")`
   yields JSONL rows; `client.traces.analyze(wf_id)` returns a profile
   summary.

@@ -6,7 +6,8 @@ truth is `src/server/routers/v1/*.py`.
 Workflow and task statuses (used in payloads and filters):
 `PENDING`, `DISPATCHED`, `FAILED`, `CANCELLED`, `DONE`. A workflow that failed
 outside any of its tasks, as a loop past its iteration budget does, carries the
-typed reason as its `failure`. Worker statuses: `STARTING`, `IDLE`, `BUSY`,
+typed reason as its `failure`. A workflow stays open while its tasks' artifacts upload,
+counting the tasks still uploading as `pending_artifact_uploads`. Worker statuses: `STARTING`, `IDLE`, `BUSY`,
 `STOPPING`, `STOPPED`.
 
 ## Authentication
@@ -72,6 +73,15 @@ scope or key, fetched by name alone. Errors carry `detail.code`:
 A task publishes its artifacts as the `final` revision when it succeeds, and a training
 run publishes each checkpoint it saves as `step-<n>`. A download answers one `Range`,
 conditioned by `If-Range`, with `206`, and answers a request naming several ranges whole.
+
+A task is `DONE` before its `final` artifacts finish uploading, so the listing reports
+each artifact's `durability` (`pending`, `durable` or `lost`) and, for a lost one, its
+`durability_error`. Downloads and bundles answer with `detail.code`:
+
+| Status | `code` | Meaning |
+|--------|--------|---------|
+| 503 | `artifact_pending` | The artifact is still uploading; retry after `Retry-After`. |
+| 410 | `artifact_lost` | The artifact's producer was lost before it finished uploading. |
 
 ## Content
 
