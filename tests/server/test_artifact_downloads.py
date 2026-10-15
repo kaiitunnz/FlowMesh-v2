@@ -18,7 +18,11 @@ from fastapi import FastAPI, HTTPException, status
 
 from server.routers.v1 import results as results_router
 from server.task import artifact_reads
-from server.task.artifact_durability import ArtifactLoss, ArtifactUpload
+from server.task.artifact_durability import (
+    ArtifactLoss,
+    ArtifactUpload,
+    UploadStateUnavailable,
+)
 from server.task.results import ResultReader, ResultUnavailable, ResultUnreadable
 from shared.content import (
     ContentReference,
@@ -50,6 +54,7 @@ class _Runtime:
         self.bindings: dict[str, dict[tuple[str, str], ArtifactBinding]] = {}
         self.results: dict[str, bytes] = {}
         self.uploads: dict[str, ArtifactUpload] = {}
+        self.upload_error: Exception | None = None
 
     def artifact_bindings(
         self, task_id: str, revision: str | None = None
@@ -63,6 +68,8 @@ class _Runtime:
         }
 
     def artifact_upload_of(self, task_id: str) -> ArtifactUpload | None:
+        if self.upload_error is not None:
+            raise self.upload_error
         return self.uploads.get(task_id)
 
     def read_result_bytes(self, task_id: str) -> bytes | None:
@@ -703,6 +710,8 @@ def test_the_download_routes_declare_their_binary_responses() -> None:
     assert "Repr-Digest" in files["responses"]["200"]["headers"]
     assert "Content-Range" in files["responses"]["206"]["headers"]
     assert "Retry-After" in files["responses"]["503"]["headers"]
+    listing = paths["/results/{task_id}/artifacts"]["get"]
+    assert "Retry-After" in listing["responses"]["503"]["headers"]
     assert bundle["responses"]["200"]["content"] == {
         "application/gzip": {"schema": binary}
     }
@@ -777,9 +786,39 @@ async def test_a_pending_artifact_answers_503_and_a_lost_one_410(
         assert raised.value.status_code == status.HTTP_410_GONE
         assert _code(raised.value) == "artifact_lost"
     assert (await serve(await _download(runtime, "notes.txt"))).status == 200
-    with pytest.raises(HTTPException) as raised:
-        await _download(runtime, "final_model/absent.json")
-    assert raised.value.status_code == status.HTTP_410_GONE
+
+
+@pytest.mark.anyio
+async def test_an_unknown_path_under_a_pending_or_lost_artifact_is_not_found(
+    runtime: _Runtime, published: dict[str, ArtifactBinding]
+) -> None:
+    for lost in (None, {"final\0final_model": ArtifactLoss(message="gone")}):
+        _owed(runtime, lost)
+        for name in ("final_model/absent.json", "notes.txt/inner"):
+            with pytest.raises(HTTPException) as raised:
+                await _download(runtime, name)
+            assert raised.value.status_code == status.HTTP_404_NOT_FOUND
+
+
+@pytest.mark.anyio
+async def test_an_unreadable_upload_state_answers_503_never_durable(
+    runtime: _Runtime, published: dict[str, ArtifactBinding]
+) -> None:
+    runtime.upload_error = UploadStateUnavailable("control store down")
+
+    for request in (
+        _listed(runtime),
+        _download(runtime, "notes.txt"),
+        _bundle(runtime, ["artifacts"]),
+    ):
+        with pytest.raises(HTTPException) as raised:
+            await request
+        assert raised.value.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+        assert "control store" in str(raised.value.detail)
+    step = await _download(
+        runtime, "checkpoints/checkpoint-2/trainer_state.json", "step-2"
+    )
+    assert (await serve(step)).status == 200
 
 
 @pytest.mark.anyio

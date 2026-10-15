@@ -75,6 +75,7 @@ from ...task.artifact_durability import (
     ARTIFACT_PENDING,
     ArtifactLoss,
     ArtifactUpload,
+    UploadStateUnavailable,
 )
 from ...task.artifact_reads import (
     ArtifactDownload,
@@ -168,8 +169,8 @@ _DOWNLOAD_RESPONSES: dict[int | str, dict[str, Any]] = {
     },
     410: {"description": "The artifact was lost before its upload finished."},
     503: {
-        "description": "The content store is unreachable, or the artifact's upload "
-        "to it is still in progress.",
+        "description": "The content or control store is unreachable, or the artifact "
+        "is still uploading to the content store.",
         "headers": _RETRY_AFTER,
     },
 }
@@ -180,8 +181,8 @@ _BUNDLE_RESPONSES: dict[int | str, dict[str, Any]] = {
     },
     410: {"description": "An artifact it bundles was lost before its upload finished."},
     503: {
-        "description": "The content store is unreachable, an artifact it bundles is "
-        "still uploading to it, or too many bundles stream.",
+        "description": "The content or control store is unreachable, an artifact it "
+        "bundles is still uploading to the content store, or too many bundles stream.",
         "headers": _RETRY_AFTER,
     },
 }
@@ -192,6 +193,12 @@ _BUNDLE_RESPONSES: dict[int | str, dict[str, Any]] = {
     summary="List a result's artifacts",
     description="List the artifacts a task published, optionally at one revision.",
     response_description="Published artifacts",
+    responses={
+        503: {
+            "description": "The control store is unreachable.",
+            "headers": _RETRY_AFTER,
+        }
+    },
 )
 async def list_result_artifacts(
     task_id: str,
@@ -210,7 +217,11 @@ async def list_result_artifacts(
     if revision is not None:
         _check_revision(revision)
     bindings = await _artifact_bindings(runtime, task_id, revision)
-    upload = await _artifact_upload(runtime, task_id)
+    upload = (
+        await _artifact_upload(runtime, task_id)
+        if any(rev == FINAL_REVISION for rev, _ in bindings)
+        else None
+    )
     return PublishedArtifactList(
         task_id=task_id,
         artifacts=[
@@ -252,8 +263,6 @@ async def download_result_file(
             await _read_result_bytes(runtime, task_id), media_type=RESULT_MEDIA_TYPE
         )
     bindings = await _artifact_bindings(runtime, task_id, revision)
-    if (found := resolve_artifact_path(bindings, revision, filename)) is not None:
-        _check_available([found[0]], await _artifact_upload(runtime, task_id), filename)
     try:
         download = await asyncio.to_thread(
             resolve_download, runtime.result_reader, bindings, revision, filename
@@ -269,6 +278,13 @@ async def download_result_file(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to read artifact: {exc}",
         ) from exc
+    found = resolve_artifact_path(bindings, revision, filename)
+    if found is not None and revision == FINAL_REVISION:
+        _check_available(
+            [found[0]],
+            await _artifact_upload(runtime, task_id),
+            f"{filename} at {revision}",
+        )
     return ArtifactResponse(download)
 
 
@@ -346,11 +362,11 @@ async def download_result_bundle(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="result bundle not found"
         )
-    if "artifacts" in sections:
+    if "artifacts" in sections and revision == FINAL_REVISION:
         _check_available(
             [binding for (rev, _), binding in bindings.items() if rev == revision],
             await _artifact_upload(runtime, task_id),
-            f"the artifacts at {revision}",
+            f"an artifact at {revision}",
         )
     reader = runtime.result_reader
 
@@ -567,15 +583,19 @@ def _listing_order(item: tuple[tuple[str, str], ArtifactBinding]) -> tuple[Any, 
 async def _artifact_upload(runtime: TaskRuntime, task_id: str) -> ArtifactUpload | None:
     try:
         return await asyncio.to_thread(runtime.artifact_upload_of, task_id)
-    except ResultUnavailable as exc:
-        raise _store_unavailable(exc) from exc
+    except UploadStateUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"the control store is unreachable: {exc}",
+            headers={"Retry-After": str(_RETRY_AFTER_SEC)},
+        ) from exc
 
 
 def _durability(
     binding: ArtifactBinding, upload: ArtifactUpload | None
 ) -> tuple[ArtifactDurability, ArtifactLoss | None]:
-    """Where an artifact's bytes are: a ``final`` artifact stands with its task's
-    upload, and anything else was stored before it was published."""
+    """Return where an artifact's bytes are: a ``final`` artifact stands with its
+    task's upload, and anything else was stored before it was published."""
     if upload is None or binding.revision != FINAL_REVISION:
         return ArtifactDurability.DURABLE, None
     return upload.durability(binding)
@@ -601,8 +621,7 @@ def _check_available(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={
                 "code": ARTIFACT_PENDING,
-                "message": f"{what} is not in the shared store yet; its upload "
-                "is still in progress",
+                "message": f"{what} is uploading to the shared store",
             },
             headers={"Retry-After": str(_RETRY_AFTER_SEC)},
         )

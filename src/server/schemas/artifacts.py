@@ -5,7 +5,7 @@ from shared.tasks.artifact_upload import ArtifactDurability
 
 
 class DurabilityError(BaseModel):
-    code: str = Field(description="Why the artifact is not durable: artifact_lost.")
+    code: str = Field(description="Why the artifact is not durable.")
     message: str = Field(description="What was lost, and why.")
 
 
@@ -28,8 +28,7 @@ class PublishedArtifact(BaseModel):
     )
     durability: ArtifactDurability = Field(
         default=ArtifactDurability.DURABLE,
-        description="pending while its upload to the shared store is still owed, "
-        "durable once stored, lost when its producer left before storing it.",
+        description="Whether the artifact is still uploading, stored, or lost.",
     )
     durability_error: DurabilityError | None = Field(
         default=None, description="Why a lost artifact was lost."
