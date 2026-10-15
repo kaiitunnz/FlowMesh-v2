@@ -512,3 +512,22 @@ def test_an_owner_lost_in_service_has_its_upload_settled_without_being_asked() -
     upload = setup.record(setup.train).artifact_upload
     assert upload is not None and upload.state is ArtifactDurability.LOST
     setup.runtime.shutdown()
+
+
+def test_a_task_loading_a_lost_artifact_is_refused_at_dispatch() -> None:
+    setup = _dispatched()
+    stored = setup.file(b"metrics", "metrics.json", stored=True)
+    setup.succeed([setup.tree(stored=False), stored])
+    bindings = setup.record(setup.train).artifacts
+    tree, metrics = (
+        bindings[("final", "final_model")],
+        bindings[("final", "metrics.json")],
+    )
+    assert setup.runtime.lost_artifact_reads([tree]) is None
+
+    setup.runtime.artifact_owner_lost("wkr-1")
+    setup.runtime._reconciler.check(setup.train)
+
+    reason = setup.runtime.lost_artifact_reads([tree, metrics])
+    assert reason is not None and reason.startswith("artifact_lost")
+    assert setup.runtime.lost_artifact_reads([metrics]) is None

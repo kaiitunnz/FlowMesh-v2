@@ -888,6 +888,11 @@ class Dispatcher:
             self._runtime.release_merge(task_id)
             self.fail_task(task_id, str(exc), payload={"error": str(exc)})
             return True
+        if (lost := self._runtime.lost_artifact_reads(named)) is not None:
+            error = f"input_unreadable: {lost}"
+            self._runtime.release_merge(task_id)
+            self.fail_task(task_id, error, payload={"error": error})
+            return True
 
         # 7. Build WorkerTaskMessage
         agent_episode = self._runtime.agent_episode_dispatch(

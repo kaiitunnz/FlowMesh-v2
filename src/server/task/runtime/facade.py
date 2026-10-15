@@ -61,6 +61,7 @@ from shared.tasks.artifact_binding import (
 from shared.tasks.artifact_upload import (
     ARTIFACTS_PENDING,
     UPLOAD_SETTLED_FRAME_KIND,
+    ArtifactDurability,
     UploadDisposition,
     UploadReport,
     UploadSettled,
@@ -4068,6 +4069,25 @@ class TaskRuntime:
                 if self._pending_publisher_locked(binding)
             }
         return sorted(pending) or None
+
+    def lost_artifact_reads(self, bindings: Iterable[ArtifactBinding]) -> str | None:
+        """Why a task loading ``bindings`` cannot run, when an upload owed for one of
+        them settled with it lost."""
+        with self._lock:
+            failures = {
+                upload.failure(task_id)
+                for binding in bindings
+                for task_id in self._uploads.lost_for_dispatch_locked(
+                    binding.dispatch_id
+                )
+                if (record := self._tasks.get(task_id)) is not None
+                and (upload := record.artifact_upload) is not None
+                and (owned := record.artifacts.get((binding.revision, binding.name)))
+                is not None
+                and owned.reference.identity == binding.reference.identity
+                and upload.durability(binding)[0] is ArtifactDurability.LOST
+            }
+        return "; ".join(sorted(failures)) or None
 
     def _pending_publisher_locked(self, binding: ArtifactBinding) -> set[str]:
         """The task whose still-owed upload covers an accepted artifact, if one does."""

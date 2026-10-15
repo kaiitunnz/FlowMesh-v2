@@ -44,6 +44,8 @@ class ArtifactUploads:
         self._owners: dict[str, tuple[str, str, str]] = {}
         self._last_settled: dict[str, float] = {}
         self._retried: dict[str, float] = {}
+        self._lost_by_dispatch: dict[str, set[str]] = defaultdict(set)
+        self._lost_of: dict[str, str] = {}
 
     def track_locked(self, record: TaskRecord) -> None:
         """Index a record's upload as it now stands."""
@@ -63,8 +65,13 @@ class ArtifactUploads:
         elif upload.settled_ts is not None:
             previous = self._last_settled.get(record.workflow_id, 0.0)
             self._last_settled[record.workflow_id] = max(previous, upload.settled_ts)
+            if upload.lost:
+                self._lost_by_dispatch[upload.dispatch_id].add(task_id)
+                self._lost_of[task_id] = upload.dispatch_id
 
     def _untrack(self, task_id: str) -> None:
+        if (dispatch_id := self._lost_of.pop(task_id, None)) is not None:
+            _discard(self._lost_by_dispatch, dispatch_id, task_id)
         if (owner := self._owners.pop(task_id, None)) is not None:
             workflow_id, worker_id, dispatch_id = owner
             _discard(self._pending, workflow_id, task_id)
@@ -74,6 +81,10 @@ class ArtifactUploads:
     def owed_for_dispatch_locked(self, dispatch_id: str | None) -> set[str]:
         """The tasks whose upload a dispatch still owes."""
         return set(self._by_dispatch.get(dispatch_id or "", ()))
+
+    def lost_for_dispatch_locked(self, dispatch_id: str | None) -> set[str]:
+        """The tasks whose upload a dispatch owed settled with artifacts lost."""
+        return set(self._lost_by_dispatch.get(dispatch_id or "", ()))
 
     def pending_locked(self, workflow_id: str) -> int:
         """How many of a workflow's tasks still owe their upload."""
