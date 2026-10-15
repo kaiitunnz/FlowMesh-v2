@@ -1,6 +1,7 @@
 """What a worker tells control about its cache: its whole holding when it attaches or
 is asked, and each copy it keeps or drops, in numbered reports that follow the disk."""
 
+import os
 import threading
 import time
 from collections.abc import Callable
@@ -282,3 +283,32 @@ def test_the_last_note_about_a_copy_is_the_one_reported(
 
     (report,) = reports.reports
     assert (report.added, report.dropped) == (added, dropped)
+
+
+def test_evictions_running_together_free_only_the_budget_s_excess(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = WorkerContentCache(tmp_path / "content", max_bytes=10 * 100)
+    base = time.time() - 10_000
+    for index in range(20):
+        reference = cache.write("local", index.to_bytes(4, "big") + b"x" * 96)
+        path = cache._objects.object_path("local", reference.content_digest)
+        os.utime(path, (base + index, base + index))
+    both_walked = threading.Barrier(2)
+    remove_unused = cache._remove_unused
+    waited = threading.local()
+
+    def after_both_walks(entry: tuple[float, int, str, str]) -> bool:
+        if not getattr(waited, "done", False):
+            waited.done = True
+            both_walked.wait(5.0)
+        return remove_unused(entry)
+
+    monkeypatch.setattr(cache, "_remove_unused", after_both_walks)
+    evictions = [threading.Thread(target=cache.evict) for _ in range(2)]
+    for eviction in evictions:
+        eviction.start()
+    for eviction in evictions:
+        eviction.join(10.0)
+
+    assert sum(1 for _ in cache._objects.iter_objects()) == 10

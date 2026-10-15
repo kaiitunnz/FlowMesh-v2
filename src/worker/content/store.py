@@ -214,20 +214,30 @@ class WorkerContentCache(FabricObjectStore):
                 self._retain_sec > 0
                 and used_at <= deadline
                 and digest not in in_transfer
-                and self._remove_unused(entry)
             ):
-                evicted += 1
-            else:
-                kept.append(entry)
+                if self._remove_unused(entry):
+                    evicted += 1
+                    continue
+                if self._gone(entry):
+                    continue
+            kept.append(entry)
         if self._max_bytes > 0:
             total = sum(size for _, size, _, _ in kept)
             for entry in kept:
                 if total <= self._max_bytes:
                     break
-                if entry[3] not in in_transfer and self._remove_unused(entry):
-                    total -= entry[1]
+                if entry[3] in in_transfer:
+                    continue
+                if self._remove_unused(entry):
                     evicted += 1
+                    total -= entry[1]
+                elif self._gone(entry):
+                    # Another eviction, or a drop, freed it since the walk.
+                    total -= entry[1]
         return evicted
+
+    def _gone(self, entry: tuple[float, int, str, str]) -> bool:
+        return self._objects.stat(entry[2], entry[3]) is None
 
     def _remove_unused(self, entry: tuple[float, int, str, str]) -> bool:
         """Remove a copy the walk found, unless it was used or replaced since."""
