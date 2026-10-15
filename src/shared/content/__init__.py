@@ -9,7 +9,12 @@ from .access import (
     renewal_lead_sec,
 )
 from .carriage import ContentCarriagePlan, ContentPeerRoute, ContentRouteObservation
-from .config import BACKEND_FILESYSTEM, BACKEND_S3, ObjectStoreConfig
+from .config import (
+    BACKEND_FILESYSTEM,
+    BACKEND_S3,
+    ObjectStoreConfig,
+    content_hydration_enabled,
+)
 from .filesystem import FilesystemObjectBacking, SharedFilesystemObjectStore
 from .grant import (
     ContentHydrationGrant,
@@ -58,6 +63,7 @@ __all__ = [
     "ContentPeerRoute",
     "ContentRouteObservation",
     "ObjectStoreConfig",
+    "content_hydration_enabled",
     "CONTENT_ENCODING_IDENTITY",
     "OCTET_STREAM",
     "ContentHydrationError",
