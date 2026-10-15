@@ -7,27 +7,33 @@ pace until control answers it — the success until control accepts it, the uplo
 control settles it — because the event helpers drop what they cannot send. Custody ends
 when control settles every task of the dispatch.
 
-Only the registration that staged a dispatch uploads it. Custody found from an earlier
-registration of this worker is evidence for control, which settles it from the store:
-it is reported as abandoned, and released once control answers.
+Only the registration that staged a dispatch uploads it. Custody another registration
+left on the node, this worker's earlier one or another worker's, is evidence for
+control: it is reported as abandoned, and released once control says the upload settled.
 """
 
 import logging
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from shared.content import ContentReference, ContentStoreError
-from shared.tasks.artifact_upload import UploadReport, UploadSettled
+from shared.tasks.artifact_upload import UploadDisposition, UploadReport, UploadSettled
 
 from .custody import ArtifactCustody, StagedTask, UploadJournal
 
 # How often an unanswered success or upload report is sent again.
 RESEND_SEC = 30.0
-# The pace of retried uploads while the store cannot take them.
+# How often evidence of another registration's upload is reported while it is owed.
+EVIDENCE_RESEND_SEC = 300.0
+# How often the node's custody is scanned for evidence other registrations left.
+EVIDENCE_SCAN_SEC = 600.0
+# The pace of retried uploads while the store cannot take them, and of the loop after
+# an unexpected failure.
 _RETRY_MIN_SEC = 1.0
 _RETRY_MAX_SEC = 60.0
 
@@ -42,12 +48,31 @@ class _Publication:
     journal: UploadJournal
     # Whether this registration staged it and so uploads it.
     owned: bool
-    stored: set[str] = field(default_factory=set)
-    failed: str | None = None
+    # The staged objects not yet stored, each once, and the tasks each belongs to.
+    queue: deque[ContentReference] = field(default_factory=deque)
+    owners: dict[str, set[str]] = field(default_factory=dict)
+    # What each task still has to store, by digest.
+    remaining: dict[str, set[str]] = field(default_factory=dict)
     retry_at: float = 0.0
     backoff: float = _RETRY_MIN_SEC
     # When each unanswered report is next due, by task; the success under "".
     due: dict[str, float] = field(default_factory=dict)
+
+    @classmethod
+    def of(cls, journal: UploadJournal, owned: bool) -> "_Publication":
+        publication = cls(journal, owned)
+        for task in journal.owes():
+            if task.uploaded or task.failed is not None:
+                continue
+            digests = {member.content_digest for member in task.members}
+            publication.remaining[task.task_id] = digests
+            for member in task.members:
+                digest = member.content_digest
+                if digest not in publication.owners:
+                    publication.owners[digest] = set()
+                    publication.queue.append(member)
+                publication.owners[digest].add(task.task_id)
+        return publication
 
     def accepted(self) -> bool:
         return any(
@@ -55,11 +80,7 @@ class _Publication:
         )
 
     def uploading(self) -> bool:
-        return (
-            self.owned
-            and self.failed is None
-            and any(not task.uploaded for task in self.journal.owes())
-        )
+        return self.owned and bool(self.queue)
 
 
 class ArtifactUploader:
@@ -87,36 +108,25 @@ class ArtifactUploader:
         self._clock = clock
         self._cv = threading.Condition()
         self._publications: dict[str, _Publication] = {}
+        self._scan_at = 0.0
         self._stopping = False
         self._thread: threading.Thread | None = None
 
-    @property
-    def custody(self) -> ArtifactCustody:
-        return self._custody
-
     def start(self) -> None:
-        """Take up the custody earlier registrations of this worker left, as evidence,
-        and start uploading."""
+        """Take up the custody other registrations left on the node, as evidence, and
+        start uploading."""
         with self._cv:
-            for journal in self._custody.journals():
-                if journal.alias != self._alias:
-                    continue
-                if not journal.owes() or not journal.task_id:
-                    # Staged by a dispatch whose success was never reported.
-                    self._custody.release(journal.scope, journal.dispatch_id)
-                    continue
-                self._publications[journal.dispatch_id] = _Publication(
-                    journal, owned=False
-                )
+            self._scan_evidence()
         self._thread = threading.Thread(
             target=self._run, name="artifact-uploads", daemon=True
         )
         self._thread.start()
 
     def begin(self, dispatch_id: str, scope: str) -> UploadJournal:
-        """Open custody for a dispatch about to stage its final artifacts."""
+        """Open custody for a dispatch about to stage its final artifacts; nothing is
+        written until it stages one."""
         worker_id, incarnation = self._identity()
-        journal = UploadJournal(
+        return UploadJournal(
             dispatch_id=dispatch_id,
             scope=scope,
             alias=self._alias,
@@ -124,8 +134,6 @@ class ArtifactUploader:
             incarnation=incarnation,
             task_id="",
         )
-        self._custody.record(journal)
-        return journal
 
     def stage(
         self,
@@ -135,10 +143,13 @@ class ArtifactUploader:
         cancelled: Callable[[], bool] | None = None,
     ) -> ContentReference:
         """Copy one of a task's artifact files into the dispatch's custody."""
+        if (staged := journal.tasks.get(task_id)) is None:
+            staged = journal.tasks[task_id] = StagedTask(task_id=task_id)
+            # Recorded before its first file, so control can be asked about the task.
+            self._custody.record(journal)
         reference = self._custody.stage(
             journal.scope, journal.dispatch_id, path, cancelled=cancelled
         )
-        staged = journal.tasks.setdefault(task_id, StagedTask(task_id=task_id))
         staged.members.append(reference)
         return reference
 
@@ -149,19 +160,24 @@ class ArtifactUploader:
     def submit(
         self, journal: UploadJournal, task_id: str, success: dict[str, Any]
     ) -> None:
-        """Owe the uploads of a dispatch whose success is about to be reported."""
+        """Owe the uploads of a dispatch whose success is about to be reported; its
+        custody ends if that cannot be recorded."""
         journal.task_id = task_id
         journal.success = success
-        self._custody.record(journal)
+        try:
+            self._custody.record(journal)
+        except BaseException:
+            self.abandon(journal)
+            raise
         with self._cv:
-            publication = _Publication(journal, owned=True)
+            publication = _Publication.of(journal, owned=True)
             publication.due[""] = self._clock() + RESEND_SEC
             self._publications[journal.dispatch_id] = publication
             self._cv.notify_all()
 
     def dispatch_of(self, task_id: str) -> str | None:
-        """The dispatch whose upload this registration still owes, by any task it
-        covers or the task it ran, whose access the uploads are written under."""
+        """Return the dispatch whose upload this registration still owes, by any task
+        it covers or the task it ran, whose access the uploads are written under."""
         with self._cv:
             for dispatch_id, publication in self._publications.items():
                 journal = publication.journal
@@ -175,7 +191,11 @@ class ArtifactUploader:
         return None
 
     def settle(self, settled: UploadSettled) -> None:
-        """Take control's answer about one task's upload."""
+        """Take control's answer about one task's upload.
+
+        A pending answer accepts the success; a report the task already has to make is
+        then made again at once, since the one before it may have been lost.
+        """
         with self._cv:
             publication = self._publications.get(settled.dispatch_id)
             if publication is None:
@@ -183,13 +203,20 @@ class ArtifactUploader:
             journal = publication.journal
             if (task := journal.tasks.get(settled.task_id)) is None:
                 return
-            if settled.disposition.settled:
-                task.settled = True
             task.accepted = True
-            publication.due.pop(settled.task_id, None)
             publication.due.pop("", None)
+            if settled.disposition is UploadDisposition.PENDING:
+                if not publication.owned:
+                    publication.due[task.task_id] = self._clock() + EVIDENCE_RESEND_SEC
+                elif task.uploaded or task.failed is not None:
+                    publication.due[task.task_id] = self._clock()
+                self._cv.notify_all()
+                return
+            task.settled = True
+            publication.due.pop(task.task_id, None)
             if journal.owes():
-                self._custody.record(journal)
+                if publication.owned:
+                    self._record(publication)
                 return
             del self._publications[settled.dispatch_id]
             self._cv.notify_all()
@@ -199,8 +226,12 @@ class ArtifactUploader:
         """Stop uploading what an earlier registration staged; it is evidence now."""
         with self._cv:
             for publication in self._publications.values():
-                publication.owned = False
-                publication.due = {}
+                if publication.owned:
+                    publication.owned = False
+                    publication.queue.clear()
+                    publication.due = {
+                        task.task_id: 0.0 for task in publication.journal.owes()
+                    }
             self._cv.notify_all()
 
     def stop(self, timeout: float) -> None:
@@ -217,22 +248,63 @@ class ArtifactUploader:
             self._thread.join(max(0.0, deadline - self._clock()))
 
     def _run(self) -> None:
+        backoff = _RETRY_MIN_SEC
         while True:
-            with self._cv:
-                if self._stopping:
+            try:
+                if not self._step():
                     return
-                sends = self._due_sends()
-                work = self._next_upload()
-                if not sends and work is None:
-                    self._cv.wait(self._wait_sec())
-                    continue
-            for send in sends:
-                try:
-                    send()
-                except Exception:
-                    self._logger.debug("could not send an upload report", exc_info=True)
-            if work is not None:
-                self._upload_one(*work)
+                backoff = _RETRY_MIN_SEC
+            except Exception:
+                self._logger.exception(
+                    "Artifact uploads failed unexpectedly; resuming in %.0f s", backoff
+                )
+                with self._cv:
+                    if self._stopping:
+                        return
+                    self._cv.wait(backoff)
+                backoff = min(_RETRY_MAX_SEC, backoff * 2)
+
+    def _step(self) -> bool:
+        """Make the reports and the upload now due; False once stopping."""
+        with self._cv:
+            if self._stopping:
+                return False
+            if self._clock() >= self._scan_at:
+                self._scan_evidence()
+            sends = self._due_sends()
+            work = self._next_upload()
+            if not sends and work is None:
+                self._cv.wait(self._wait_sec())
+                return True
+        for send in sends:
+            try:
+                send()
+            except Exception:
+                self._logger.debug("could not send an upload report", exc_info=True)
+        if work is not None:
+            self._upload_one(*work)
+        return True
+
+    def _scan_evidence(self) -> None:
+        """Take up custody another registration left on the node and released
+        nothing of: a dispatch whose success this worker's earlier registration never
+        reported is simply released."""
+        self._scan_at = self._clock() + EVIDENCE_SCAN_SEC
+        worker_id, _ = self._identity()
+        for journal in self._custody.journals():
+            if journal.dispatch_id in self._publications:
+                continue
+            if journal.alias == self._alias and journal.worker_id == worker_id:
+                continue
+            if journal.alias == self._alias and not journal.task_id:
+                self._custody.release(journal.scope, journal.dispatch_id)
+                continue
+            if not journal.owes():
+                self._custody.release(journal.scope, journal.dispatch_id)
+                continue
+            publication = _Publication(journal, owned=False)
+            publication.due = {task.task_id: 0.0 for task in journal.owes()}
+            self._publications[journal.dispatch_id] = publication
 
     def _due_sends(self) -> list[Callable[[], None]]:
         now = self._clock()
@@ -242,9 +314,9 @@ class ArtifactUploader:
             for key, at in list(publication.due.items()):
                 if at > now:
                     continue
-                publication.due[key] = now + RESEND_SEC
                 if key == "":
                     if publication.owned and not publication.accepted():
+                        publication.due[key] = now + RESEND_SEC
                         sends.append(self._success_send(journal))
                     else:
                         del publication.due[key]
@@ -253,10 +325,10 @@ class ArtifactUploader:
                 if task is None or task.settled:
                     del publication.due[key]
                     continue
-                sends.append(self._report_send(publication, key))
-            if not publication.owned:
-                for task in journal.owes():
-                    publication.due.setdefault(task.task_id, now)
+                publication.due[key] = now + (
+                    RESEND_SEC if publication.owned else EVIDENCE_RESEND_SEC
+                )
+                sends.append(self._report_send(publication, task))
         return sends
 
     def _success_send(self, journal: UploadJournal) -> Callable[[], None]:
@@ -265,41 +337,39 @@ class ArtifactUploader:
         )
 
     def _report_send(
-        self, publication: _Publication, task_id: str
+        self, publication: _Publication, task: StagedTask
     ) -> Callable[[], None]:
-        journal = publication.journal
+        dispatch_id = publication.journal.dispatch_id
         if not publication.owned:
             report, error = UploadReport.ABANDONED, None
-        elif publication.failed is not None:
-            report, error = UploadReport.UNUPLOADABLE, publication.failed
+        elif task.failed is not None:
+            report, error = UploadReport.UNUPLOADABLE, task.failed
         else:
             report, error = UploadReport.UPLOADED, None
-        return lambda: self._report(task_id, journal.dispatch_id, report, error)
+        return lambda: self._report(task.task_id, dispatch_id, report, error)
 
     def _next_upload(self) -> tuple[_Publication, ContentReference] | None:
         now = self._clock()
         for publication in self._publications.values():
-            if not publication.uploading() or publication.retry_at > now:
-                continue
-            for digest, member in publication.journal.members().items():
-                if digest not in publication.stored:
-                    return publication, member
+            if publication.uploading() and publication.retry_at <= now:
+                return publication, publication.queue[0]
         return None
 
     def _wait_sec(self) -> float:
         now = self._clock()
-        due = [
+        due = [self._scan_at - now] + [
             at - now
             for publication in self._publications.values()
             for at in publication.due.values()
-        ] + [p.retry_at - now for p in self._publications.values() if p.uploading()]
-        return max(0.05, min(due, default=RESEND_SEC))
+        ]
+        due += [p.retry_at - now for p in self._publications.values() if p.uploading()]
+        return max(0.05, min(due))
 
     def _upload_one(self, publication: _Publication, member: ContentReference) -> None:
         journal = publication.journal
-        source = self._custody.source(journal, member)
         failure: str | None = None
         try:
+            source = self._custody.source(journal, member)
             stored = self._upload(
                 journal.task_id, journal.scope, source, member.media_type
             )
@@ -312,43 +382,66 @@ class ArtifactUploader:
             failure = f"the custody copy of {member.content_digest} is gone"
         except (ContentStoreError, OSError) as exc:
             with self._cv:
-                publication.retry_at = self._clock() + publication.backoff
-                publication.backoff = min(_RETRY_MAX_SEC, publication.backoff * 2)
+                wait = publication.backoff
+                publication.retry_at = self._clock() + wait
+                publication.backoff = min(_RETRY_MAX_SEC, wait * 2)
             self._logger.warning(
                 "Upload of %s for %s failed; retrying in %.0f s: %s",
                 member.content_digest,
                 journal.dispatch_id,
-                publication.backoff,
+                wait,
                 exc,
             )
             return
         with self._cv:
-            if failure is not None:
-                self._logger.error(
-                    "Upload of dispatch %s cannot finish: %s",
-                    journal.dispatch_id,
-                    failure,
-                )
-                publication.failed = failure
-                self._report_tasks(publication, journal.owes())
-                self._cv.notify_all()
-                return
-            publication.stored.add(member.content_digest)
+            if publication.queue and publication.queue[0] is member:
+                publication.queue.popleft()
             publication.backoff = _RETRY_MIN_SEC
-            done = [
-                task
-                for task in journal.owes()
-                if not task.uploaded
-                and all(m.content_digest in publication.stored for m in task.members)
-            ]
-            for task in done:
-                task.uploaded = True
-            if done:
-                self._custody.record(journal)
-                self._report_tasks(publication, done)
+            finished: list[StagedTask] = []
+            for task_id in publication.owners.pop(member.content_digest, ()):
+                remaining = publication.remaining.get(task_id)
+                if remaining is None:
+                    continue
+                remaining.discard(member.content_digest)
+                task = journal.tasks[task_id]
+                if not remaining:
+                    del publication.remaining[task_id]
+                if failure is not None and task.failed is None:
+                    task.failed = failure
+                    self._logger.error(
+                        "Upload of task %s in dispatch %s cannot finish: %s",
+                        task_id,
+                        journal.dispatch_id,
+                        failure,
+                    )
+                    finished.append(task)
+                elif not remaining and task.failed is None:
+                    task.uploaded = True
+                    finished.append(task)
+            if finished:
+                self._record(publication)
+                now = self._clock()
+                for task in finished:
+                    publication.due[task.task_id] = now
             self._cv.notify_all()
 
-    def _report_tasks(self, publication: _Publication, tasks: list[Any]) -> None:
-        now = self._clock()
-        for task in tasks:
-            publication.due[task.task_id] = now
+    def _record(self, publication: _Publication) -> None:
+        """Write a publication's journal; custody that cannot be recorded cannot be
+        trusted, so every task it still owes is reported unuploadable."""
+        try:
+            self._custody.record(publication.journal)
+        except OSError as exc:
+            failure = f"the upload's custody journal could not be written: {exc}"
+            self._logger.error(
+                "Upload of dispatch %s cannot finish: %s",
+                publication.journal.dispatch_id,
+                failure,
+            )
+            publication.queue.clear()
+            publication.remaining.clear()
+            publication.owners.clear()
+            now = self._clock()
+            for task in publication.journal.owes():
+                if task.failed is None and not task.uploaded:
+                    task.failed = failure
+                publication.due[task.task_id] = now

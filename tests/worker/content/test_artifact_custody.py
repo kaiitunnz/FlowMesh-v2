@@ -7,7 +7,7 @@ import sys
 import time
 from pathlib import Path
 
-from shared.content import ContentReference
+from shared.content import ContentReference, reference_for
 from worker.content import WorkerContentCache
 from worker.content.custody import ArtifactCustody, StagedTask, UploadJournal
 
@@ -41,6 +41,13 @@ def _journal(
     )
 
 
+def _cached(
+    root: Path, retain_sec: float = 0.0
+) -> tuple[WorkerContentCache, ArtifactCustody]:
+    cache = WorkerContentCache(root, retain_sec=retain_sec)
+    return cache, ArtifactCustody(root, keep=cache.keep_staged)
+
+
 def test_staging_copies_and_hashes_the_bytes_it_holds(tmp_path) -> None:
     custody = ArtifactCustody(tmp_path / "content")
     source = _source(tmp_path, b"weights")
@@ -48,14 +55,28 @@ def test_staging_copies_and_hashes_the_bytes_it_holds(tmp_path) -> None:
     reference = custody.stage("org", "dsp-1", source)
     source.write_bytes(b"changed after staging")
 
-    journal = _journal("dsp-1")
-    assert custody.source(journal, reference).read_bytes() == b"weights"
+    assert reference == reference_for("org", b"weights")
+    assert custody.source(_journal("dsp-1"), reference).read_bytes() == b"weights"
+
+
+def test_custody_holds_the_bytes_it_hashed_not_a_copy_already_cached(
+    tmp_path,
+) -> None:
+    cache, custody = _cached(tmp_path / "content")
+    wanted = reference_for("org", b"weights")
+    impostor = cache._objects.object_path("org", wanted.content_digest)
+    impostor.parent.mkdir(parents=True)
+    impostor.write_bytes(b"XXXXXXX")
+
+    reference = custody.stage("org", "dsp-1", _source(tmp_path, b"weights"))
+
+    assert custody.source(_journal("dsp-1"), reference).read_bytes() == b"weights"
 
 
 def test_a_staged_copy_survives_eviction_of_the_cache_name(tmp_path) -> None:
-    cache = WorkerContentCache(tmp_path / "content", retain_sec=1.0)
-    custody = ArtifactCustody(tmp_path / "content", write_file=cache.write_file)
+    cache, custody = _cached(tmp_path / "content", retain_sec=1.0)
     reference = custody.stage("org", "dsp-1", _source(tmp_path, b"weights"))
+    assert cache.holds(reference)
     _age(cache, reference, ago=3600)
 
     assert cache.evict() == 0
@@ -68,7 +89,7 @@ def test_a_staged_copy_survives_eviction_of_the_cache_name(tmp_path) -> None:
 
 def test_another_process_on_the_node_does_not_evict_a_staged_copy(tmp_path) -> None:
     root = tmp_path / "content"
-    custody = ArtifactCustody(root, write_file=WorkerContentCache(root).write_file)
+    _, custody = _cached(root)
     reference = custody.stage("org", "dsp-1", _source(tmp_path, b"weights"))
     _age(WorkerContentCache(root), reference, ago=3600)
     script = (
@@ -90,28 +111,33 @@ def test_another_process_on_the_node_does_not_evict_a_staged_copy(tmp_path) -> N
 
 
 def test_custody_keeps_the_bytes_when_the_cache_name_is_removed(tmp_path) -> None:
-    cache = WorkerContentCache(tmp_path / "content")
-    custody = ArtifactCustody(tmp_path / "content", write_file=cache.write_file)
+    cache, custody = _cached(tmp_path / "content")
     reference = custody.stage("org", "dsp-1", _source(tmp_path, b"weights"))
-    journal = _journal("dsp-1")
 
     cache.drop(reference)
-    assert custody.source(journal, reference).read_bytes() == b"weights"
 
-    custody.restore_copy(journal, reference)
-    assert cache.holds(reference)
+    assert custody.source(_journal("dsp-1"), reference).read_bytes() == b"weights"
+
+
+def test_without_a_cache_nothing_is_left_once_custody_ends(tmp_path) -> None:
+    root = tmp_path / "content"
+    custody = ArtifactCustody(root)
+    custody.stage("org", "dsp-1", _source(tmp_path, b"weights"))
+
+    custody.release("org", "dsp-1")
+
+    assert [p for p in root.rglob("*") if p.is_file()] == []
 
 
 def test_overlapping_publications_hold_one_object_independently(tmp_path) -> None:
-    cache = WorkerContentCache(tmp_path / "content", retain_sec=1.0)
-    custody = ArtifactCustody(tmp_path / "content", write_file=cache.write_file)
+    cache, custody = _cached(tmp_path / "content", retain_sec=1.0)
     first = custody.stage("org", "dsp-1", _source(tmp_path, b"same"))
     second = custody.stage("org", "dsp-2", _source(tmp_path, b"same", "copy.bin"))
     assert first == second
 
     custody.release("org", "dsp-1")
     _age(cache, first, ago=3600)
-    assert cache.evict() == 0
+    cache.evict()
     assert custody.source(_journal("dsp-2"), second).read_bytes() == b"same"
 
 
@@ -130,7 +156,7 @@ def test_journals_round_trip_and_release_removes_them(tmp_path) -> None:
     assert list(custody.journals()) == []
 
 
-def test_custody_being_set_up_is_left_to_its_writer(tmp_path) -> None:
+def test_custody_without_a_journal_is_not_reported(tmp_path) -> None:
     custody = ArtifactCustody(tmp_path / "content")
     custody.stage("org", "dsp-1", _source(tmp_path, b"weights"))
 

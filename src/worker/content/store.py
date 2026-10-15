@@ -2,10 +2,11 @@
 
 A cache over the shared durable store, not a holder of record: every object here is also
 there, so a copy may be dropped whenever it stops paying for itself and nothing is lost
-when a worker dies with copies on its disk. The exception is an artifact staged for an
-upload still owed, which upload custody keeps until its upload settles. What the cache
-buys is the read — a task that needs an object this worker already has never leaves the
-node, and a task on another worker can be served from here instead of the shared store.
+when a worker dies with copies on its disk. A copy of an artifact whose upload is still
+owed is also named by upload custody, which holds it until the upload settles. What the
+cache buys is the read — a task that needs an object this worker already has never
+leaves the node, and a task on another worker can be served from here instead of the
+shared store.
 
 Copies are kept on disk rather than in memory so they survive the worker process, and
 the cache reports each copy it keeps or drops so a peer's read can be pointed at it.
@@ -127,6 +128,20 @@ class WorkerContentCache(FabricObjectStore):
         self._objects.touch(reference.authorization_scope, reference.content_digest)
         self._kept(reference)
 
+    def keep_staged(self, reference: ContentReference, held: Path) -> None:
+        """Name a file upload custody holds as this object's copy, leaving it in place;
+        a copy already named stays."""
+        target = self._objects.object_path(
+            reference.authorization_scope, reference.content_digest
+        )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.link(held, target)
+        except FileExistsError:
+            pass
+        self._objects.touch(reference.authorization_scope, reference.content_digest)
+        self._kept(reference)
+
     def fetch(self, reference: ContentReference) -> bytes:
         data = self._objects.read(
             reference.authorization_scope, reference.content_digest
@@ -194,9 +209,10 @@ class WorkerContentCache(FabricObjectStore):
 
         Copies unused past the retention window go first, then the least recently used
         until what is left fits the disk budget. A copy being served right now stays
-        until its transfer is done, and one also linked into upload custody stays until
-        its upload settles, whichever worker on the node staged it; everything else is
-        free to go, because the object itself is in the shared store either way.
+        until its transfer is done, and one with another link — held in upload custody,
+        or linked into a running task's inputs — stays while that link does, whichever
+        process on the node made it; everything else is free to go, because the object
+        itself is in the shared store either way.
         """
         if self._retain_sec <= 0 and self._max_bytes <= 0:
             return 0
@@ -242,8 +258,8 @@ class WorkerContentCache(FabricObjectStore):
         return self._objects.stat(entry[2], entry[3]) is None
 
     def _remove_unused(self, entry: tuple[float, int, str, str]) -> bool:
-        """Remove a copy the walk found, unless it was used or replaced since, or is
-        held in custody for an upload still owed."""
+        """Remove a copy the walk found, unless it was used or replaced since, or has
+        another link."""
         used_at, size, scope, digest = entry
         with self._lock:
             stat = self._objects.stat(scope, digest)

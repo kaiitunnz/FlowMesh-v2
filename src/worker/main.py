@@ -403,7 +403,7 @@ def _build_artifact_uploads(
     return ArtifactUploader(
         ArtifactCustody(
             cfg.content_dir,
-            write_file=cache.write_file if cache is not None else None,
+            keep=cache.keep_staged if cache is not None else None,
             logger=logger,
         ),
         cfg.alias,

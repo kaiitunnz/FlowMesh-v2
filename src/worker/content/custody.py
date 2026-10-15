@@ -1,21 +1,22 @@
 """Custody of artifact bytes a success announced before the shared store had them.
 
 A task reports success once its artifacts are copied and hashed here; their upload to
-the shared store follows. Until control settles each upload, this worker is the only
-place the bytes exist, so they are held apart from the cache's copies: each staged
-object is a second link to the cache's file, in a directory per dispatch beside the
-scope's objects, where no eviction, staging cleanup or output cleanup reaches. The
-kernel's link count is what every process sharing the content directory sees, so a
-copy in custody is kept from eviction by any of them, and its bytes outlive any removal
-of the cache's name for it.
+the shared store follows. Until control settles each upload, the bytes are held in a
+directory per dispatch beside the scope's objects, where no eviction, staging cleanup or
+output cleanup reaches: each staged object is the file its bytes were hashed into, so
+custody holds exactly what the success named. Where the worker runs a cache, the cache's
+name for the object is a second link to that file. The kernel's link count is what every
+process sharing the content directory sees, so a cached copy also held in custody is
+kept from eviction by any of them, and the custody file outlives any removal of the
+cache's name.
 
 A dispatch's directory also holds its journal: what the worker staged, under which
 registration, and the success it reported, so the success and its uploads can be
-reported again until control answers. Custody ends only when control settles every
-task it covers; nothing here ages it out.
+reported again until control answers. The journal is written before any staged file,
+so a directory without one holds nothing staged. Custody ends only when control settles
+every task it covers; nothing here ages it out.
 """
 
-import contextlib
 import errno
 import logging
 import os
@@ -28,17 +29,19 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from shared.content import (
     OCTET_STREAM,
+    STREAM_CHUNK_BYTES,
     ContentReference,
     ContentStoreError,
-    FilesystemObjectBacking,
+    WriteCancelled,
+    new_hasher,
 )
 from shared.content.filesystem import safe_segment
-from shared.utils.atomic import write_replacing
+from shared.utils.atomic import temp_path, write_replacing
 
 CUSTODY_DIR = "custody"
 _JOURNAL = "journal.json"
 
-type StageWriter = Callable[..., ContentReference]
+type KeepCopy = Callable[[ContentReference, Path], None]
 
 
 class StagedTask(BaseModel):
@@ -52,6 +55,8 @@ class StagedTask(BaseModel):
     accepted: bool = False
     # Every member is in the shared store and the receipt saying so was sent.
     uploaded: bool = False
+    # Why the upload cannot finish, once a member is found unuploadable.
+    failed: str | None = None
     # Control settled the upload: durable, lost or rejected.
     settled: bool = False
 
@@ -74,35 +79,25 @@ class UploadJournal(BaseModel):
     tasks: dict[str, StagedTask] = Field(default_factory=dict)
 
     def owes(self) -> list[StagedTask]:
-        """The tasks whose upload control has not settled."""
+        """Return the tasks whose upload control has not settled."""
         return [task for task in self.tasks.values() if not task.settled]
-
-    def members(self) -> dict[str, ContentReference]:
-        """Every staged object, once each, by digest."""
-        return {
-            member.content_digest: member
-            for task in self.tasks.values()
-            for member in task.members
-        }
 
 
 class ArtifactCustody:
     """The staged bytes and journals under one content directory.
 
-    ``write_file`` copies a file into the content backing, hashing exactly the bytes
-    copied; the cache's own writer is passed where the worker runs one, so the copy is
-    also a cached copy it reports holding.
+    ``keep`` names a staged file as the cache's copy of its object, where the worker
+    runs a cache, so a peer can be served from it.
     """
 
     def __init__(
         self,
         root: Path,
-        write_file: StageWriter | None = None,
+        keep: KeepCopy | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._root = root
-        self._backing = FilesystemObjectBacking(root, repair=True)
-        self._write_file = write_file or self._backing.write_file
+        self._keep = keep
         self._logger = logger or logging.getLogger("artifact-custody")
 
     def publication_dir(self, scope: str, dispatch_id: str) -> Path:
@@ -111,7 +106,7 @@ class ArtifactCustody:
         )
 
     def source(self, journal: UploadJournal, reference: ContentReference) -> Path:
-        """The custody file holding a staged object's bytes."""
+        """Return the custody file holding a staged object's bytes."""
         return self.publication_dir(journal.scope, journal.dispatch_id) / safe_segment(
             reference.content_digest
         )
@@ -125,71 +120,58 @@ class ArtifactCustody:
         media_type: str = OCTET_STREAM,
         cancelled: Callable[[], bool] | None = None,
     ) -> ContentReference:
-        """Copy a file into custody for a dispatch, named by the digest of the bytes
-        copied, and return its reference.
+        """Copy a file into a dispatch's custody, named by the digest of exactly the
+        bytes copied, and return its reference.
 
         The bytes are copied rather than linked, so nothing the producer still holds
         open can change them after they are hashed.
         """
         directory = self.publication_dir(scope, dispatch_id)
         directory.mkdir(parents=True, exist_ok=True)
-        for _ in range(2):
-            reference = self._write_file(
-                scope, source, media_type=media_type, cancelled=cancelled
-            )
-            if self._retain(reference, directory):
-                return reference
-        raise ContentStoreError(
-            f"could not take {source.name} into custody: its copy was removed as it "
-            "was written"
-        )
-
-    def _retain(self, reference: ContentReference, directory: Path) -> bool:
-        """Link the backing's copy into custody; False when it was removed first."""
-        digest = reference.content_digest
-        held = directory / safe_segment(digest)
-        copy = self._backing.object_path(reference.authorization_scope, digest)
+        tmp = temp_path(directory)
+        hasher = new_hasher()
+        size = 0
         try:
-            os.link(copy, held)
-        except FileNotFoundError:
-            return False
-        except FileExistsError:
-            pass
-        except OSError as exc:
-            if exc.errno in (errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP):
-                raise ContentStoreError(
-                    "the content filesystem must support hard links to hold staged "
-                    f"artifacts: {exc}"
-                ) from exc
-            raise
-        if held.stat().st_size != reference.size_bytes:
-            raise ContentStoreError(
-                f"the custody copy of {digest} is not {reference.size_bytes} bytes"
+            with source.open("rb") as src, tmp.open("xb") as dst:
+                while chunk := src.read(STREAM_CHUNK_BYTES):
+                    if cancelled is not None and cancelled():
+                        raise WriteCancelled(f"staging of {source.name} was cancelled")
+                    hasher.update(chunk)
+                    dst.write(chunk)
+                    size += len(chunk)
+            reference = ContentReference(
+                authorization_scope=scope,
+                content_digest=hasher.hexdigest(),
+                size_bytes=size,
+                media_type=media_type,
             )
-        return True
-
-    def restore_copy(self, journal: UploadJournal, reference: ContentReference) -> None:
-        """Give the cache back its name for a staged object it no longer has, so a peer
-        is served from it again."""
-        copy = self._backing.object_path(
-            reference.authorization_scope, reference.content_digest
-        )
-        copy.parent.mkdir(parents=True, exist_ok=True)
-        with contextlib.suppress(FileExistsError, FileNotFoundError):
-            os.link(self.source(journal, reference), copy)
+            held = directory / safe_segment(reference.content_digest)
+            try:
+                os.link(tmp, held)
+            except FileExistsError:
+                # The dispatch staged the same bytes under another name already.
+                pass
+            except OSError as exc:
+                if exc.errno in (errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP):
+                    raise ContentStoreError(
+                        "the content filesystem must support hard links to hold "
+                        f"staged artifacts: {exc}"
+                    ) from exc
+                raise
+        finally:
+            tmp.unlink(missing_ok=True)
+        if self._keep is not None:
+            self._keep(reference, held)
+        return reference
 
     def record(self, journal: UploadJournal) -> None:
-        """Write a dispatch's journal, replacing the one there.
-
-        A dispatch records its journal before staging anything, so custody without a
-        journal is only ever a dispatch still being set up.
-        """
+        """Write a dispatch's journal durably, replacing the one there."""
         path = self.publication_dir(journal.scope, journal.dispatch_id) / _JOURNAL
         data = journal.model_dump_json().encode("utf-8")
-        write_replacing(path, lambda fh: fh.write(data))
+        write_replacing(path, lambda fh: fh.write(data), durable=True)
 
     def journals(self) -> Iterator[UploadJournal]:
-        """Every journal under this content directory."""
+        """Yield every journal under this content directory."""
         if not self._root.exists():
             return
         for scope_dir in self._root.iterdir():
@@ -201,7 +183,7 @@ class ArtifactCustody:
                 try:
                     yield UploadJournal.model_validate_json(path.read_bytes())
                 except FileNotFoundError:
-                    # Another worker sharing this directory is staging it right now.
+                    # Nothing is staged before the journal is written.
                     continue
                 except (OSError, ValidationError):
                     self._logger.warning(
@@ -209,5 +191,6 @@ class ArtifactCustody:
                     )
 
     def release(self, scope: str, dispatch_id: str) -> None:
-        """End a dispatch's custody: its staged bytes stay only as cached copies."""
+        """End a dispatch's custody; a staged object the cache also names stays as
+        its cached copy."""
         shutil.rmtree(self.publication_dir(scope, dispatch_id), ignore_errors=True)
