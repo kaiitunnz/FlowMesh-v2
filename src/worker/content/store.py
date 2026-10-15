@@ -73,6 +73,11 @@ class WorkerContentCache(FabricObjectStore):
                 self._holding.whole(held, restart=restart)
         return len(held)
 
+    def flush_holding(self) -> None:
+        """Send the holding changes collecting now."""
+        if self._holding is not None:
+            self._holding.flush()
+
     def write(
         self, scope: str, data: bytes, *, media_type: str = OCTET_STREAM
     ) -> ContentReference:

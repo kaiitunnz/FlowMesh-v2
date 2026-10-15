@@ -90,6 +90,11 @@ class WorkerContentPlane:
         """The number of the last holding report this worker sent, 0 without a cache."""
         return self._lane.store.holding_seq if self._lane is not None else 0
 
+    def flush_holding(self) -> None:
+        """Send the holding changes this worker's cache is collecting."""
+        if self._lane is not None:
+            self._lane.store.flush_holding()
+
     def start(self) -> None:
         """Bring up the cache lane, if this worker runs one, and report what it holds.
 

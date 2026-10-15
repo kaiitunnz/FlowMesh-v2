@@ -68,6 +68,11 @@ class HoldingReporter:
                 self._seq = 0
             self._send(HoldingReport(self._seq + 1, tuple(held), whole=True))
 
+    def flush(self) -> None:
+        """Send what is collecting now."""
+        with self._changed:
+            self._flush()
+
     def stop(self) -> None:
         """Send what is still collecting and stop."""
         with self._changed:
