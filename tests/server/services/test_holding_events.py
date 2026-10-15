@@ -4,6 +4,8 @@ heartbeat names to the content authority, and survives a report it cannot read."
 from typing import Any
 from unittest.mock import MagicMock
 
+import pytest
+
 from shared.content import HoldingReport
 from shared.schemas.event import WorkerEvent
 from tests.server.task.test_task_merge import _monitor
@@ -35,11 +37,22 @@ def test_a_holding_report_reaches_the_authority_as_sent() -> None:
     authority.on_holding.assert_called_once_with("wkr-1", report)
 
 
-def test_an_unreadable_holding_report_is_dropped_and_the_next_one_handled() -> None:
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"held": []},
+        {"report": {"seq": 0, "whole": True}},
+        {"report": {"seq": 1, "whole": True, "held": []}},
+    ],
+    ids=["no report", "number below one", "unknown field"],
+)
+def test_an_unreadable_holding_report_is_dropped_and_the_next_one_handled(
+    payload: dict[str, Any],
+) -> None:
     monitor, authority = _monitor_with_authority()
 
     monitor._handle_worker_event(
-        WorkerEvent(type="CONTENT_HOLDING", worker_id="wkr-1", payload={"held": []})
+        WorkerEvent(type="CONTENT_HOLDING", worker_id="wkr-1", payload=payload)
     )
     monitor._handle_worker_event(
         WorkerEvent(

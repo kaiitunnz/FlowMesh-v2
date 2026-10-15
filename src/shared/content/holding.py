@@ -7,7 +7,7 @@ whole holding first, so control can tell when one went missing and ask for the w
 holding again.
 """
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 # The kind of the control frame asking a worker to report its whole holding.
 HOLDING_RESYNC_FRAME_KIND = "content_holding_resync"
@@ -23,9 +23,9 @@ class HoldingReport(BaseModel):
     for the worker; any other names what changed since the report numbered one less.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
-    seq: int
+    seq: int = Field(ge=1)
     added: tuple[HeldCopy, ...] = ()
     dropped: tuple[HeldCopy, ...] = ()
     whole: bool = False
