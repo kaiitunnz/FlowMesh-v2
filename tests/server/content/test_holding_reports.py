@@ -27,20 +27,16 @@ class _Relay:
 
 
 class _Workers:
-    """Registered workers; a lookup can be made to take a while, as a Redis read
-    can."""
+    """Registered workers, and the control frames relayed to them."""
 
     def __init__(self, redis: RedisClient, *worker_ids: str) -> None:
         self._redis = redis
         self._live = set(worker_ids)
         if worker_ids:
             redis.sync.sadd(WORKERS_SET_KEY, *worker_ids)
-        self.delays: list[float] = []
         self.frames: list[tuple[str, str]] = []
 
     async def get_worker_async(self, worker_id: str) -> Any:
-        if self.delays:
-            await asyncio.sleep(self.delays.pop(0))
         if worker_id not in self._live:
             return None
         return SimpleNamespace(id=worker_id, node_id="nde-1", incarnation=1)
@@ -84,9 +80,16 @@ def _held(directory: ContentHolderDirectory, copy: tuple[str, str]) -> list[str]
 
 
 def test_reports_apply_in_the_order_the_worker_sent_them() -> None:
-    """A report whose worker lookup is slow still applies before the next one."""
+    """A report whose write is slow still lands before the next one starts."""
     authority, workers, directory = _setup("wkr-1")
-    workers.delays = [0.05, 0.0]
+    write = directory.apply_async
+    delays = [0.05, 0.0]
+
+    async def slow_first(*args: Any, **kwargs: Any) -> bool:
+        await asyncio.sleep(delays.pop(0))
+        return await write(*args, **kwargs)
+
+    cast(Any, directory).apply_async = slow_first
 
     async def run() -> None:
         loop = asyncio.get_running_loop()
@@ -99,6 +102,7 @@ def test_reports_apply_in_the_order_the_worker_sent_them() -> None:
 
     assert _held(directory, _A) == []
     assert directory.applied_seq("wkr-1") == 2
+    assert workers.resyncs() == []
 
 
 def test_a_report_already_applied_changes_nothing() -> None:
