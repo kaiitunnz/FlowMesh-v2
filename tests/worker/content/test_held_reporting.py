@@ -29,17 +29,14 @@ class _Reports:
         return [report.seq for report in self.reports]
 
 
-def _cache(
-    tmp_path: Path, reports: _Reports, **kwargs: float
-) -> tuple[WorkerContentCache, HoldingReporter]:
-    reporter = HoldingReporter(reports, flush_after_sec=60.0)
-    cache = WorkerContentCache(
+def _cache(tmp_path: Path, reports: _Reports, **kwargs: float) -> WorkerContentCache:
+    """A cache whose notes leave when flushed or stopped, until a lane starts it."""
+    return WorkerContentCache(
         tmp_path / "content",
         retain_sec=kwargs.get("retain", 0.0),
         max_bytes=int(kwargs.get("max_bytes", 0)),
-        holding=reporter,
+        announce=reports,
     )
-    return cache, reporter
 
 
 def _lane(cache: WorkerContentCache) -> ContentLaneHost:
@@ -59,7 +56,7 @@ def test_a_restarted_worker_reports_the_copies_still_on_its_disk_whole(
     kept = [first.write("local", f"object-{index}".encode()) for index in range(5)]
 
     reports = _Reports()
-    cache, _ = _cache(tmp_path, reports)
+    cache = _cache(tmp_path, reports)
     lane = _lane(cache)
     lane.start()
     try:
@@ -75,12 +72,12 @@ def test_each_kept_and_dropped_copy_leaves_in_the_next_numbered_report(
     tmp_path: Path,
 ) -> None:
     reports = _Reports()
-    cache, reporter = _cache(tmp_path, reports)
+    cache = _cache(tmp_path, reports)
     cache.report_whole(restart=True)
     a = cache.write("local", b"a")
     b = cache.write("local", b"b")
     cache.drop(a)
-    reporter.stop()
+    cache.stop_reporting()
 
     assert reports.seqs == [1, 2]
     report = reports.reports[1]
@@ -92,21 +89,21 @@ def test_each_kept_and_dropped_copy_leaves_in_the_next_numbered_report(
 
 def test_an_evicted_copy_is_reported_dropped(tmp_path: Path) -> None:
     reports = _Reports()
-    cache, reporter = _cache(tmp_path, reports, retain=1.0)
+    cache = _cache(tmp_path, reports, retain=1.0)
     old = cache.write("local", b"old")
     time.sleep(1.1)
 
-    assert cache.evict() == [("local", old.content_digest)]
-    reporter.stop()
+    assert cache.evict() == 1
+    cache.stop_reporting()
 
     assert reports.reports[-1].dropped == (("local", old.content_digest),)
 
 
 def test_a_copy_evicted_before_its_note_is_never_reported_kept(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     reports = _Reports()
-    cache, reporter = _cache(tmp_path, reports)
+    cache = _cache(tmp_path, reports)
     backing = cache._objects
     touch = backing.touch
 
@@ -114,16 +111,16 @@ def test_a_copy_evicted_before_its_note_is_never_reported_kept(
         touch(scope, digest)
         backing.remove(scope, digest)
 
-    backing.touch = evicted_meanwhile  # type: ignore[method-assign]
+    monkeypatch.setattr(backing, "touch", evicted_meanwhile)
     cache.write("local", b"gone at once")
-    reporter.stop()
+    cache.stop_reporting()
 
     assert reports.reports == []
 
 
-def test_a_full_batch_leaves_without_waiting(tmp_path: Path) -> None:
+def test_a_full_batch_leaves_without_waiting() -> None:
     reports = _Reports()
-    reporter = HoldingReporter(reports, flush_after_sec=60.0, max_changes=3)
+    reporter = HoldingReporter(reports, threading.RLock(), max_changes=3)
     for index in range(3):
         reporter.kept(("local", f"{index:064x}"))
 
@@ -132,11 +129,10 @@ def test_a_full_batch_leaves_without_waiting(tmp_path: Path) -> None:
     reporter.stop()
 
 
-def test_a_report_that_could_not_be_sent_still_takes_its_number(
-    tmp_path: Path,
-) -> None:
+def test_a_report_that_could_not_be_sent_still_takes_its_number() -> None:
     reports = _Reports(fail_first=True)
-    reporter = HoldingReporter(reports, flush_after_sec=0.01)
+    reporter = HoldingReporter(reports, threading.RLock(), flush_after_sec=0.01)
+    reporter.start()
     reporter.kept(("local", "a" * 64))
     time.sleep(0.2)
     reporter.kept(("local", "b" * 64))
@@ -148,7 +144,7 @@ def test_a_report_that_could_not_be_sent_still_takes_its_number(
 
 def test_a_new_registration_numbers_its_whole_report_first(tmp_path: Path) -> None:
     reports = _Reports()
-    cache, _ = _cache(tmp_path, reports)
+    cache = _cache(tmp_path, reports)
     cache.report_whole(restart=True)
     cache.report_whole()
     lane = _lane(cache)
@@ -167,7 +163,7 @@ def test_a_new_registration_numbers_its_whole_report_first(tmp_path: Path) -> No
 
 def test_control_asking_for_the_whole_holding_gets_it(tmp_path: Path) -> None:
     reports = _Reports()
-    cache, _ = _cache(tmp_path, reports)
+    cache = _cache(tmp_path, reports)
     kept = cache.write("local", b"kept")
     lane = _lane(cache)
     lane.start()
@@ -185,7 +181,7 @@ def test_requests_for_the_whole_holding_in_flight_together_walk_the_cache_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     reports = _Reports()
-    cache, _ = _cache(tmp_path, reports)
+    cache = _cache(tmp_path, reports)
     walking = threading.Event()
     release = threading.Event()
     report_whole = cache.report_whole

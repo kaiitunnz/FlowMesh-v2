@@ -26,7 +26,6 @@ from .config import WorkerConfig
 from .content import (
     ContentAccessRegistry,
     ContentLaneHost,
-    HoldingReporter,
     WorkerContentCache,
     WorkerContentPlane,
 )
@@ -346,7 +345,8 @@ def _build_content_plane(
                 cfg.content_dir,
                 retain_sec=cfg.content_cache_ttl_sec,
                 max_bytes=cfg.content_cache_max_bytes,
-                holding=HoldingReporter(client.push_content_holding, logger=logger),
+                announce=client.push_content_holding,
+                logger=logger,
             ),
             push_frame=client.push_content_frame,
             request_grant=(

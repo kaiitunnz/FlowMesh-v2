@@ -7,7 +7,7 @@ from unittest import mock
 
 import pytest
 
-from worker.content import HoldingReporter, WorkerContentCache, WorkerContentPlane
+from worker.content import WorkerContentCache, WorkerContentPlane
 from worker.lifecycle import Lifecycle
 
 
@@ -44,10 +44,10 @@ def test_the_copies_a_task_kept_are_reported_before_the_task_ends(
     client.task_succeeded.side_effect = lambda *_, **__: sent.append("task")
     client.task_failed.side_effect = lambda *_, **__: sent.append("task")
     client.task_cancelled.side_effect = lambda *_, **__: sent.append("task")
-    reporter = HoldingReporter(
-        lambda holding: sent.append(f"holding {holding.seq}"), flush_after_sec=60.0
+    cache = WorkerContentCache(
+        tmp_path / "content",
+        announce=lambda holding: sent.append(f"holding {holding.seq}"),
     )
-    cache = WorkerContentCache(tmp_path / "content", holding=reporter)
     lifecycle = Lifecycle(
         cast(Any, client),
         hb_sec=5,
@@ -62,6 +62,6 @@ def test_the_copies_a_task_kept_are_reported_before_the_task_ends(
         cache.write("local", b"artifact")
         getattr(lifecycle, report)("tsk-1")
     finally:
-        reporter.stop()
+        cache.stop_reporting()
 
     assert sent == ["holding 1", "task"]

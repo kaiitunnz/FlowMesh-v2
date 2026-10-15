@@ -7,15 +7,15 @@ that needs an object this worker already has never leaves the node, and a task o
 another worker can be served from here instead of the shared store.
 
 Copies are kept on disk rather than in memory so they survive the worker process, and
-the cache reports each copy it keeps or drops so a peer's read can be pointed at it. Two
-bounds
-keep the cache in check, each off unless configured: a copy unused for longer than the
-retention window ages out, and past the disk budget the least recently used copies go
-first. Reading a copy — for a task here or to serve a peer — counts as using it. A copy
-found not to be the object it is named for is dropped, since the store still has the
-object.
+the cache reports each copy it keeps or drops so a peer's read can be pointed at it.
+Two bounds keep the cache in check, each off unless configured: a copy unused for longer
+than the retention window ages out, and past the disk budget the least recently used
+copies go first. Reading a copy — for a task here or to serve a peer — counts as using
+it. A copy found not to be the object it is named for is dropped, since the store still
+has the object.
 """
 
+import logging
 import os
 import threading
 import time
@@ -34,7 +34,7 @@ from shared.content import (
     verify_content,
 )
 
-from .holding import HoldingReporter
+from .holding import AnnounceHolding, HoldingReporter
 
 _STALE_STAGING_SEC = 3600.0
 
@@ -48,21 +48,36 @@ class WorkerContentCache(FabricObjectStore):
         *,
         retain_sec: float = 0.0,
         max_bytes: int = 0,
-        holding: HoldingReporter | None = None,
+        announce: AnnounceHolding | None = None,
+        logger: logging.Logger | None = None,
     ) -> None:
         self._objects = FilesystemObjectBacking(root, repair=True)
         self._objects.clear_staging(_STALE_STAGING_SEC)
         self._retain_sec = retain_sec
         self._max_bytes = max_bytes
-        self._holding = holding
         # Held while a copy is removed, or a kept one is noted, so the notes follow
         # the disk.
-        self._lock = holding.lock if holding is not None else threading.RLock()
+        self._lock = threading.RLock()
+        self._holding = (
+            HoldingReporter(announce, self._lock, logger=logger)
+            if announce is not None
+            else None
+        )
 
     @property
     def holding_seq(self) -> int:
-        """The number of the last holding report sent, 0 when none is reported."""
+        """The number of the last holding report, 0 without a reporter."""
         return self._holding.seq if self._holding is not None else 0
+
+    def start_reporting(self) -> None:
+        """Send the holding changes on a cadence from here on."""
+        if self._holding is not None:
+            self._holding.start()
+
+    def stop_reporting(self) -> None:
+        """Send the holding changes still collecting, and stop sending."""
+        if self._holding is not None:
+            self._holding.stop()
 
     def report_whole(self, *, restart: bool = False) -> int:
         """Report every copy held, and return how many; with ``restart``, as the first
@@ -173,15 +188,8 @@ class WorkerContentCache(FabricObjectStore):
             reference.authorization_scope, reference.content_digest
         )
 
-    def iter_held(self) -> Iterator[tuple[str, str]]:
-        """Every copy this worker holds, as the scope and digest naming it."""
-        return self._objects.iter_objects()
-
-    def evict(
-        self, *, in_transfer: frozenset[str] = frozenset()
-    ) -> list[tuple[str, str]]:
-        """Bring the cache within its bounds, and return the copies that went, as the
-        scope and digest naming each.
+    def evict(self, *, in_transfer: frozenset[str] = frozenset()) -> int:
+        """Bring the cache within its bounds, and return how many copies went.
 
         Copies unused past the retention window go first, then the least recently used
         until what is left fits the disk budget. A copy being served right now stays
@@ -189,41 +197,47 @@ class WorkerContentCache(FabricObjectStore):
         itself is in the shared store either way.
         """
         if self._retain_sec <= 0 and self._max_bytes <= 0:
-            return []
-        with self._lock:
-            return self._evict(in_transfer)
-
-    def _evict(self, in_transfer: frozenset[str]) -> list[tuple[str, str]]:
+            return 0
+        # The walk runs outside the lock, so a keep waits only on each removal; a copy
+        # used since the walk read it is left for the next pass.
         held: list[tuple[float, int, str, str]] = []
         for scope, digest in list(self._objects.iter_objects()):
             if (stat := self._objects.stat(scope, digest)) is not None:
                 held.append((stat.st_mtime, stat.st_size, scope, digest))
         held.sort()
-        evicted: list[tuple[str, str]] = []
+        evicted = 0
         kept: list[tuple[float, int, str, str]] = []
         deadline = time.time() - self._retain_sec
         for entry in held:
-            used_at, _, scope, digest = entry
+            used_at, _, _, digest = entry
             if (
                 self._retain_sec > 0
                 and used_at <= deadline
                 and digest not in in_transfer
+                and self._remove_unused(entry)
             ):
-                self._remove(scope, digest)
-                evicted.append((scope, digest))
+                evicted += 1
             else:
                 kept.append(entry)
         if self._max_bytes > 0:
             total = sum(size for _, size, _, _ in kept)
-            for _, size, scope, digest in kept:
+            for entry in kept:
                 if total <= self._max_bytes:
                     break
-                if digest in in_transfer:
-                    continue
-                self._remove(scope, digest)
-                total -= size
-                evicted.append((scope, digest))
+                if entry[3] not in in_transfer and self._remove_unused(entry):
+                    total -= entry[1]
+                    evicted += 1
         return evicted
+
+    def _remove_unused(self, entry: tuple[float, int, str, str]) -> bool:
+        """Remove a copy the walk found, unless it was used or replaced since."""
+        used_at, size, scope, digest = entry
+        with self._lock:
+            stat = self._objects.stat(scope, digest)
+            if stat is None or (stat.st_mtime, stat.st_size) != (used_at, size):
+                return False
+            self._remove(scope, digest)
+        return True
 
     def _kept(self, reference: ContentReference) -> None:
         if self._holding is None:

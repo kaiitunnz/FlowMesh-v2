@@ -55,7 +55,7 @@ from .store import WorkerContentCache
 _REBIND_WAIT_SEC = 30.0
 
 # How often the cache is brought back within its bounds, when it has any.
-EVICTION_INTERVAL_SEC = 60.0
+_EVICTION_INTERVAL_SEC = 60.0
 
 # Reports one dialed transfer's route evidence to control.
 ObservationReport = Callable[[ContentRouteObservation], None]
@@ -130,6 +130,7 @@ class ContentLaneHost:
     def start(self) -> None:
         self._thread.start()
         self._call(self._build).result()
+        self._store.start_reporting()
 
     async def _build(self) -> None:
         sink = WireFrameSink(self._push_frame)
@@ -326,8 +327,9 @@ class ContentLaneHost:
         self.evict()
         return reference if self._store.holds(reference) else None
 
-    def evict(self) -> list[tuple[str, str]]:
-        """Bring the cache within its bounds, leaving anything in transfer alone."""
+    def evict(self) -> int:
+        """Bring the cache within its bounds, leaving anything in transfer alone, and
+        return how many copies went."""
         in_transfer = self._holder.in_transfer if self._holder else frozenset()
         return self._store.evict(in_transfer=in_transfer)
 
@@ -344,26 +346,22 @@ class ContentLaneHost:
             self._call(rebind_holder).result(_REBIND_WAIT_SEC)
         except concurrent.futures.TimeoutError:
             self._logger.warning("The cache lane did not rebind its holder in time")
-        self._store.report_whole(restart=True)
+        self.report_held()
 
     def report_held(self) -> int:
         """Report every copy this worker holds as the first report of its registration,
-        and return how many.
-
-        It runs before the worker takes any work, so a restarted worker's copies are
-        reachable again rather than sitting unused on its disk.
-        """
+        and return how many."""
         return self._store.report_whole(restart=True)
 
     async def _keep_within_bounds(self) -> None:
         """Bring the cache back within its bounds on a cadence, when it has any."""
         while True:
-            await asyncio.sleep(EVICTION_INTERVAL_SEC)
+            await asyncio.sleep(_EVICTION_INTERVAL_SEC)
             try:
                 # Eviction walks the cache directory, so it runs off the loop that is
                 # also carrying transfers and the control frames they depend on.
                 if evicted := await asyncio.to_thread(self.evict):
-                    self._logger.info("evicted %d cached content objects", len(evicted))
+                    self._logger.info("evicted %d cached content objects", evicted)
             except Exception:
                 self._logger.exception("content cache eviction failed")
 
@@ -464,6 +462,7 @@ class ContentLaneHost:
                 self._call(self._holder.aclose).result(timeout=min(5.0, left()))
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join(timeout=min(5.0, left()))
+        self._store.stop_reporting()
 
 
 def _copy_file(source: Path, dest: Path) -> None:

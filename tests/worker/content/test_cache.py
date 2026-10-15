@@ -42,7 +42,7 @@ def test_an_unbounded_cache_keeps_every_copy_indefinitely(tmp_path) -> None:
     cache = _cache(tmp_path)
     reference = cache.write("local", b"body")
     _used(cache, reference, ago=10 * 365 * 86400)
-    assert len(cache.evict()) == 0
+    assert cache.evict() == 0
     assert cache.holds(reference)
 
 
@@ -50,14 +50,14 @@ def test_a_copy_unused_past_the_retention_window_is_evicted(tmp_path) -> None:
     cache = _cache(tmp_path, retain_sec=30.0)
     reference = cache.write("local", b"body")
     _used(cache, reference, ago=120)
-    assert len(cache.evict()) == 1
+    assert cache.evict() == 1
     assert not cache.holds(reference)
 
 
 def test_a_copy_inside_the_retention_window_stays(tmp_path) -> None:
     cache = _cache(tmp_path, retain_sec=3600.0)
     reference = cache.write("local", b"body")
-    assert len(cache.evict()) == 0
+    assert cache.evict() == 0
     assert cache.holds(reference)
 
 
@@ -66,7 +66,7 @@ def test_reading_a_copy_renews_it_against_the_retention_window(tmp_path) -> None
     reference = cache.write("local", b"body")
     _used(cache, reference, ago=120)
     assert cache.hydrate(reference) == b"body"
-    assert len(cache.evict()) == 0
+    assert cache.evict() == 0
     assert cache.holds(reference)
 
 
@@ -76,7 +76,7 @@ def test_past_the_disk_budget_the_least_recently_used_copy_goes(tmp_path) -> Non
     newest = cache.write("local", b"bbbbbb")
     _used(cache, oldest, ago=60)
     _used(cache, newest, ago=30)
-    assert len(cache.evict()) == 1
+    assert cache.evict() == 1
     assert not cache.holds(oldest)
     assert cache.holds(newest)
 
@@ -88,7 +88,7 @@ def test_the_disk_budget_ranks_by_last_use_not_by_write(tmp_path) -> None:
     _used(cache, written_first, ago=60)
     _used(cache, written_second, ago=30)
     cache.hydrate(written_first)
-    assert len(cache.evict()) == 1
+    assert cache.evict() == 1
     assert cache.holds(written_first)
     assert not cache.holds(written_second)
 
@@ -97,7 +97,7 @@ def test_a_cache_within_its_disk_budget_keeps_everything(tmp_path) -> None:
     cache = _cache(tmp_path, max_bytes=100)
     first = cache.write("local", b"aaaaaa")
     second = cache.write("local", b"bbbbbb")
-    assert len(cache.evict()) == 0
+    assert cache.evict() == 0
     assert cache.holds(first) and cache.holds(second)
 
 
@@ -105,5 +105,5 @@ def test_a_copy_being_transferred_stays_under_either_bound(tmp_path) -> None:
     cache = _cache(tmp_path, retain_sec=30.0, max_bytes=1)
     reference = cache.write("local", b"body")
     _used(cache, reference, ago=120)
-    assert cache.evict(in_transfer=frozenset({reference.content_digest})) == []
+    assert cache.evict(in_transfer=frozenset({reference.content_digest})) == 0
     assert cache.holds(reference)

@@ -20,7 +20,6 @@ from shared.content import (
 from worker.content import (
     ContentAccessRegistry,
     ContentLaneHost,
-    HoldingReporter,
     WorkerContentCache,
     WorkerContentPlane,
 )
@@ -275,17 +274,16 @@ def test_an_outcome_is_cached_like_any_other_content(tmp_path) -> None:
     assert cached == [("tenant-a", b"outcome body")]
 
 
-def test_a_copy_the_cache_cannot_keep_is_never_reported_held(tmp_path) -> None:
-    """A write past the whole disk budget lands in the store but claims no copy.
-
-    Reporting it held would point a peer's read at a holder that already dropped it.
-    """
+def test_a_copy_past_the_disk_budget_is_reported_dropped(tmp_path) -> None:
+    """A write past the whole disk budget lands in the store, and a report collecting
+    both its keep and its eviction names it dropped."""
     registry = _registry(tmp_path)
     registry.accept(_access("tsk-1"))
     reports: list[HoldingReport] = []
-    reporter = HoldingReporter(reports.append, flush_after_sec=60.0)
     lane = ContentLaneHost(
-        store=WorkerContentCache(tmp_path / "cache", max_bytes=4, holding=reporter),
+        store=WorkerContentCache(
+            tmp_path / "cache", max_bytes=4, announce=reports.append
+        ),
         push_frame=lambda frame: None,
         request_grant=lambda reference, task_id, peer_only, request_id: None,
         worker_id="wkr-1",
@@ -294,10 +292,12 @@ def test_a_copy_the_cache_cannot_keep_is_never_reported_held(tmp_path) -> None:
     plane = WorkerContentPlane(lane, registry)
 
     reference = plane.write("tsk-1", "tenant-a", b"larger than the budget")
-    reporter.stop()
+    lane.store.stop_reporting()
 
     assert not lane.store.holds(reference)
-    assert not any(report.added for report in reports)
+    (report,) = reports
+    assert report.added == ()
+    assert report.dropped == (("tenant-a", reference.content_digest),)
     assert registry.store_for("tsk-1", "tenant-a").hydrate(reference) == (
         b"larger than the budget"
     )

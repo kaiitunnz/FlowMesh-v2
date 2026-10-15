@@ -22,12 +22,7 @@ from shared.content.wire import CHUNK_BYTES, KIND_FETCH, KIND_REJECT
 from shared.network.relay_frame import RelayFrame, RelayFrameKind
 from shared.network.session import FramedRelaySession, RelaySessionRole
 from shared.utils.ids import new_hydration_grant_id, new_relay_session_id
-from worker.content import (
-    ContentHolder,
-    ContentHydrationClient,
-    HoldingReporter,
-    WorkerContentCache,
-)
+from worker.content import ContentHolder, ContentHydrationClient, WorkerContentCache
 
 _BODY = b'{"prompts": ["one", "two"]}'
 
@@ -82,8 +77,7 @@ class _Pair:
     def __init__(self, tmp_path, *, holder_generation: int = 1) -> None:
         self.store_root = tmp_path / "held"
         self.reports: list[HoldingReport] = []
-        self.reporter = HoldingReporter(self.reports.append, flush_after_sec=60.0)
-        self.store = WorkerContentCache(self.store_root, holding=self.reporter)
+        self.store = WorkerContentCache(self.store_root, announce=self.reports.append)
         self.to_requester = _ToPeer()
         self.to_holder = _ToPeer()
         self.granted: list[ContentReference] = []
@@ -252,7 +246,7 @@ async def test_an_object_the_holder_lost_is_a_typed_failure(tmp_path) -> None:
     with pytest.raises(ContentHydrationError, match="unavailable"):
         await hydration
     # The holder reports the copy gone, so control stops pointing reads at it.
-    pair.reporter.stop()
+    pair.store.stop_reporting()
     assert pair.reports[-1].dropped == (
         (reference.authorization_scope, reference.content_digest),
     )
@@ -345,7 +339,7 @@ async def test_a_transfer_in_flight_holds_its_object_against_the_sweep(
     assert reference.content_digest in pair.holder.in_transfer
     spare = pair.store.write("local", b"another object", media_type="text/plain")
     full = WorkerContentCache(pair.store_root, max_bytes=1)
-    assert len(full.evict(in_transfer=pair.holder.in_transfer)) == 1
+    assert full.evict(in_transfer=pair.holder.in_transfer) == 1
     assert pair.store.holds(reference) and not pair.store.holds(spare)
 
     release.set()
@@ -445,7 +439,7 @@ async def test_an_abandoned_transfer_releases_the_holder(tmp_path, monkeypatch) 
     ), "the requester never told the holder to stop"
     assert pair.holder.in_transfer == frozenset()
     full = WorkerContentCache(pair.store_root, max_bytes=1)
-    assert len(full.evict(in_transfer=pair.holder.in_transfer)) == 1
+    assert full.evict(in_transfer=pair.holder.in_transfer) == 1
 
 
 class _PacedToPeer(_ToPeer):
@@ -579,7 +573,7 @@ async def test_a_holder_copy_that_is_not_the_object_is_refused_and_dropped(
         await hydration
     assert not pair.store.holds(reference)
     assert list((tmp_path / "staging").iterdir()) == []
-    pair.reporter.stop()
+    pair.store.stop_reporting()
     assert [r.dropped for r in pair.reports] == [
         ((reference.authorization_scope, reference.content_digest),)
     ]
