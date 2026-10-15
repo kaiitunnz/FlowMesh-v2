@@ -90,14 +90,21 @@ class _Workers:
         self.frames: list[tuple[str, str, dict[str, Any]]] = []
         # Workers serving a content listener, and so dialing peers.
         self.listening: set[str] = set()
+        # Registered workers whose heartbeat has lapsed.
+        self.stale: set[str] = set()
 
     async def get_worker_async(self, worker_id: str) -> Any:
         self.reads += 1
         return self._worker(worker_id)
 
-    async def get_workers_async(self, worker_ids: list[str]) -> list[Any]:
+    async def get_workers_heard_async(
+        self, worker_ids: list[str]
+    ) -> list[tuple[Any, bool]]:
         self.reads += 1
-        return [self._worker(worker_id) for worker_id in worker_ids]
+        return [
+            (self._worker(worker_id), worker_id in self.stale)
+            for worker_id in worker_ids
+        ]
 
     def _worker(self, worker_id: str) -> Any:
         if worker_id not in self._live:
@@ -269,6 +276,33 @@ def test_a_holder_that_came_back_as_another_incarnation_is_refused() -> None:
     asyncio.run(_authorize(authority, "wkr-2", _REFERENCE))
 
     assert _denial(workers) == HydrationDenial.HOLDER_UNAVAILABLE
+
+
+def test_a_live_holder_is_granted_over_one_whose_heartbeat_lapsed() -> None:
+    """The lapsed holder recorded last, so it sorts first; its heartbeat puts it out."""
+    workers = _Workers(**{"wkr-1": 3, "wkr-2": 4, "wkr-3": 5})
+    authority = _authority(workers)
+    asyncio.run(authority.record_holding("wkr-1", _holding(_HELD)))
+    asyncio.run(authority.record_holding("wkr-2", _holding(_HELD)))
+    workers.stale.add("wkr-2")
+
+    asyncio.run(_authorize(authority, "wkr-3", _REFERENCE))
+
+    assert _granted(workers).holder_id == "wkr-1"
+
+
+def test_a_holder_whose_heartbeat_lapsed_is_refused_until_it_resumes() -> None:
+    workers = _Workers(**{"wkr-1": 3, "wkr-2": 5})
+    authority = _authority(workers)
+    asyncio.run(authority.record_holding("wkr-1", _holding(_HELD)))
+    workers.stale.add("wkr-1")
+
+    asyncio.run(_authorize(authority, "wkr-2", _REFERENCE))
+    assert _denial(workers) == HydrationDenial.HOLDER_UNAVAILABLE
+
+    workers.stale.clear()
+    asyncio.run(_authorize(authority, "wkr-2", _REFERENCE))
+    assert _granted(workers).holder_id == "wkr-1"
 
 
 def test_a_worker_is_never_sent_to_itself_for_an_object() -> None:

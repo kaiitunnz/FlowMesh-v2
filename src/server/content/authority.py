@@ -454,21 +454,27 @@ class ContentHydrationAuthority:
         reported: list[ContentHolderRecord],
         requester: Worker,
     ) -> list[Worker]:
-        """Every reported holder still running as the incarnation that reported."""
+        """Every reported holder still running as the incarnation that reported, with
+        a current heartbeat."""
         candidates = [r for r in reported if r.worker_id != requester.id]
-        found = await self._workers.get_workers_async([r.worker_id for r in candidates])
+        found = await self._workers.get_workers_heard_async(
+            [r.worker_id for r in candidates]
+        )
         live: list[Worker] = []
-        for record, holder in zip(candidates, found, strict=True):
+        for record, (holder, stale) in zip(candidates, found, strict=True):
             if holder is None or holder.incarnation != record.generation:
                 # The reporting worker is gone or came back as another incarnation, so
                 # its report describes content no one can serve. A restarted worker
-                # re-reports what it still holds, which lands under its new incarnation.
+                # reports its whole holding under its new registration.
                 await self._directory.forget_async(
                     reference.authorization_scope,
                     reference.content_digest,
                     record.worker_id,
                     record.generation,
                 )
+                continue
+            if stale:
+                # Its records stay: a worker whose heartbeat resumes still holds them.
                 continue
             live.append(holder)
         return live
