@@ -2,9 +2,10 @@
 
 The holder answers one transfer at a time per session: it admits the presented grant
 against the ones control pre-delivered, opens its copy of the exact object that grant
-names, and streams it back over the session's window, hashing as it reads. A copy that
-turns out not to be the object ends the transfer with a refusal instead of its last
-message and is dropped from the cache. A refusal is a typed rejection the requester
+names, and streams it back over the session's window, hashing as it reads. A copy it
+cannot open, or that turns out not to be the object, ends the transfer with a refusal
+instead of its last message and is dropped from the cache, which reports it gone. A
+refusal is a typed rejection the requester
 surfaces as a hydration failure — never a completed transfer of bytes the reference does
 not name, and never bytes for a grant this holder was not handed.
 
@@ -243,6 +244,7 @@ class ContentHolder:
             fh = await asyncio.to_thread(self._store.open_pinned, reference)
         except (ContentStoreError, OSError) as exc:
             self._logger.warning("holder cannot serve %s: %s", session_id, exc)
+            await asyncio.to_thread(self._store.drop, reference)
             await session.send_wire(KIND_REJECT, reason="unavailable")
             return
         with fh:
@@ -278,7 +280,7 @@ class ContentHolder:
                     reference.content_digest,
                     exc,
                 )
-                self._store.drop(reference)
+                await asyncio.to_thread(self._store.drop, reference)
                 await session.send_wire(KIND_REJECT, reason="unavailable")
                 return
             stall.reschedule(loop.time() + self._stall_timeout_sec)

@@ -2,7 +2,6 @@
 
 import threading
 import time
-from collections.abc import Sequence
 from typing import Any, cast
 
 import pytest
@@ -13,6 +12,7 @@ from shared.content import (
     ContentStoreAccess,
     ContentStoreAccessGrant,
     ContentStoreError,
+    HoldingReport,
     ObjectStoreConfig,
     ScopedContentCredential,
     reference_for,
@@ -20,6 +20,7 @@ from shared.content import (
 from worker.content import (
     ContentAccessRegistry,
     ContentLaneHost,
+    HoldingReporter,
     WorkerContentCache,
     WorkerContentPlane,
 )
@@ -239,18 +240,17 @@ class _RecordingLane:
         raise ContentStoreError("nothing cached here")
 
 
-def test_an_outcome_is_cached_and_announced_like_any_other_content(tmp_path) -> None:
-    """An outcome is content, so the copy and the announcement are the same as a write.
+def test_an_outcome_is_cached_like_any_other_content(tmp_path) -> None:
+    """An outcome is content, so its copy is kept as a write's is.
 
     Materializing an outcome goes through the plane rather than straight to the store,
-    so the worker keeps the copy and control learns of it — without which no peer could
-    ever be served an outcome and the whole cache-to-cache path would be dead for the
-    fabric's main producer.
+    so the worker keeps the copy, which its cache reports to control — without which no
+    peer could ever be served an outcome and the whole cache-to-cache path would be
+    dead for the fabric's main producer.
     """
     registry = _registry(tmp_path)
     registry.accept(_access("tsk-1"))
     cached: list[tuple[str, bytes]] = []
-    announced: list[Sequence[tuple[str, str]]] = []
 
     class _Store:
         def write(self, scope: str, data: bytes, *, media_type: str = "") -> Any:
@@ -266,38 +266,38 @@ def test_an_outcome_is_cached_and_announced_like_any_other_content(tmp_path) -> 
     plane = WorkerContentPlane(
         cast(Any, _RecordingLane(_Store())),
         registry,
-        announce=announced.append,
         finalizations=cast(Any, _Index()),
     )
     store = plane.outcome_store("tsk-1")
     assert store is not None
-    reference = store.write("tenant-a", b"outcome body", media_type="text/plain")
+    store.write("tenant-a", b"outcome body", media_type="text/plain")
 
     assert cached == [("tenant-a", b"outcome body")]
-    assert announced == [[("tenant-a", reference.content_digest)]]
 
 
-def test_a_copy_the_cache_cannot_keep_is_never_announced(tmp_path) -> None:
+def test_a_copy_the_cache_cannot_keep_is_never_reported_held(tmp_path) -> None:
     """A write past the whole disk budget lands in the store but claims no copy.
 
-    Announcing it would point a peer's read at a holder that already dropped it.
+    Reporting it held would point a peer's read at a holder that already dropped it.
     """
     registry = _registry(tmp_path)
     registry.accept(_access("tsk-1"))
-    announced: list[Sequence[tuple[str, str]]] = []
+    reports: list[HoldingReport] = []
+    reporter = HoldingReporter(reports.append, flush_after_sec=60.0)
     lane = ContentLaneHost(
-        store=WorkerContentCache(tmp_path / "cache", max_bytes=4),
+        store=WorkerContentCache(tmp_path / "cache", max_bytes=4, holding=reporter),
         push_frame=lambda frame: None,
         request_grant=lambda reference, task_id, peer_only, request_id: None,
         worker_id="wkr-1",
         generation=1,
     )
-    plane = WorkerContentPlane(lane, registry, announce=announced.append)
+    plane = WorkerContentPlane(lane, registry)
 
     reference = plane.write("tsk-1", "tenant-a", b"larger than the budget")
+    reporter.stop()
 
     assert not lane.store.holds(reference)
-    assert announced == []
+    assert not any(report.added for report in reports)
     assert registry.store_for("tsk-1", "tenant-a").hydrate(reference) == (
         b"larger than the budget"
     )

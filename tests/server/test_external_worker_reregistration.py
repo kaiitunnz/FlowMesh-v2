@@ -43,6 +43,7 @@ from tests.worker.factories import (
 from worker.content import (
     ContentAccessRegistry,
     ContentLaneHost,
+    HoldingReporter,
     WorkerContentCache,
     WorkerContentPlane,
 )
@@ -311,7 +312,11 @@ async def test_a_worker_holding_content_moves_to_its_new_registration(
     registered_by = _event_stream_registers_first(client, monkeypatch)
     await asyncio.to_thread(_register, client)
     old_id = client.worker_id
-    cache = WorkerContentCache(tmp_path / "content", retain_sec=900.0)
+    cache = WorkerContentCache(
+        tmp_path / "content",
+        retain_sec=900.0,
+        holding=HoldingReporter(client.push_content_holding),
+    )
     cache.write("local", b"held across the restart")
     lane = ContentLaneHost(
         store=cache,
@@ -319,7 +324,6 @@ async def test_a_worker_holding_content_moves_to_its_new_registration(
         request_grant=lambda reference, task_id, peer_only, request_id: None,
         worker_id=old_id,
         generation=client.incarnation,
-        announce=client.push_content_holding,
     )
     lifecycle = _lifecycle(client, tmp_path)
     lifecycle.content_plane = WorkerContentPlane(

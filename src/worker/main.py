@@ -26,6 +26,7 @@ from .config import WorkerConfig
 from .content import (
     ContentAccessRegistry,
     ContentLaneHost,
+    HoldingReporter,
     WorkerContentCache,
     WorkerContentPlane,
 )
@@ -345,6 +346,7 @@ def _build_content_plane(
                 cfg.content_dir,
                 retain_sec=cfg.content_cache_ttl_sec,
                 max_bytes=cfg.content_cache_max_bytes,
+                holding=HoldingReporter(client.push_content_holding, logger=logger),
             ),
             push_frame=client.push_content_frame,
             request_grant=(
@@ -361,8 +363,6 @@ def _build_content_plane(
             generation=client.incarnation,
             transfer_timeout_sec=cfg.content_transfer_timeout_sec,
             window_bytes=cfg.content_transfer_window_bytes,
-            announce=client.push_content_holding,
-            holder_report_ttl_sec=cfg.content_holder_ttl_sec,
             peer_enabled=cfg.peer_enabled,
             peer_material=peer_material,
             connect_budget_sec=cfg.peer_connect_budget_sec,
@@ -373,7 +373,6 @@ def _build_content_plane(
     return WorkerContentPlane(
         lane,
         access,
-        announce=client.push_content_holding if lane is not None else None,
         finalizations=(
             FinalizationIndexClient(cfg.server_base_url)
             if cfg.server_base_url

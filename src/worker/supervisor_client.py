@@ -7,7 +7,7 @@ import logging
 import queue
 import threading
 import time
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +18,7 @@ from google.protobuf.struct_pb2 import Struct
 from pydantic import ValidationError
 
 from shared._version import FLOWMESH_RELEASE_VERSION
-from shared.content import ContentReference, ContentRouteObservation
+from shared.content import ContentReference, ContentRouteObservation, HoldingReport
 from shared.grpc.supervisor.v1 import supervisor_pb2, supervisor_pb2_grpc
 from shared.resident.reports import (
     ResidentBootstrapAck,
@@ -262,11 +262,14 @@ class SupervisorClient:
         status: WorkerStatus | None = None,
         dispatch_id: str | None = None,
         task_id: str | None = None,
+        holding_seq: int | None = None,
     ) -> None:
         ts = ts or now_iso()
         payload: dict[str, Any] = {"ttl_sec": ttl_sec}
         if task_id is not None:
             payload["task_id"] = task_id
+        if holding_seq is not None:
+            payload["holding_seq"] = holding_seq
         event = WorkerEvent(
             type="HEARTBEAT",
             worker_id=self.worker_id,
@@ -954,8 +957,8 @@ class SupervisorClient:
         """Send one relayed SSH frame up for the supervisor to bridge onward."""
         self._push_event("SSH_FRAME", {"frame": frame})
 
-    def push_content_holding(self, held: Sequence[tuple[str, str]]) -> None:
-        """Report the objects this worker holds, so control can resolve them.
+    def push_content_holding(self, report: HoldingReport) -> None:
+        """Report how this worker's holding changed, so control can resolve its copies.
 
         The report queues while the event stream is down, so a re-registration's
         report reaches control once the stream is back.
@@ -966,7 +969,7 @@ class SupervisorClient:
             WorkerEvent(
                 type="CONTENT_HOLDING",
                 worker_id=self.worker_id,
-                payload={"held": [[scope, digest] for scope, digest in held]},
+                payload=report.to_payload(),
             )
         )
 

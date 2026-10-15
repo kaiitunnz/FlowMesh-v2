@@ -301,6 +301,17 @@ def content_holders_key(scope: str, digest: str) -> str:
     return f"ct:holders:{scope}:{digest}"
 
 
+def content_held_key(worker_id: str) -> str:
+    return f"ct:held:{worker_id}"
+
+
+def content_held_seq_key(worker_id: str) -> str:
+    return f"ct:held-seq:{worker_id}"
+
+
+CONTENT_HELD_WORKERS_KEY = "ct:held-workers"
+
+
 def content_finalization_key(scope: str, idempotency_key: str) -> str:
     return f"ct:finalization:{scope}:{idempotency_key}"
 

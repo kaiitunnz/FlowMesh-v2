@@ -229,6 +229,11 @@ class Lifecycle:
                         status=self._status,
                         dispatch_id=self._dispatch_id,
                         task_id=self._task_id,
+                        holding_seq=(
+                            plane.holding_seq
+                            if (plane := self.content_plane) is not None
+                            else None
+                        ),
                     )
             except Exception:
                 pass

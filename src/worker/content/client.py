@@ -22,7 +22,7 @@ import contextlib
 import itertools
 import logging
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from pathlib import Path
 
 from shared.content import (
@@ -51,10 +51,6 @@ from .peer import ContentPeerDialer, PeerConnection, PeerUnreachable
 # Asks the control plane to authorize hydrating one reference for one task; with the
 # flag, over a peer transport alone. Control answers with the request's number.
 RequestGrant = Callable[[ContentReference, str, bool, int], None]
-
-# Reports the objects this worker holds, each by its scope and digest, to the holder
-# directory. One call carries a whole report so a periodic re-report is one message.
-AnnounceHolding = Callable[[Sequence[tuple[str, str]]], None]
 
 # How much of a transfer collects in memory before it is written out, so the file is
 # written in large blocks off the loop rather than frame by frame on it.

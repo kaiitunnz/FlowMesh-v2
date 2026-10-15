@@ -1,7 +1,6 @@
 """Where the worker's content plane reads an object from, and what it keeps of it."""
 
 import os
-from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, cast
 
@@ -37,6 +36,8 @@ class _Lane:
         self.dialed = dialed
         self.peer_reads: list[tuple[ContentReference, bool]] = []
         self.kept: list[ContentReference] = []
+        # The copies a peer read left here, held within the cache's bounds.
+        self.bounded: list[ContentReference] = []
 
     def read_local(self, reference: ContentReference) -> bytes:
         raise ContentHydrationError("not held")
@@ -69,6 +70,7 @@ class _Lane:
         return reference
 
     def held(self, reference: ContentReference) -> ContentReference:
+        self.bounded.append(reference)
         return reference
 
     def keep_file(self, reference: ContentReference, path: Path) -> Any:
@@ -95,13 +97,10 @@ class _Access:
         return self._store
 
 
-def _plane(
-    store: FabricObjectStore, lane: _Lane, announced: list[Sequence[Any]]
-) -> WorkerContentPlane:
+def _plane(store: FabricObjectStore, lane: _Lane) -> WorkerContentPlane:
     return WorkerContentPlane(
         cast(Any, lane),
         cast(Any, _Access(store)),
-        announce=announced.append,
         relay_max_bytes=_LARGE,
     )
 
@@ -111,12 +110,10 @@ def test_a_small_object_is_read_from_a_peer_before_the_store(tmp_path) -> None:
     reference = store.write("org", b"small")
     lane = _Lane({reference.content_digest: b"small"})
 
-    announced: list[Sequence[Any]] = []
-
-    assert _plane(store, lane, announced).hydrate("tsk-1", reference) == b"small"
+    assert _plane(store, lane).hydrate("tsk-1", reference) == b"small"
     assert lane.peer_reads == [(reference, False)]
-    # The copy the peer read leaves here is announced for the next reader.
-    assert announced == [[("org", reference.content_digest)]]
+    # The copy the peer read leaves here is kept for the next reader.
+    assert lane.bounded == [reference]
 
 
 def test_a_large_object_is_read_from_the_store_not_relayed(tmp_path) -> None:
@@ -124,14 +121,12 @@ def test_a_large_object_is_read_from_the_store_not_relayed(tmp_path) -> None:
     data = b"x" * _LARGE
     reference = store.write("org", data)
     lane = _Lane({reference.content_digest: data})
-    announced: list[Sequence[Any]] = []
 
-    assert _plane(store, lane, announced).hydrate("tsk-1", reference) == data
+    assert _plane(store, lane).hydrate("tsk-1", reference) == data
     # The peer is asked over a peer transport only, which no route offers here.
     assert lane.peer_reads == [(reference, True)]
     # A store read leaves a copy here for the next reader, and says so.
     assert lane.kept == [reference]
-    assert announced == [[("org", reference.content_digest)]]
 
 
 @pytest.mark.parametrize("how", ["hydrate", "hydrate_to"])
@@ -143,12 +138,11 @@ def test_a_large_object_a_peer_transport_reaches_is_read_before_the_store(
     lane = _Lane(
         {reference.content_digest: data}, frozenset({reference.content_digest})
     )
-    announced: list[Sequence[Any]] = []
-    plane = _plane(_DownStore(), lane, announced)
+    plane = _plane(_DownStore(), lane)
 
     assert _read(plane.for_task("tsk-1", "org"), reference, how, tmp_path) == data
     assert lane.peer_reads == [(reference, True)]
-    assert announced == [[("org", reference.content_digest)]]
+    assert lane.bounded == [reference]
 
 
 def test_a_large_object_is_relayed_while_the_store_is_down() -> None:
@@ -156,7 +150,7 @@ def test_a_large_object_is_relayed_while_the_store_is_down() -> None:
     reference = reference_for("org", data)
     lane = _Lane({reference.content_digest: data})
 
-    assert _plane(_DownStore(), lane, []).hydrate("tsk-1", reference) == data
+    assert _plane(_DownStore(), lane).hydrate("tsk-1", reference) == data
     assert lane.peer_reads == [(reference, True), (reference, False)]
 
 
@@ -164,7 +158,7 @@ def test_a_large_object_no_peer_holds_fails_as_the_outage_it_is() -> None:
     reference = reference_for("org", b"x" * _LARGE)
 
     with pytest.raises(ContentUnavailable, match="store down"):
-        _plane(_DownStore(), _Lane(), []).hydrate("tsk-1", reference)
+        _plane(_DownStore(), _Lane()).hydrate("tsk-1", reference)
 
 
 def test_a_large_file_no_peer_holds_fails_as_the_outage_it_is(tmp_path) -> None:
@@ -172,7 +166,7 @@ def test_a_large_file_no_peer_holds_fails_as_the_outage_it_is(tmp_path) -> None:
     dest = tmp_path / "object.bin"
 
     with pytest.raises(ContentUnavailable, match="store down"):
-        _plane(_DownStore(), _Lane(), []).hydrate_to("tsk-1", reference, dest)
+        _plane(_DownStore(), _Lane()).hydrate_to("tsk-1", reference, dest)
     assert not dest.exists()
 
 
@@ -183,7 +177,7 @@ def test_a_file_hydration_routes_as_a_read_does(tmp_path) -> None:
     lane = _Lane()
     dest = tmp_path / "out" / "object.bin"
 
-    _plane(store, lane, []).hydrate_to("tsk-1", reference, dest)
+    _plane(store, lane).hydrate_to("tsk-1", reference, dest)
 
     assert dest.read_bytes() == data
     assert lane.peer_reads == [(reference, True)]
@@ -196,7 +190,7 @@ def test_a_file_hydration_is_relayed_while_the_store_is_down(tmp_path) -> None:
     lane = _Lane({reference.content_digest: data})
     dest = tmp_path / "object.bin"
 
-    _plane(_DownStore(), lane, []).hydrate_to("tsk-1", reference, dest)
+    _plane(_DownStore(), lane).hydrate_to("tsk-1", reference, dest)
 
     assert dest.read_bytes() == data
 
@@ -204,15 +198,13 @@ def test_a_file_hydration_is_relayed_while_the_store_is_down(tmp_path) -> None:
 def test_a_written_file_lands_in_the_store_and_a_copy_is_kept(tmp_path) -> None:
     store = SharedFilesystemObjectStore(tmp_path / "shared")
     lane = _Lane()
-    announced: list[Sequence[Any]] = []
     source = tmp_path / "artifact.bin"
     source.write_bytes(b"produced bytes")
 
-    reference = _plane(store, lane, announced).write_file("tsk-1", "org", source)
+    reference = _plane(store, lane).write_file("tsk-1", "org", source)
 
     assert store.hydrate(reference) == b"produced bytes"
     assert lane.kept == [reference]
-    assert announced == [[("org", reference.content_digest)]]
 
 
 class _NoAccess:
@@ -302,7 +294,7 @@ def test_a_copy_that_fails_verification_mid_read_leaves_the_next_open_to_the_sto
     lane.store.write("org", data)
     (copy,) = [p for p in (tmp_path / "cache").rglob("*") if p.is_file()]
     copy.write_bytes(data[:-1] + bytes([data[-1] ^ 0xFF]))
-    plane = _plane(store, lane, [])
+    plane = _plane(store, lane)
 
     with pytest.raises(ContentHydrationError):
         b"".join(plane.open("tsk-1", reference))

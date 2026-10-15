@@ -153,3 +153,12 @@ def test_a_task_ending_during_a_drain_is_no_longer_named(tmp_path: Path) -> None
 
     heartbeat = _heartbeat(lifecycle, client)
     assert (heartbeat["status"], heartbeat["task_id"]) == (WorkerStatus.BUSY, None)
+
+
+def test_a_heartbeat_names_the_last_holding_report_sent(tmp_path: Path) -> None:
+    lifecycle, client = _lifecycle(tmp_path)
+    assert _heartbeat(lifecycle, client)["holding_seq"] is None
+
+    lifecycle.content_plane = cast(Any, MagicMock(holding_seq=7))
+
+    assert _heartbeat(lifecycle, client)["holding_seq"] == 7

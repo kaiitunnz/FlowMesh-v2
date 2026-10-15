@@ -388,9 +388,7 @@ if IS_ROOT_NODE:
     )
 
     CONTENT_HOLDERS = (
-        ContentHolderDirectory(
-            REDIS_CLIENT, record_ttl_sec=config.content_store.holder_record_ttl_sec
-        )
+        ContentHolderDirectory(REDIS_CLIENT)
         if config.content_store.hydration_enabled and WORKER_REGISTRY is not None
         else None
     )
@@ -811,6 +809,8 @@ async def _lifespan(_: FastAPI):
                 await GATED_SERVE.relay.stop()
             if FLEET_SAMPLER is not None:
                 FLEET_SAMPLER.shutdown()
+            if CONTENT_AUTHORITY is not None:
+                CONTENT_AUTHORITY.shutdown()
             if RESIDENT_CONTROL is not None:
                 RESIDENT_CONTROL.shutdown()
             if AGENT_MODEL_GATEWAY is not None:

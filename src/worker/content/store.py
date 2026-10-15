@@ -7,7 +7,8 @@ that needs an object this worker already has never leaves the node, and a task o
 another worker can be served from here instead of the shared store.
 
 Copies are kept on disk rather than in memory so they survive the worker process, and
-the worker tells control what it holds so a peer's read can be pointed at it. Two bounds
+the cache reports each copy it keeps or drops so a peer's read can be pointed at it. Two
+bounds
 keep the cache in check, each off unless configured: a copy unused for longer than the
 retention window ages out, and past the disk budget the least recently used copies go
 first. Reading a copy — for a task here or to serve a peer — counts as using it. A copy
@@ -16,6 +17,7 @@ object.
 """
 
 import os
+import threading
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -32,6 +34,8 @@ from shared.content import (
     verify_content,
 )
 
+from .holding import HoldingReporter
+
 _STALE_STAGING_SEC = 3600.0
 
 
@@ -39,18 +43,42 @@ class WorkerContentCache(FabricObjectStore):
     """The copies this worker holds, under a local directory."""
 
     def __init__(
-        self, root: Path, *, retain_sec: float = 0.0, max_bytes: int = 0
+        self,
+        root: Path,
+        *,
+        retain_sec: float = 0.0,
+        max_bytes: int = 0,
+        holding: HoldingReporter | None = None,
     ) -> None:
         self._objects = FilesystemObjectBacking(root, repair=True)
         self._objects.clear_staging(_STALE_STAGING_SEC)
         self._retain_sec = retain_sec
         self._max_bytes = max_bytes
+        self._holding = holding
+        # Held while a copy is removed, or a kept one is noted, so the notes follow
+        # the disk.
+        self._lock = holding.lock if holding is not None else threading.RLock()
+
+    @property
+    def holding_seq(self) -> int:
+        """The number of the last holding report sent, 0 when none is reported."""
+        return self._holding.seq if self._holding is not None else 0
+
+    def report_whole(self, *, restart: bool = False) -> int:
+        """Report every copy held, and return how many; with ``restart``, as the first
+        report of a new registration."""
+        with self._lock:
+            held = list(self._objects.iter_objects())
+            if self._holding is not None:
+                self._holding.whole(held, restart=restart)
+        return len(held)
 
     def write(
         self, scope: str, data: bytes, *, media_type: str = OCTET_STREAM
     ) -> ContentReference:
         reference = self._objects.write(scope, data, media_type=media_type)
         self._objects.touch(scope, reference.content_digest)
+        self._kept(reference)
         return reference
 
     def write_file(
@@ -65,6 +93,7 @@ class WorkerContentCache(FabricObjectStore):
             scope, path, media_type=media_type, cancelled=cancelled
         )
         self._objects.touch(scope, reference.content_digest)
+        self._kept(reference)
         return reference
 
     def staging_dir(self, scope: str) -> Path:
@@ -75,6 +104,7 @@ class WorkerContentCache(FabricObjectStore):
         """Take a file already verified as the reference's bytes in as its copy."""
         self._objects.adopt(reference, verified)
         self._objects.touch(reference.authorization_scope, reference.content_digest)
+        self._kept(reference)
 
     def fetch(self, reference: ContentReference) -> bytes:
         data = self._objects.read(
@@ -130,7 +160,8 @@ class WorkerContentCache(FabricObjectStore):
 
     def drop(self, reference: ContentReference) -> None:
         """Remove a copy."""
-        self._objects.remove(reference.authorization_scope, reference.content_digest)
+        with self._lock:
+            self._remove(reference.authorization_scope, reference.content_digest)
 
     def holds(self, reference: ContentReference) -> bool:
         return self._objects.holds(
@@ -141,8 +172,11 @@ class WorkerContentCache(FabricObjectStore):
         """Every copy this worker holds, as the scope and digest naming it."""
         return self._objects.iter_objects()
 
-    def evict(self, *, in_transfer: frozenset[str] = frozenset()) -> int:
-        """Bring the cache within its bounds, and return how many copies went.
+    def evict(
+        self, *, in_transfer: frozenset[str] = frozenset()
+    ) -> list[tuple[str, str]]:
+        """Bring the cache within its bounds, and return the copies that went, as the
+        scope and digest naming each.
 
         Copies unused past the retention window go first, then the least recently used
         until what is left fits the disk budget. A copy being served right now stays
@@ -150,13 +184,17 @@ class WorkerContentCache(FabricObjectStore):
         itself is in the shared store either way.
         """
         if self._retain_sec <= 0 and self._max_bytes <= 0:
-            return 0
+            return []
+        with self._lock:
+            return self._evict(in_transfer)
+
+    def _evict(self, in_transfer: frozenset[str]) -> list[tuple[str, str]]:
         held: list[tuple[float, int, str, str]] = []
         for scope, digest in list(self._objects.iter_objects()):
             if (stat := self._objects.stat(scope, digest)) is not None:
                 held.append((stat.st_mtime, stat.st_size, scope, digest))
         held.sort()
-        evicted = 0
+        evicted: list[tuple[str, str]] = []
         kept: list[tuple[float, int, str, str]] = []
         deadline = time.time() - self._retain_sec
         for entry in held:
@@ -166,8 +204,8 @@ class WorkerContentCache(FabricObjectStore):
                 and used_at <= deadline
                 and digest not in in_transfer
             ):
-                self._objects.remove(scope, digest)
-                evicted += 1
+                self._remove(scope, digest)
+                evicted.append((scope, digest))
             else:
                 kept.append(entry)
         if self._max_bytes > 0:
@@ -177,7 +215,22 @@ class WorkerContentCache(FabricObjectStore):
                     break
                 if digest in in_transfer:
                     continue
-                self._objects.remove(scope, digest)
+                self._remove(scope, digest)
                 total -= size
-                evicted += 1
+                evicted.append((scope, digest))
         return evicted
+
+    def _kept(self, reference: ContentReference) -> None:
+        if self._holding is None:
+            return
+        with self._lock:
+            # An eviction may have taken the copy since it was written; it noted that.
+            if self.holds(reference):
+                self._holding.kept(
+                    (reference.authorization_scope, reference.content_digest)
+                )
+
+    def _remove(self, scope: str, digest: str) -> None:
+        self._objects.remove(scope, digest)
+        if self._holding is not None:
+            self._holding.dropped((scope, digest))
