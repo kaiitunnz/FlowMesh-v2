@@ -1,14 +1,15 @@
 """The control plane's decision to authorize one hydration, and what it refuses."""
 
 import asyncio
-import json
 import threading
 from collections.abc import Callable, Coroutine
 from types import SimpleNamespace
 from typing import Any, cast
 
+import fakeredis
 import pytest
 
+from server.clients.redis import WORKERS_SET_KEY, RedisClient
 from server.content import (
     ContentHolderDirectory,
     ContentHydrationAuthority,
@@ -27,6 +28,7 @@ from shared.content import (
     ContentHydrationGrant,
     ContentReference,
     ContentRouteObservation,
+    HoldingReport,
     reference_for,
 )
 from shared.schemas.network import (
@@ -34,6 +36,7 @@ from shared.schemas.network import (
     RouteObservationOutcome,
     Transport,
 )
+from tests.server.redis_helpers import fake_redis_client
 
 _REFERENCE = reference_for("local", b"prepared", media_type="application/json")
 _HELD = (_REFERENCE.authorization_scope, _REFERENCE.content_digest)
@@ -42,7 +45,7 @@ _HELD = (_REFERENCE.authorization_scope, _REFERENCE.content_digest)
 class _FakePipeline:
     """Queues the directory's writes and applies them when it is executed."""
 
-    def __init__(self, redis: "_FakeRedis | _FakeRelayRedis") -> None:
+    def __init__(self, redis: "_FakeRelayRedis") -> None:
         self._redis = redis
         self._queued: list[Any] = []
 
@@ -56,40 +59,6 @@ class _FakePipeline:
         for write in self._queued:
             write()
         self._queued.clear()
-
-
-class _FakeRedis:
-    """Only the hash and expire surface the directory and session record use."""
-
-    def __init__(self) -> None:
-        self.hashes: dict[str, dict[str, Any]] = {}
-        self.pipelines = 0
-
-    def control_pipeline(self) -> _FakePipeline:
-        self.pipelines += 1
-        return _FakePipeline(self)
-
-    def hash_set(self, key: str, mapping: dict[str, Any]) -> None:
-        self.hashes.setdefault(key, {}).update(mapping)
-
-    async def hash_getall(self, key: str) -> dict[str, Any]:
-        return dict(self.hashes.get(key, {}))
-
-    async def hash_delete(self, key: str, *fields: str) -> None:
-        for field in fields:
-            self.hashes.get(key, {}).pop(field, None)
-
-    async def eval(self, script: str, numkeys: int, key: str, *args: str) -> int:
-        """The directory's one script: drop a holder's field of one incarnation."""
-        worker_id, generation = args
-        value = self.hashes.get(key, {}).get(worker_id)
-        if value is None or json.loads(value)["generation"] != int(generation):
-            return 0
-        del self.hashes[key][worker_id]
-        return 1
-
-    async def expire(self, key: str, ttl_sec: int) -> bool:
-        return True
 
 
 class _FakeRelayRedis:
@@ -116,18 +85,26 @@ class _Workers:
 
     def __init__(self, **incarnations: int) -> None:
         self._live = incarnations
+        self.on_retire: Callable[[str], None] = lambda worker_id: None
         self.reads = 0
         self.frames: list[tuple[str, str, dict[str, Any]]] = []
         # Workers serving a content listener, and so dialing peers.
         self.listening: set[str] = set()
+        # Registered workers whose heartbeat has lapsed.
+        self.stale: set[str] = set()
 
     async def get_worker_async(self, worker_id: str) -> Any:
         self.reads += 1
         return self._worker(worker_id)
 
-    async def get_workers_async(self, worker_ids: list[str]) -> list[Any]:
+    async def get_workers_heard_async(
+        self, worker_ids: list[str]
+    ) -> list[tuple[Any, bool]]:
         self.reads += 1
-        return [self._worker(worker_id) for worker_id in worker_ids]
+        return [
+            (self._worker(worker_id), worker_id in self.stale)
+            for worker_id in worker_ids
+        ]
 
     def _worker(self, worker_id: str) -> Any:
         if worker_id not in self._live:
@@ -143,6 +120,13 @@ class _Workers:
 
     def retire(self, worker_id: str) -> None:
         self._live.pop(worker_id, None)
+        self.on_retire(worker_id)
+
+    def registered(self) -> list[str]:
+        return list(self._live)
+
+    async def get_worker_ids_async(self) -> set[str]:
+        return set(self._live)
 
     def restart(self, worker_id: str) -> None:
         self._live[worker_id] = self._live[worker_id] + 1
@@ -159,14 +143,20 @@ def _authority(
     workers: _Workers,
     *,
     authorizes: bool | Callable[[str, str, ContentReference], bool] = True,
-    redis: Any = None,
+    redis: RedisClient | None = None,
     relay: _FakeRelayRedis | None = None,
     network: Any = None,
 ) -> ContentHydrationAuthority:
-    fake = redis if redis is not None else _FakeRedis()
-    client = cast(Any, SimpleNamespace(asyncio=fake))
+    client = redis if redis is not None else fake_redis_client(fakeredis.FakeServer())
+    if registered := workers.registered():
+        client.sync.sadd(WORKERS_SET_KEY, *registered)
+
+    def unregister(worker_id: str) -> None:
+        client.sync.srem(WORKERS_SET_KEY, worker_id)
+
+    workers.on_retire = unregister
     return ContentHydrationAuthority(
-        ContentHolderDirectory(client, record_ttl_sec=300.0),
+        ContentHolderDirectory(client),
         cast(Any, workers),
         authorizes=(
             authorizes
@@ -181,6 +171,10 @@ def _authority(
         ),
         network=network,
     )
+
+
+def _holding(*held: tuple[str, str]) -> HoldingReport:
+    return HoldingReport(seq=1, added=held, whole=True)
 
 
 def _granted(workers: _Workers) -> ContentHydrationGrant:
@@ -208,7 +202,7 @@ def _authorize(
 def test_a_bound_request_grants_both_ends_the_same_grant() -> None:
     workers = _Workers(**{"wkr-1": 3, "wkr-2": 5})
     authority = _authority(workers)
-    asyncio.run(authority.record_holding("wkr-1", [_HELD]))
+    asyncio.run(authority.record_holding("wkr-1", _holding(_HELD)))
 
     asyncio.run(_authorize(authority, "wkr-2", _REFERENCE))
 
@@ -225,10 +219,10 @@ def test_a_bound_request_grants_both_ends_the_same_grant() -> None:
 
 def test_the_transfer_record_routes_between_the_two_ends() -> None:
     workers = _Workers(**{"wkr-1": 3, "wkr-2": 5})
-    control = _FakeRedis()
+    control = fake_redis_client(fakeredis.FakeServer())
     relay = _FakeRelayRedis()
     authority = _authority(workers, redis=control, relay=relay)
-    asyncio.run(authority.record_holding("wkr-1", [_HELD]))
+    asyncio.run(authority.record_holding("wkr-1", _holding(_HELD)))
 
     asyncio.run(_authorize(authority, "wkr-2", _REFERENCE))
 
@@ -242,13 +236,13 @@ def test_the_transfer_record_routes_between_the_two_ends() -> None:
     assert record["origin_worker"] == "wkr-2"
     assert record["target_worker"] == "wkr-1"
     assert _REFERENCE.content_digest not in str(record)
-    assert not any(key.startswith("ct:sess:") for key in control.hashes)
+    assert not control.sync.scan_keys("ct:sess:*")
 
 
 def test_a_request_no_binding_authorizes_is_refused() -> None:
     workers = _Workers(**{"wkr-1": 3, "wkr-2": 5})
     authority = _authority(workers, authorizes=False)
-    asyncio.run(authority.record_holding("wkr-1", [_HELD]))
+    asyncio.run(authority.record_holding("wkr-1", _holding(_HELD)))
 
     asyncio.run(_authorize(authority, "wkr-2", _REFERENCE))
 
@@ -268,7 +262,7 @@ def test_an_object_no_holder_reported_is_refused_as_untracked() -> None:
 def test_a_holder_that_is_gone_is_refused_rather_than_granted() -> None:
     workers = _Workers(**{"wkr-1": 3, "wkr-2": 5})
     authority = _authority(workers)
-    asyncio.run(authority.record_holding("wkr-1", [_HELD]))
+    asyncio.run(authority.record_holding("wkr-1", _holding(_HELD)))
     workers.retire("wkr-1")
 
     asyncio.run(_authorize(authority, "wkr-2", _REFERENCE))
@@ -279,7 +273,7 @@ def test_a_holder_that_is_gone_is_refused_rather_than_granted() -> None:
 def test_a_holder_that_came_back_as_another_incarnation_is_refused() -> None:
     workers = _Workers(**{"wkr-1": 3, "wkr-2": 5})
     authority = _authority(workers)
-    asyncio.run(authority.record_holding("wkr-1", [_HELD]))
+    asyncio.run(authority.record_holding("wkr-1", _holding(_HELD)))
     workers.restart("wkr-1")
 
     asyncio.run(_authorize(authority, "wkr-2", _REFERENCE))
@@ -287,10 +281,37 @@ def test_a_holder_that_came_back_as_another_incarnation_is_refused() -> None:
     assert _denial(workers) == HydrationDenial.HOLDER_UNAVAILABLE
 
 
+def test_a_live_holder_is_granted_over_one_whose_heartbeat_lapsed() -> None:
+    """The lapsed holder recorded last, so it sorts first; its heartbeat puts it out."""
+    workers = _Workers(**{"wkr-1": 3, "wkr-2": 4, "wkr-3": 5})
+    authority = _authority(workers)
+    asyncio.run(authority.record_holding("wkr-1", _holding(_HELD)))
+    asyncio.run(authority.record_holding("wkr-2", _holding(_HELD)))
+    workers.stale.add("wkr-2")
+
+    asyncio.run(_authorize(authority, "wkr-3", _REFERENCE))
+
+    assert _granted(workers).holder_id == "wkr-1"
+
+
+def test_a_holder_whose_heartbeat_lapsed_is_refused_until_it_resumes() -> None:
+    workers = _Workers(**{"wkr-1": 3, "wkr-2": 5})
+    authority = _authority(workers)
+    asyncio.run(authority.record_holding("wkr-1", _holding(_HELD)))
+    workers.stale.add("wkr-1")
+
+    asyncio.run(_authorize(authority, "wkr-2", _REFERENCE))
+    assert _denial(workers) == HydrationDenial.HOLDER_UNAVAILABLE
+
+    workers.stale.clear()
+    asyncio.run(_authorize(authority, "wkr-2", _REFERENCE))
+    assert _granted(workers).holder_id == "wkr-1"
+
+
 def test_a_worker_is_never_sent_to_itself_for_an_object() -> None:
     workers = _Workers(**{"wkr-1": 3})
     authority = _authority(workers)
-    asyncio.run(authority.record_holding("wkr-1", [_HELD]))
+    asyncio.run(authority.record_holding("wkr-1", _holding(_HELD)))
 
     asyncio.run(_authorize(authority, "wkr-1", _REFERENCE))
 
@@ -300,7 +321,7 @@ def test_a_worker_is_never_sent_to_itself_for_an_object() -> None:
 def test_a_scope_is_part_of_what_a_holder_reported() -> None:
     workers = _Workers(**{"wkr-1": 3, "wkr-2": 5})
     authority = _authority(workers)
-    asyncio.run(authority.record_holding("wkr-1", [_HELD]))
+    asyncio.run(authority.record_holding("wkr-1", _holding(_HELD)))
 
     elsewhere = _REFERENCE.model_copy(update={"authorization_scope": "other"})
     asyncio.run(_authorize(authority, "wkr-2", elsewhere))
@@ -311,7 +332,7 @@ def test_a_scope_is_part_of_what_a_holder_reported() -> None:
 def test_an_unknown_requester_is_answered_with_nothing() -> None:
     workers = _Workers(**{"wkr-1": 3})
     authority = _authority(workers)
-    asyncio.run(authority.record_holding("wkr-1", [_HELD]))
+    asyncio.run(authority.record_holding("wkr-1", _holding(_HELD)))
 
     asyncio.run(_authorize(authority, "wkr-9", _REFERENCE))
 
@@ -322,7 +343,7 @@ def test_an_unknown_requester_is_answered_with_nothing() -> None:
 def test_every_grant_is_freshly_minted(field: str) -> None:
     workers = _Workers(**{"wkr-1": 3, "wkr-2": 5})
     authority = _authority(workers)
-    asyncio.run(authority.record_holding("wkr-1", [_HELD]))
+    asyncio.run(authority.record_holding("wkr-1", _holding(_HELD)))
 
     asyncio.run(_authorize(authority, "wkr-2", _REFERENCE))
     first = _granted(workers)
@@ -336,7 +357,7 @@ def test_every_grant_is_freshly_minted(field: str) -> None:
 def test_a_grant_carries_no_service_admission_identity() -> None:
     workers = _Workers(**{"wkr-1": 3, "wkr-2": 5})
     authority = _authority(workers)
-    asyncio.run(authority.record_holding("wkr-1", [_HELD]))
+    asyncio.run(authority.record_holding("wkr-1", _holding(_HELD)))
 
     asyncio.run(_authorize(authority, "wkr-2", _REFERENCE))
 
@@ -345,22 +366,29 @@ def test_a_grant_carries_no_service_admission_identity() -> None:
     assert "idm-" not in str(_granted(workers).model_dump())
 
 
-def test_a_holder_report_costs_one_round_trip_whatever_it_holds() -> None:
-    """A whole report goes up in one round trip, not two commands per object.
+def test_a_holder_report_costs_one_scripted_round_trip_per_chunk() -> None:
+    """A report goes up in one scripted call per 256 copies.
 
-    A holder re-reports everything it caches on every cadence, and every worker's
-    report lands on the one loop that also serves every content request, so the cost
-    of a large cache there has to stay flat.
+    Every worker's report lands on the one loop that also serves every content request,
+    so the cost of a large report there has to stay bounded per round trip.
     """
     workers = _Workers(**{"wkr-1": 3})
-    redis = _FakeRedis()
+    redis = fake_redis_client(fakeredis.FakeServer())
     authority = _authority(workers, redis=redis)
+    calls: list[int] = []
+    run_script = redis.asyncio.eval
 
-    held = [("local", f"{index:064x}") for index in range(50)]
-    asyncio.run(authority.record_holding("wkr-1", held))
+    async def counting(script: str, numkeys: int, *args: Any) -> Any:
+        calls.append(numkeys)
+        return await run_script(script, numkeys, *args)
 
-    assert redis.pipelines == 1
-    assert len(redis.hashes) == 50
+    cast(Any, redis.asyncio).eval = counting
+    held = [("local", f"{index:064x}") for index in range(300)]
+    asyncio.run(authority.record_holding("wkr-1", _holding(*held)))
+
+    assert len(calls) == 2
+    directory = ContentHolderDirectory(redis)
+    assert all(directory.holders(scope, digest) for scope, digest in held)
 
 
 class _Network:
@@ -451,8 +479,8 @@ def test_a_holder_reached_over_a_peer_transport_is_preferred() -> None:
     workers = _peers(**{"wkr-1": 3, "wkr-3": 4, "wkr-2": 5})
     network = _Network({"wkr-3": [Transport.WORKER_DIRECT, Transport.CONTROL_RELAY]})
     authority = _authority(workers, network=network)
-    asyncio.run(authority.record_holding("wkr-1", [_HELD]))
-    asyncio.run(authority.record_holding("wkr-3", [_HELD]))
+    asyncio.run(authority.record_holding("wkr-1", _holding(_HELD)))
+    asyncio.run(authority.record_holding("wkr-3", _holding(_HELD)))
 
     asyncio.run(_authorize(authority, "wkr-2", _REFERENCE))
 
@@ -473,7 +501,7 @@ def test_the_route_rides_beside_the_grant_and_the_holder_learns_the_requester() 
     relay = _FakeRelayRedis()
     network = _Network({"wkr-1": [Transport.NODE_RELAY, Transport.CONTROL_RELAY]})
     authority = _authority(workers, network=network, relay=relay)
-    asyncio.run(authority.record_holding("wkr-1", [_HELD]))
+    asyncio.run(authority.record_holding("wkr-1", _holding(_HELD)))
 
     asyncio.run(_authorize(authority, "wkr-2", _REFERENCE))
 
@@ -496,7 +524,7 @@ def test_a_peer_only_read_the_relay_alone_reaches_is_refused_unminted() -> None:
     workers = _peers(**{"wkr-1": 3, "wkr-2": 5})
     relay = _FakeRelayRedis()
     authority = _authority(workers, network=_Network({}), relay=relay)
-    asyncio.run(authority.record_holding("wkr-1", [_HELD]))
+    asyncio.run(authority.record_holding("wkr-1", _holding(_HELD)))
 
     asyncio.run(_authorize(authority, "wkr-2", _REFERENCE, True))
 
@@ -510,7 +538,7 @@ def test_a_requester_that_dials_no_peer_is_routed_over_the_relay() -> None:
     workers.listening = {"wkr-1"}
     network = _Network({"wkr-1": [Transport.WORKER_DIRECT]})
     authority = _authority(workers, network=network)
-    asyncio.run(authority.record_holding("wkr-1", [_HELD]))
+    asyncio.run(authority.record_holding("wkr-1", _holding(_HELD)))
 
     asyncio.run(_authorize(authority, "wkr-2", _REFERENCE))
 
@@ -522,7 +550,7 @@ def test_a_probe_route_never_carries_a_transfer() -> None:
     workers = _peers(**{"wkr-1": 3, "wkr-2": 5})
     network = _Network({"wkr-1": [Transport.WORKER_DIRECT]}, probe=True)
     authority = _authority(workers, network=network)
-    asyncio.run(authority.record_holding("wkr-1", [_HELD]))
+    asyncio.run(authority.record_holding("wkr-1", _holding(_HELD)))
 
     asyncio.run(_authorize(authority, "wkr-2", _REFERENCE, True))
 
@@ -533,7 +561,7 @@ def test_only_the_routed_requester_reports_on_a_transfers_path() -> None:
     workers = _peers(**{"wkr-1": 3, "wkr-2": 5})
     network = _Network({"wkr-1": [Transport.WORKER_DIRECT, Transport.CONTROL_RELAY]})
     authority = _authority(workers, network=network)
-    asyncio.run(authority.record_holding("wkr-1", [_HELD]))
+    asyncio.run(authority.record_holding("wkr-1", _holding(_HELD)))
     asyncio.run(_authorize(authority, "wkr-2", _REFERENCE))
     session = _granted(workers).transfer_session_id
 
@@ -560,7 +588,9 @@ def test_requests_from_the_events_thread_run_on_the_bound_loop() -> None:
     async def run() -> None:
         loop = asyncio.get_running_loop()
         authority.bind_loop(loop)
-        await loop.run_in_executor(None, lambda: authority.on_holding("wkr-1", [_HELD]))
+        await loop.run_in_executor(
+            None, lambda: authority.on_holding("wkr-1", _holding(_HELD))
+        )
         for _ in range(100):
             await asyncio.sleep(0.01)
             if workers.frames:
@@ -590,7 +620,9 @@ def test_the_binding_check_runs_on_the_thread_that_hands_the_request_over() -> N
     async def run() -> int:
         loop = asyncio.get_running_loop()
         authority.bind_loop(loop)
-        await loop.run_in_executor(None, lambda: authority.on_holding("wkr-1", [_HELD]))
+        await loop.run_in_executor(
+            None, lambda: authority.on_holding("wkr-1", _holding(_HELD))
+        )
         for _ in range(100):
             await asyncio.sleep(0.01)
             if workers.frames:
@@ -620,7 +652,7 @@ def test_a_binding_check_that_raises_denies_without_breaking_the_events_thread()
     async def run() -> None:
         loop = asyncio.get_running_loop()
         authority.bind_loop(loop)
-        await authority.record_holding("wkr-1", [_HELD])
+        await authority.record_holding("wkr-1", _holding(_HELD))
         await loop.run_in_executor(
             None,
             lambda: authority.on_request("wkr-2", "tsk-1", _REFERENCE, request_id=7),
@@ -649,7 +681,7 @@ def test_without_a_peer_transport_a_grant_reads_each_holder_once_and_resolves_no
     network.peer_enabled = False
     authority = _authority(workers, network=network)
     for holder in holders:
-        asyncio.run(authority.record_holding(holder, [_HELD]))
+        asyncio.run(authority.record_holding(holder, _holding(_HELD)))
     workers.reads = network.endpoint_reads = 0
 
     asyncio.run(_authorize(authority, "wkr-2", _REFERENCE))
@@ -669,7 +701,7 @@ def test_with_peer_transports_the_peer_reached_holder_is_found_at_any_position(
     network = _Network({holders[reachable]: [Transport.NODE_RELAY]})
     authority = _authority(workers, network=network)
     for holder in reversed(holders):
-        asyncio.run(authority.record_holding(holder, [_HELD]))
+        asyncio.run(authority.record_holding(holder, _holding(_HELD)))
     workers.reads = network.endpoint_reads = 0
 
     asyncio.run(_authorize(authority, "wkr-2", _REFERENCE))
@@ -699,7 +731,7 @@ def test_a_holders_content_listener_is_its_nodes_host_and_its_bound_port(
     network = _Network({})
     network.worker_directly_routable = routable
     authority = _authority(workers, network=network)
-    asyncio.run(authority.record_holding("wkr-3", [_HELD]))
+    asyncio.run(authority.record_holding("wkr-3", _holding(_HELD)))
 
     asyncio.run(_authorize(authority, "wkr-2", _REFERENCE))
 
@@ -712,7 +744,7 @@ def test_a_holders_content_listener_is_its_nodes_host_and_its_bound_port(
 def test_an_answer_carries_the_number_of_the_request_it_answers() -> None:
     workers = _Workers(**{"wkr-1": 3, "wkr-2": 5})
     authority = _authority(workers)
-    asyncio.run(authority.record_holding("wkr-1", [_HELD]))
+    asyncio.run(authority.record_holding("wkr-1", _holding(_HELD)))
     asyncio.run(_authorize(authority, "wkr-2", _REFERENCE))
     denying = _authority(workers, authorizes=False)
     asyncio.run(_authorize(denying, "wkr-2", _REFERENCE))

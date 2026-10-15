@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from shared.content import (
+    HOLDING_RESYNC_FRAME_KIND,
     OCTET_STREAM,
     ContentCarriagePlan,
     ContentHydrationError,
@@ -45,13 +46,16 @@ from shared.network.relay_frame import CONTENT_FRAME_KIND, RelayDirection, Relay
 from shared.schemas.network import RouteObservationOutcome
 from shared.utils.atomic import write_replacing
 
-from .client import AnnounceHolding, ContentHydrationClient, RequestGrant
+from .client import ContentHydrationClient, RequestGrant
 from .holder import ContentHolder
 from .peer import ContentPeerDialer
 from .store import WorkerContentCache
 
 # A lane busy sending waits on the event stream; a re-registration waits this long.
 _REBIND_WAIT_SEC = 30.0
+
+# How often the cache is brought back within its bounds, when it has any.
+_EVICTION_INTERVAL_SEC = 60.0
 
 # Reports one dialed transfer's route evidence to control.
 ObservationReport = Callable[[ContentRouteObservation], None]
@@ -87,8 +91,6 @@ class ContentLaneHost:
         generation: int,
         transfer_timeout_sec: float = 60.0,
         window_bytes: int = DEFAULT_TRANSFER_WINDOW_BYTES,
-        announce: AnnounceHolding | None = None,
-        holder_report_ttl_sec: float = 300.0,
         peer_enabled: bool = False,
         peer_material: MutualTlsMaterial | None = None,
         listener_sock: socket.socket | None = None,
@@ -103,8 +105,6 @@ class ContentLaneHost:
         self._generation = generation
         self._transfer_timeout_sec = transfer_timeout_sec
         self._window_bytes = window_bytes
-        self._announce = announce
-        self._holder_report_ttl_sec = holder_report_ttl_sec
         self._peer_enabled = peer_enabled
         self._peer_material = peer_material
         self._listener_sock = listener_sock
@@ -119,6 +119,9 @@ class ContentLaneHost:
         self._holder: ContentHolder | None = None
         self._client: ContentHydrationClient | None = None
         self._sweep: asyncio.Task[None] | None = None
+        # Whether a whole holding report asked for is queued or being walked.
+        self._whole_lock = threading.Lock()
+        self._whole_queued = False
 
     @property
     def store(self) -> WorkerContentCache:
@@ -127,6 +130,7 @@ class ContentLaneHost:
     def start(self) -> None:
         self._thread.start()
         self._call(self._build).result()
+        self._store.start_reporting()
 
     async def _build(self) -> None:
         sink = WireFrameSink(self._push_frame)
@@ -169,7 +173,7 @@ class ContentLaneHost:
                 logger=self._logger,
             )
             await self._listener.start_on_socket(self._listener_sock)
-        self._sweep = asyncio.ensure_future(self._keep_held_reachable())
+        self._sweep = asyncio.ensure_future(self._keep_within_bounds())
 
     def _observe_route(
         self,
@@ -215,8 +219,7 @@ class ContentLaneHost:
     def read_peer(
         self, reference: ContentReference, task_id: str, peer_only: bool = False
     ) -> bytes:
-        """An object's verified bytes from the peer control resolves, kept here too;
-        the copy is announced by whoever asked for the read.
+        """An object's verified bytes from the peer control resolves, kept here too.
 
         With ``peer_only`` the read skips the root relay.
         """
@@ -299,7 +302,7 @@ class ContentLaneHost:
         """Cache a copy and keep the cache in bounds; the reference while it is held.
 
         None when the copy did not survive the bounds — an object larger than the whole
-        disk budget — so nothing is announced for a copy that is not here.
+        disk budget.
         """
         return self.held(self._store.write(scope, data, media_type=media_type))
 
@@ -325,7 +328,8 @@ class ContentLaneHost:
         return reference if self._store.holds(reference) else None
 
     def evict(self) -> int:
-        """Bring the cache within its bounds, leaving anything in transfer alone."""
+        """Bring the cache within its bounds, leaving anything in transfer alone, and
+        return how many copies went."""
         in_transfer = self._holder.in_transfer if self._holder else frozenset()
         return self._store.evict(in_transfer=in_transfer)
 
@@ -345,47 +349,21 @@ class ContentLaneHost:
         self.report_held()
 
     def report_held(self) -> int:
-        """Report every copy this worker holds, and return how many.
+        """Report every copy this worker holds as the first report of its registration,
+        and return how many."""
+        return self._store.report_whole(restart=True)
 
-        A holder record lapses unless its holder keeps reporting, so this runs on a
-        cadence inside the record's lifetime. It also runs before the worker takes any
-        work, so a restarted worker's copies are reachable again rather than sitting
-        unused on its disk: the report lands under its new incarnation, superseding the
-        record its previous one left behind.
-        """
-        if self._announce is None:
-            return 0
-        held = list(self._store.iter_held())
-        if held:
-            self._announce(held)
-        return len(held)
-
-    @property
-    def housekeeping_interval_sec(self) -> float:
-        """How often the loop reports and sweeps.
-
-        Several times within one holder-record lifetime, so a record is refreshed well
-        before it lapses even if a report is missed.
-        """
-        return max(5.0, min(self._holder_report_ttl_sec / 3, 60.0))
-
-    async def _keep_held_reachable(self) -> None:
-        """Keep the cache reachable and bounded: report what is here, drop what is over.
-
-        Eviction runs first so a copy on its way out is not advertised in the same
-        breath; a peer that reads a copy this tick evicts finds it gone and falls
-        through to the shared store, which is what the fall-through is for.
-        """
+    async def _keep_within_bounds(self) -> None:
+        """Bring the cache back within its bounds on a cadence, when it has any."""
         while True:
-            await asyncio.sleep(self.housekeeping_interval_sec)
+            await asyncio.sleep(_EVICTION_INTERVAL_SEC)
             try:
-                # Both walk the cache directory, so they run off the loop that is also
-                # carrying transfers and the control frames they depend on.
-                if (evicted := await asyncio.to_thread(self.evict)) > 0:
+                # Eviction walks the cache directory, so it runs off the loop that is
+                # also carrying transfers and the control frames they depend on.
+                if evicted := await asyncio.to_thread(self.evict):
                     self._logger.info("evicted %d cached content objects", evicted)
-                await asyncio.to_thread(self.report_held)
             except Exception:
-                self._logger.exception("content cache housekeeping failed")
+                self._logger.exception("content cache eviction failed")
 
     def route(self, frame_kind: str, frame: dict[str, Any]) -> bool:
         """Marshal one content control frame onto the lane loop; return handled."""
@@ -397,9 +375,31 @@ class ContentLaneHost:
             self._loop.call_soon_threadsafe(self._on_serve_grant, frame)
         elif frame_kind == CONTENT_FRAME_KIND:
             asyncio.run_coroutine_threadsafe(self._on_frame(frame), self._loop)
+        elif frame_kind == HOLDING_RESYNC_FRAME_KIND:
+            with self._whole_lock:
+                # A walk already queued or under way reports what this one would.
+                if self._whole_queued:
+                    return True
+                self._whole_queued = True
+            # The whole holding walks the cache directory, so it is reported off both
+            # the thread delivering control frames and the lane's loop.
+            asyncio.run_coroutine_threadsafe(
+                asyncio.to_thread(self._report_whole), self._loop
+            )
         else:
             return False
         return True
+
+    def _report_whole(self) -> None:
+        try:
+            held = self._store.report_whole()
+        except Exception:
+            self._logger.exception("could not report the whole content holding")
+            return
+        finally:
+            with self._whole_lock:
+                self._whole_queued = False
+        self._logger.info("reported %d held content objects on request", held)
 
     def _on_grant(self, frame: dict[str, Any]) -> None:
         if self._client is not None:
@@ -462,6 +462,7 @@ class ContentLaneHost:
                 self._call(self._holder.aclose).result(timeout=min(5.0, left()))
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join(timeout=min(5.0, left()))
+        self._store.stop_reporting()
 
 
 def _copy_file(source: Path, dest: Path) -> None:

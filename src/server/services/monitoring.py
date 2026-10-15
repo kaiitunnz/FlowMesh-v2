@@ -9,7 +9,9 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
-from shared.content import ContentReference, ContentRouteObservation
+from pydantic import ValidationError
+
+from shared.content import ContentReference, ContentRouteObservation, HoldingReport
 from shared.resident.reports import (
     ResidentBootstrapAck,
     ResidentOpOutcome,
@@ -960,6 +962,7 @@ class EventMonitor:
                     self._runtime.redrive_overdue_ops(worker_id)
                 if report.outcome is not ReportOutcome.UNKNOWN:
                     self._record_gpu_availability(worker_id, event.metrics)
+                    self._check_holding(worker_id, event.payload.get("holding_seq"))
             case "STATUS" if event.origin == "worker":
                 # A server-origin event announces a write the registry already applied
                 # inline; replaying it would land that value again on top of whatever
@@ -993,13 +996,15 @@ class EventMonitor:
                     ResidentOpOutcome.model_validate(event.payload["outcome"])
                 )
             case "CONTENT_HOLDING" if self._content_authority is not None:
-                self._content_authority.on_holding(
-                    worker_id,
-                    [
-                        (str(scope), str(digest))
-                        for scope, digest in event.payload["held"]
-                    ],
-                )
+                try:
+                    holding = HoldingReport.model_validate(event.payload.get("report"))
+                except ValidationError:
+                    self._logger.warning(
+                        "Ignoring an unreadable content holding report from %s",
+                        worker_id,
+                    )
+                else:
+                    self._content_authority.on_holding(worker_id, holding)
             case "CONTENT_ACCESS_REQUEST" if self._content_access is not None:
                 task_id = str(event.payload["task_id"])
                 dispatch_id = event.payload.get("dispatch_id")
@@ -1081,6 +1086,16 @@ class EventMonitor:
                 self._logger.debug(
                     "Ignoring task event type=%s payload=%s", event_type, event.payload
                 )
+
+    def _check_holding(self, worker_id: str, holding_seq: Any) -> None:
+        """Hand the holding report number a heartbeat names to the content authority."""
+        if self._content_authority is None or holding_seq is None:
+            return
+        try:
+            seq = int(holding_seq)
+        except (TypeError, ValueError):
+            return
+        self._content_authority.on_heartbeat(worker_id, seq)
 
     def _record_gpu_availability(self, worker_id: str, metrics: dict[str, Any]) -> None:
         """Store the GPU availability a heartbeat carried, never at the cost of the

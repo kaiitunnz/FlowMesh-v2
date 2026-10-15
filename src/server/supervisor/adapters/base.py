@@ -365,7 +365,6 @@ class WorkerAdapter(ABC):
             "CONTENT_STORE_PREFIX": env.CONTENT_STORE_PREFIX,
             "CONTENT_STORE_REGION": env.CONTENT_STORE_REGION,
             "CONTENT_STORE_FILESYSTEM_ROOT": env.CONTENT_STORE_FILESYSTEM_ROOT,
-            "CONTENT_HOLDER_TTL_SEC": to_env_str(env.CONTENT_HOLDER_TTL_SEC),
             "CONTENT_TRANSFER_TIMEOUT_SEC": to_env_str(
                 env.CONTENT_TRANSFER_TIMEOUT_SEC
             ),

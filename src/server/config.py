@@ -593,7 +593,6 @@ class ContentStoreConfig:
 
     hydration_enabled: bool = False
     grant_ttl_sec: float = 60.0
-    holder_record_ttl_sec: float = 300.0
     access_grant_ttl_sec: float = 900.0
     read_stall_timeout_sec: float = _DEFAULT_READ_STALL_TIMEOUT_SEC
     read_attempts: int = _DEFAULT_READ_ATTEMPTS
@@ -605,7 +604,6 @@ class ContentStoreConfig:
         return cls(
             hydration_enabled=content_hydration_enabled(),
             grant_ttl_sec=parse_float_env("CONTENT_HYDRATION_GRANT_TTL_SEC", 60.0),
-            holder_record_ttl_sec=parse_float_env("CONTENT_HOLDER_TTL_SEC", 300.0),
             access_grant_ttl_sec=max(
                 _MIN_ACCESS_GRANT_TTL_SEC,
                 parse_float_env("CONTENT_ACCESS_TTL_SEC", 900.0),

@@ -22,6 +22,7 @@ from .grant import (
     GrantRejection,
     HolderGrantGate,
 )
+from .holding import HOLDING_RESYNC_FRAME_KIND, HeldCopy, HoldingReport
 from .reference import (
     CONTENT_ENCODING_IDENTITY,
     OCTET_STREAM,
@@ -84,6 +85,9 @@ __all__ = [
     "ScopedObjectStore",
     "GrantRejection",
     "HolderGrantGate",
+    "HOLDING_RESYNC_FRAME_KIND",
+    "HeldCopy",
+    "HoldingReport",
     "WriteCancelled",
     "TREE_MEDIA_TYPE",
     "TreeManifest",

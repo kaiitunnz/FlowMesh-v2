@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 from google.protobuf.json_format import MessageToDict
 
 import worker.supervisor_client as supervisor_module
+from shared.content import HoldingReport
 from shared.schemas.event import WorkerEvent
 from tests.worker.test_supervisor_client_dispatch_id import _client
 
@@ -72,3 +73,24 @@ def test_a_heartbeat_names_the_task_of_its_dispatch() -> None:
 
     event = MessageToDict(sent.payload, preserving_proto_field_name=True)
     assert (event["dispatch_id"], event["payload"]["task_id"]) == ("dsp-1", "tsk-1")
+
+
+def test_a_heartbeat_carries_the_holding_report_number_and_a_report_its_changes() -> (
+    None
+):
+    client = _client()
+    client._shutdown.clear()
+    client._stub = cast(Any, object())
+
+    client.heartbeat(holding_seq=3)
+    client.push_content_holding(HoldingReport(seq=4, dropped=(("org", "a" * 64),)))
+    client._event_queue.put(client._EVENT_SENTINEL)
+    heartbeat, holding = [
+        MessageToDict(message.payload, preserving_proto_field_name=True)
+        for message in client._event_messages(threading.Event())
+    ]
+
+    assert heartbeat["payload"]["holding_seq"] == 3
+    assert HoldingReport.model_validate(holding["payload"]["report"]) == HoldingReport(
+        seq=4, dropped=(("org", "a" * 64),)
+    )

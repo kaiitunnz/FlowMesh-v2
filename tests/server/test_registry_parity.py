@@ -302,3 +302,17 @@ def test_the_set_writes_count_alike() -> None:
         sync.srem("s", "a", "c"),
         sync.srem("s"),
     ] == expected
+
+
+def test_the_set_differences_agree() -> None:
+    client = fake_redis_client(fakeredis.FakeServer())
+    client.sync.sadd("roster", "a", "b", "c")
+    client.sync.sadd("registered", "b")
+    client.sync.sadd("other", "c")
+
+    expected = {"a"}
+    assert client.sync.set_difference("roster", "registered", "other") == expected
+    assert (
+        asyncio.run(client.asyncio.set_difference("roster", "registered", "other"))
+        == expected
+    )

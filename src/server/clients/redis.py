@@ -298,7 +298,18 @@ SSH_RELAY_ROOT_CURSOR_KEY = "sh:root:up_cursor"
 
 
 def content_holders_key(scope: str, digest: str) -> str:
-    return f"ct:holders:{scope}:{digest}"
+    return f"ct:object-holders:{scope}:{digest}"
+
+
+def content_held_key(worker_id: str) -> str:
+    return f"ct:held:{worker_id}"
+
+
+def content_held_seq_key(worker_id: str) -> str:
+    return f"ct:held-seq:{worker_id}"
+
+
+CONTENT_HELD_WORKERS_KEY = "ct:held-workers"
 
 
 def content_finalization_key(scope: str, idempotency_key: str) -> str:
@@ -584,6 +595,10 @@ class SyncRedisClient:
     def sismember(self, key: str, member: str) -> bool:
         return bool(self._control.sismember(key, member))
 
+    def set_difference(self, key: str, *others: str) -> set[str]:
+        """The members of ``key`` in none of ``others``."""
+        return set(_sync(self._control.sdiff([key, *others])))
+
     def scan_set(self, key: str, cursor: int, count: int) -> tuple[int, list[str]]:
         """Read one ``SSCAN`` step: the next cursor, 0 once done, and the members."""
         next_cursor, members = _sync(self._control.sscan(key, cursor, count=count))
@@ -837,6 +852,9 @@ class AsyncRedisClient:
 
     async def sismember(self, key: str, member: str) -> bool:
         return bool(await _awaitable(self._control.sismember(key, member)))
+
+    async def set_difference(self, key: str, *others: str) -> set[str]:
+        return set(await _awaitable(self._control.sdiff([key, *others])))
 
     async def scan_set(
         self, key: str, cursor: int, count: int

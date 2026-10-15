@@ -559,29 +559,39 @@ class WorkerRegistry:
             for worker_id, raw in zip(worker_ids, raws)
         ]
 
-    def _read_workers(self, worker_ids: Iterable[str]) -> list[tuple[Worker, bool]]:
-        """Each registered worker among ``worker_ids`` with whether it is stale, in
-        id order, read in one round trip."""
-        ordered = sorted(worker_ids)
+    def get_workers_heard(
+        self, worker_ids: Sequence[str]
+    ) -> list[tuple[Worker | None, bool]]:
+        """Each worker's record, None when it is not registered, with whether its
+        heartbeat has lapsed, in the order given, read in one round trip."""
         with self._rds.sync.control_pipeline() as pipe:
-            for worker_id in ordered:
+            for worker_id in worker_ids:
                 pipe.hgetall(worker_key(worker_id))
                 pipe.ttl(worker_hb_key(worker_id))
             replies: list[Any] = pipe.execute()
-        return _parse_worker_reads(ordered, replies)
+        return _parse_worker_reads(worker_ids, replies)
+
+    async def get_workers_heard_async(
+        self, worker_ids: Sequence[str]
+    ) -> list[tuple[Worker | None, bool]]:
+        async with self._rds.asyncio.control_pipeline() as pipe:
+            for worker_id in worker_ids:
+                pipe.hgetall(worker_key(worker_id))
+                pipe.ttl(worker_hb_key(worker_id))
+            replies: list[Any] = await pipe.execute()
+        return _parse_worker_reads(worker_ids, replies)
+
+    def _read_workers(self, worker_ids: Iterable[str]) -> list[tuple[Worker, bool]]:
+        """Each registered worker among ``worker_ids`` with whether it is stale, in
+        id order, read in one round trip."""
+        return _registered(self.get_workers_heard(sorted(worker_ids)))
 
     async def _read_workers_async(
         self, worker_ids: Iterable[str]
     ) -> list[tuple[Worker, bool]]:
         """Each registered worker among ``worker_ids`` with whether it is stale, in
         id order, read in one round trip."""
-        ordered = sorted(worker_ids)
-        async with self._rds.asyncio.control_pipeline() as pipe:
-            for worker_id in ordered:
-                pipe.hgetall(worker_key(worker_id))
-                pipe.ttl(worker_hb_key(worker_id))
-            replies: list[Any] = await pipe.execute()
-        return _parse_worker_reads(ordered, replies)
+        return _registered(await self.get_workers_heard_async(sorted(worker_ids)))
 
     def is_worker_stale(self, worker_id: str) -> bool:
         return _is_stale_ttl(self._rds.sync.ttl(worker_hb_key(worker_id)))
@@ -1182,14 +1192,18 @@ def _is_stale_ttl(ttl: float | None) -> bool:
 
 def _parse_worker_reads(
     worker_ids: Sequence[str], replies: Sequence[Any]
+) -> list[tuple[Worker | None, bool]]:
+    """Pair each worker id's ``hgetall`` and heartbeat ``ttl`` replies."""
+    return [
+        (_parse_worker_from_redis(worker_id, raw), _is_stale_ttl(ttl))
+        for worker_id, raw, ttl in zip(worker_ids, replies[::2], replies[1::2])
+    ]
+
+
+def _registered(
+    reads: list[tuple[Worker | None, bool]],
 ) -> list[tuple[Worker, bool]]:
-    """Pair each worker id's ``hgetall`` and heartbeat ``ttl`` replies, dropping
-    ids with no record."""
-    reads: list[tuple[Worker, bool]] = []
-    for worker_id, raw, ttl in zip(worker_ids, replies[::2], replies[1::2]):
-        if (worker := _parse_worker_from_redis(worker_id, raw)) is not None:
-            reads.append((worker, _is_stale_ttl(ttl)))
-    return reads
+    return [(worker, stale) for worker, stale in reads if worker is not None]
 
 
 def _is_cordoned(worker: Worker, cordoned_members: set[str]) -> bool:

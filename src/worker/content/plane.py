@@ -44,7 +44,6 @@ from shared.outcome import (
 )
 
 from .access import ContentAccessDenied, ContentAccessRegistry
-from .client import AnnounceHolding
 from .lane_host import ContentLaneHost
 
 
@@ -63,14 +62,12 @@ class WorkerContentPlane:
         lane: ContentLaneHost | None,
         access: ContentAccessRegistry,
         *,
-        announce: AnnounceHolding | None = None,
         finalizations: FinalizationIndexClient | None = None,
         relay_max_bytes: int = DEFAULT_RELAY_TRANSFER_MAX_BYTES,
         logger: logging.Logger | None = None,
     ) -> None:
         self._lane = lane
         self._access = access
-        self._announce = announce
         self._finalizations = finalizations
         self._relay_max_bytes = relay_max_bytes
         self._logger = logger or logging.getLogger("content-plane")
@@ -87,6 +84,16 @@ class WorkerContentPlane:
         return FinalizingContentStore(
             _TaskScopedStores(self, task_id), self._finalizations
         )
+
+    @property
+    def holding_seq(self) -> int | None:
+        """The number of this worker's last holding report, None without a cache."""
+        return self._lane.store.holding_seq if self._lane is not None else None
+
+    def flush_holding(self) -> None:
+        """Send the holding changes this worker's cache is collecting."""
+        if self._lane is not None:
+            self._lane.store.flush_holding()
 
     def start(self) -> None:
         """Bring up the cache lane, if this worker runs one, and report what it holds.
@@ -290,7 +297,7 @@ class WorkerContentPlane:
     def _kept[T](
         self, reference: ContentReference, lane: ContentLaneHost, value: T
     ) -> T:
-        """Announce the copy a peer read left here."""
+        """Keep the copy a peer read left here within the cache's bounds."""
         self._cache(reference, lambda: lane.held(reference))
         return value
 
@@ -343,12 +350,9 @@ class WorkerContentPlane:
         reference: ContentReference,
         keep: Callable[[], ContentReference | None],
     ) -> None:
-        """Keep a copy and announce it; a failure costs only the next read."""
+        """Keep a copy, which the cache reports; a failure costs only the next read."""
         try:
-            if keep() is not None and self._announce is not None:
-                self._announce(
-                    [(reference.authorization_scope, reference.content_digest)]
-                )
+            keep()
         except Exception:
             self._logger.warning(
                 "could not cache %s locally", reference.content_digest, exc_info=True
@@ -359,8 +363,8 @@ class _TaskScopedStores:
     """One task's content plane, presented as the store each scope is reached through.
 
     An outcome is content like any other: it goes through the plane, so it lands in the
-    shared store, stays in this worker's cache, and is announced there — a later reader
-    can then be served the copy instead of paying for the store.
+    shared store and in this worker's cache, which reports it, and a later reader can be
+    served the copy without a store read.
     """
 
     def __init__(self, plane: "WorkerContentPlane", task_id: str) -> None:

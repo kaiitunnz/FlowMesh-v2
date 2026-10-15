@@ -509,7 +509,10 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
 - **Worker content cache and granted hydration.** What a worker holds is a cache over
   that store, so a copy may be dropped at any time: a deployment can bound the cache by
   how long a copy goes unused and by disk, least recently used first, and leaves both
-  unbounded by default. A read tries the local copy, then another worker's copy, then
+  unbounded by default. A worker reports each copy it keeps or drops, and its whole
+  holding when it registers; control keeps a worker's records while it is registered,
+  and grants a read from a holder only while its heartbeat is current. A read tries the
+  local copy, then another worker's copy, then
   the store itself. For a peer's copy the control plane checks that the requesting
   worker is running the task and that it is bound to exactly that reference as an input
   or delivered outcome, resolves a live holder and a route to it, and mints one

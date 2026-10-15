@@ -1,73 +1,314 @@
-"""What a worker tells control it holds, at startup and on its keep-alive cadence."""
+"""What a worker tells control about its cache: its whole holding when it attaches or
+is asked, and each copy it keeps or drops, in numbered reports that follow the disk."""
+
+import os
+import threading
+import time
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
-from worker.content import ContentLaneHost, WorkerContentCache
+from shared.content import (
+    HOLDING_RESYNC_FRAME_KIND,
+    HeldCopy,
+    HoldingReport,
+    reference_for,
+)
+from worker.content import (
+    ContentLaneHost,
+    HoldingReporter,
+    WorkerContentCache,
+    WorkerContentPlane,
+)
+
+_COPY = ("local", "c" * 64)
 
 
 class _Reports:
-    def __init__(self) -> None:
-        self.calls: list[list[tuple[str, str]]] = []
+    def __init__(self, *, fail_first: bool = False) -> None:
+        self.reports: list[HoldingReport] = []
+        self._fail = fail_first
+        self.arrived = threading.Event()
 
-    def __call__(self, held) -> None:
-        self.calls.append(list(held))
+    def __call__(self, report: HoldingReport) -> None:
+        if self._fail:
+            self._fail = False
+            raise RuntimeError("event stream not ready")
+        self.reports.append(report)
+        self.arrived.set()
 
     @property
-    def reported(self) -> set[tuple[str, str]]:
-        return {item for call in self.calls for item in call}
+    def seqs(self) -> list[int]:
+        return [report.seq for report in self.reports]
 
 
-def _lane(tmp_path, reports: _Reports, **kwargs) -> ContentLaneHost:
+def _cache(tmp_path: Path, reports: _Reports, **kwargs: float) -> WorkerContentCache:
+    """A cache whose notes leave when flushed or stopped, until a lane starts it."""
+    return WorkerContentCache(
+        tmp_path / "content",
+        retain_sec=kwargs.get("retain", 0.0),
+        max_bytes=int(kwargs.get("max_bytes", 0)),
+        announce=reports,
+    )
+
+
+def _lane(cache: WorkerContentCache) -> ContentLaneHost:
     return ContentLaneHost(
-        store=WorkerContentCache(
-            tmp_path / "content", retain_sec=kwargs.pop("retain", 900.0)
-        ),
+        store=cache,
         push_frame=lambda frame: None,
         request_grant=lambda reference, task_id, peer_only, request_id: None,
         worker_id="wkr-1",
         generation=2,
-        announce=reports,
-        **kwargs,
     )
 
 
-def test_a_restarted_worker_reports_the_copies_still_on_its_disk(tmp_path) -> None:
-    first = WorkerContentCache(tmp_path / "content", retain_sec=900.0)
-    reference = first.write("local", b"prepared", media_type="application/json")
-
-    reports = _Reports()
-    lane = _lane(tmp_path, reports)
-    lane.start()
-    try:
-        assert lane.report_held() == 1
-    finally:
-        lane.stop()
-    assert reports.reported == {("local", reference.content_digest)}
-
-
-def test_one_report_carries_every_object_rather_than_one_message_each(
-    tmp_path,
+def test_a_restarted_worker_reports_the_copies_still_on_its_disk_whole(
+    tmp_path: Path,
 ) -> None:
-    cache = WorkerContentCache(tmp_path / "content", retain_sec=900.0)
-    for index in range(5):
-        cache.write("local", f"object-{index}".encode())
+    first = WorkerContentCache(tmp_path / "content")
+    kept = [first.write("local", f"object-{index}".encode()) for index in range(5)]
 
     reports = _Reports()
-    lane = _lane(tmp_path, reports)
+    cache = _cache(tmp_path, reports)
+    lane = _lane(cache)
     lane.start()
     try:
         assert lane.report_held() == 5
     finally:
         lane.stop()
-    assert len(reports.calls) == 1
-    assert len(reports.calls[0]) == 5
+    (report,) = reports.reports
+    assert (report.seq, report.whole, report.dropped) == (1, True, ())
+    assert set(report.added) == {("local", r.content_digest) for r in kept}
 
 
-@pytest.mark.parametrize("ttl", [15.0, 60.0, 300.0, 3600.0])
-def test_the_keep_alive_reports_several_times_per_record_lifetime(
-    tmp_path, ttl: float
+def test_each_kept_and_dropped_copy_leaves_in_the_next_numbered_report(
+    tmp_path: Path,
 ) -> None:
-    # A record lapses unless a report refreshes it, so the loop must come round well
-    # inside one lifetime however the deployment sets it.
-    lane = _lane(tmp_path, _Reports(), holder_report_ttl_sec=ttl)
-    assert lane.housekeeping_interval_sec <= ttl / 3
+    reports = _Reports()
+    cache = _cache(tmp_path, reports)
+    cache.report_whole(restart=True)
+    a = cache.write("local", b"a")
+    b = cache.write("local", b"b")
+    cache.drop(a)
+    cache.stop_reporting()
+
+    assert reports.seqs == [1, 2]
+    report = reports.reports[1]
+    # A copy kept and dropped before the report left is named once, as dropped.
+    assert report.added == (("local", b.content_digest),)
+    assert report.dropped == (("local", a.content_digest),)
+    assert cache.holding_seq == 2
+
+
+def test_an_evicted_copy_is_reported_dropped(tmp_path: Path) -> None:
+    reports = _Reports()
+    cache = _cache(tmp_path, reports, retain=1.0)
+    old = cache.write("local", b"old")
+    time.sleep(1.1)
+
+    assert cache.evict() == 1
+    cache.stop_reporting()
+
+    assert reports.reports[-1].dropped == (("local", old.content_digest),)
+
+
+def test_a_copy_evicted_before_its_note_is_never_reported_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reports = _Reports()
+    cache = _cache(tmp_path, reports)
+    backing = cache._objects
+    touch = backing.touch
+
+    def evicted_meanwhile(scope: str, digest: str) -> None:
+        touch(scope, digest)
+        backing.remove(scope, digest)
+
+    monkeypatch.setattr(backing, "touch", evicted_meanwhile)
+    cache.write("local", b"gone at once")
+    cache.stop_reporting()
+
+    assert reports.reports == []
+
+
+def test_a_full_batch_leaves_without_waiting() -> None:
+    reports = _Reports()
+    reporter = HoldingReporter(reports, threading.RLock(), max_changes=3)
+    for index in range(3):
+        reporter.kept(("local", f"{index:064x}"))
+
+    assert reports.seqs == [1]
+    assert len(reports.reports[0].added) == 3
+    reporter.stop()
+
+
+def test_a_report_that_could_not_be_sent_still_takes_its_number() -> None:
+    reports = _Reports(fail_first=True)
+    reporter = HoldingReporter(reports, threading.RLock(), flush_after_sec=0.01)
+    reporter.start()
+    reporter.kept(("local", "a" * 64))
+    time.sleep(0.2)
+    reporter.kept(("local", "b" * 64))
+    reporter.stop()
+
+    # Control sees report 2 follow nothing it applied and asks for the whole holding.
+    assert reports.seqs == [2]
+
+
+def test_a_new_registration_numbers_its_whole_report_first(tmp_path: Path) -> None:
+    reports = _Reports()
+    cache = _cache(tmp_path, reports)
+    cache.report_whole(restart=True)
+    cache.report_whole()
+    lane = _lane(cache)
+    lane.start()
+    try:
+        lane.rebind("wkr-7", 7)
+    finally:
+        lane.stop()
+
+    assert [(r.seq, r.whole) for r in reports.reports] == [
+        (1, True),
+        (2, True),
+        (1, True),
+    ]
+
+
+def test_control_asking_for_the_whole_holding_gets_it(tmp_path: Path) -> None:
+    reports = _Reports()
+    cache = _cache(tmp_path, reports)
+    kept = cache.write("local", b"kept")
+    lane = _lane(cache)
+    lane.start()
+    try:
+        assert lane.route(HOLDING_RESYNC_FRAME_KIND, {})
+        assert reports.arrived.wait(5.0)
+    finally:
+        lane.stop()
+
+    whole = [report for report in reports.reports if report.whole]
+    assert whole and whole[0].added == (("local", kept.content_digest),)
+
+
+def test_requests_for_the_whole_holding_in_flight_together_walk_the_cache_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reports = _Reports()
+    cache = _cache(tmp_path, reports)
+    walking = threading.Event()
+    release = threading.Event()
+    report_whole = cache.report_whole
+
+    def slow_walk(*, restart: bool = False) -> int:
+        walking.set()
+        release.wait(5.0)
+        return report_whole(restart=restart)
+
+    monkeypatch.setattr(cache, "report_whole", slow_walk)
+    lane = _lane(cache)
+    lane.start()
+    try:
+        assert lane.route(HOLDING_RESYNC_FRAME_KIND, {})
+        assert walking.wait(5.0)
+        assert lane.route(HOLDING_RESYNC_FRAME_KIND, {})
+        release.set()
+        assert reports.arrived.wait(5.0)
+        time.sleep(0.2)
+    finally:
+        lane.stop()
+
+    assert [report.whole for report in reports.reports] == [True]
+
+
+def test_a_worker_without_a_reporting_cache_names_no_holding_report(
+    tmp_path: Path,
+) -> None:
+    assert WorkerContentPlane(None, cast(Any, None)).holding_seq is None
+    assert WorkerContentCache(tmp_path / "content").holding_seq is None
+
+
+def _keep_by_write(cache: WorkerContentCache, body: bytes, tmp_path: Path) -> str:
+    return cache.write("local", body).content_digest
+
+
+def _keep_by_write_file(cache: WorkerContentCache, body: bytes, tmp_path: Path) -> str:
+    source = tmp_path / "source"
+    source.write_bytes(body)
+    return cache.write_file("local", source).content_digest
+
+
+def _keep_by_adopt(cache: WorkerContentCache, body: bytes, tmp_path: Path) -> str:
+    reference = reference_for("local", body)
+    verified = cache.staging_dir("local") / "verified"
+    verified.write_bytes(body)
+    cache.adopt(reference, verified)
+    return reference.content_digest
+
+
+@pytest.mark.parametrize(
+    "keep",
+    [_keep_by_write, _keep_by_write_file, _keep_by_adopt],
+    ids=lambda k: k.__name__,
+)
+def test_every_way_a_copy_is_kept_reports_it(
+    tmp_path: Path, keep: Callable[[WorkerContentCache, bytes, Path], str]
+) -> None:
+    reports = _Reports()
+    cache = _cache(tmp_path, reports)
+
+    digest = keep(cache, b"kept", tmp_path)
+    cache.flush_holding()
+
+    assert [report.added for report in reports.reports] == [(("local", digest),)]
+
+
+@pytest.mark.parametrize(
+    ("notes", "added", "dropped"),
+    [
+        (["kept", "dropped", "kept"], (_COPY,), ()),
+        (["dropped", "kept"], (_COPY,), ()),
+        (["kept", "dropped"], (), (_COPY,)),
+    ],
+)
+def test_the_last_note_about_a_copy_is_the_one_reported(
+    notes: list[str], added: tuple[HeldCopy, ...], dropped: tuple[HeldCopy, ...]
+) -> None:
+    reports = _Reports()
+    reporter = HoldingReporter(reports, threading.RLock())
+    for note in notes:
+        getattr(reporter, note)(_COPY)
+    reporter.flush()
+
+    (report,) = reports.reports
+    assert (report.added, report.dropped) == (added, dropped)
+
+
+def test_evictions_running_together_free_only_the_budget_s_excess(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = WorkerContentCache(tmp_path / "content", max_bytes=10 * 100)
+    base = time.time() - 10_000
+    for index in range(20):
+        reference = cache.write("local", index.to_bytes(4, "big") + b"x" * 96)
+        path = cache._objects.object_path("local", reference.content_digest)
+        os.utime(path, (base + index, base + index))
+    both_walked = threading.Barrier(2)
+    remove_unused = cache._remove_unused
+    waited = threading.local()
+
+    def after_both_walks(entry: tuple[float, int, str, str]) -> bool:
+        if not getattr(waited, "done", False):
+            waited.done = True
+            both_walked.wait(5.0)
+        return remove_unused(entry)
+
+    monkeypatch.setattr(cache, "_remove_unused", after_both_walks)
+    evictions = [threading.Thread(target=cache.evict) for _ in range(2)]
+    for eviction in evictions:
+        eviction.start()
+    for eviction in evictions:
+        eviction.join(10.0)
+
+    assert sum(1 for _ in cache._objects.iter_objects()) == 10

@@ -82,3 +82,26 @@ def test_a_revoke_is_published_on_its_nodes_dispatch_channel(
     message = pubsub.get_message(timeout=1)
     assert message is not None
     assert RevokeMessage.model_validate(json.loads(message["data"])) == revoke
+
+
+@pytest.mark.parametrize("use_async", [False, True])
+def test_a_heard_read_names_each_worker_with_its_staleness_in_order(
+    server: fakeredis.FakeServer, use_async: bool
+) -> None:
+    rds = _record(server, "box-a")
+    rds.sadd(WORKERS_SET_KEY, "wkr-2")
+    rds.hset(worker_key("wkr-2"), mapping={"node_alias": "box-a"})
+    registry = WorkerRegistry(fake_redis_client(server))
+    ids = ["wkr-2", "wkr-9", _WORKER]
+
+    reads = (
+        asyncio.run(registry.get_workers_heard_async(ids))
+        if use_async
+        else registry.get_workers_heard(ids)
+    )
+
+    assert [(w.id if w else None, stale) for w, stale in reads] == [
+        ("wkr-2", True),
+        (None, True),
+        (_WORKER, False),
+    ]

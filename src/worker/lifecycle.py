@@ -229,6 +229,11 @@ class Lifecycle:
                         status=self._status,
                         dispatch_id=self._dispatch_id,
                         task_id=self._task_id,
+                        holding_seq=(
+                            plane.holding_seq
+                            if (plane := self.content_plane) is not None
+                            else None
+                        ),
                     )
             except Exception:
                 pass
@@ -331,6 +336,7 @@ class Lifecycle:
         unavailable_inputs: tuple[ContentReference, ...] = (),
         ambiguous: bool = False,
     ):
+        self._flush_holding()
         try:
             self.client.task_failed(
                 task_id,
@@ -345,16 +351,28 @@ class Lifecycle:
             pass
 
     def set_succeeded(self, task_id: str, metadata: dict[str, Any] | None = None):
+        self._flush_holding()
         try:
             self.client.task_succeeded(task_id, metadata=metadata)
         except Exception:
             pass
 
     def set_cancelled(self, task_id: str, metadata: dict[str, Any] | None = None):
+        self._flush_holding()
         try:
             self.client.task_cancelled(task_id, metadata=metadata)
         except Exception:
             pass
+
+    def _flush_holding(self) -> None:
+        """Send the copies a task left in the cache ahead of its terminal report, so
+        control knows their holder before it places what reads them."""
+        if (plane := self.content_plane) is None:
+            return
+        try:
+            plane.flush_holding()
+        except Exception:
+            logger.warning("could not send the content holding", exc_info=True)
 
     def notify_task_update(self, task_id: str, payload: dict[str, Any]) -> None:
         try:

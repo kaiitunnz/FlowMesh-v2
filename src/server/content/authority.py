@@ -17,24 +17,29 @@ typed hydration failure and its own consumer decides what that means.
 
 Every request, holding report and path report is handled on the server's loop, which
 owns the directory, the routing records and the record of which transfer connects
-which pair; the thread that reads worker events only hands them over.
+which pair; the thread that reads worker events only hands them over. A worker's
+holding reports apply in the order it sent them, and one that went missing — its number
+skipped, or its heartbeat naming a report never applied — has the worker report its
+whole holding again. On a cadence it sweeps the records of unregistered workers.
 """
 
 import asyncio
 import logging
 import time
-from collections.abc import Callable, Coroutine, Sequence
+from collections.abc import Callable, Coroutine
 from concurrent.futures import Future
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
 from shared.content import (
+    HOLDING_RESYNC_FRAME_KIND,
     ContentCarriagePlan,
     ContentHydrationGrant,
     ContentPeerRoute,
     ContentReference,
     ContentRouteObservation,
+    HoldingReport,
 )
 from shared.schemas.command import MediatedOpMessage
 from shared.schemas.network import (
@@ -60,6 +65,18 @@ from .sessions import ContentTransferSessions
 BindingCheck = Callable[[str, str, ContentReference], bool]
 
 _PEER_TRANSPORTS = frozenset({Transport.WORKER_DIRECT, Transport.NODE_RELAY})
+
+# How often the records of unregistered workers are swept.
+_SWEEP_INTERVAL_SEC = 60.0
+
+# Heartbeats in a row naming a holding report not yet applied before the worker is
+# asked for its whole holding; a heartbeat can overtake a report still being applied.
+_RESYNC_AFTER_HEARTBEATS = 2
+
+# How long an asked-for whole holding may take before it is asked for again: two
+# heartbeat periods at their 30 s default, so a whole report still on its way is not
+# asked for twice and a lost request costs about a minute.
+_RESYNC_RETRY_SEC = 60.0
 
 
 class HydrationDenial(StrEnum):
@@ -125,14 +142,39 @@ class ContentHydrationAuthority:
         self._logger = logger or logging.getLogger("content-authority")
         self._loop: asyncio.AbstractEventLoop | None = None
         self._transfers: dict[str, _Transfer] = {}
+        # Each worker's last applied holding report, as the directory records it.
+        self._applied: dict[str, int] = {}
+        self._behind: dict[str, int] = {}
+        # When each worker was asked for a whole holding it has not reported yet.
+        self._asked: dict[str, float] = {}
+        self._serial: dict[str, asyncio.Lock] = {}
+        self._sweeping: asyncio.Task[None] | None = None
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Handle every request on ``loop``, the server's own."""
         self._loop = loop
 
-    def on_holding(self, worker_id: str, held: Sequence[tuple[str, str]]) -> None:
+    def start(self) -> None:
+        """Sweep the records of unregistered workers on the bound loop, now and on a
+        cadence."""
+        if self._loop is None or self._sweeping is not None:
+            return
+        self._sweeping = self._loop.create_task(self._sweep_on_cadence())
+
+    def shutdown(self) -> None:
+        """Stop sweeping."""
+        if self._sweeping is not None:
+            self._sweeping.cancel()
+            self._sweeping = None
+
+    def on_holding(self, worker_id: str, report: HoldingReport) -> None:
         """Take a worker's holding report off the calling thread."""
-        self._submit(self.record_holding(worker_id, held))
+        self._submit(self.record_holding(worker_id, report))
+
+    def on_heartbeat(self, worker_id: str, holding_seq: int) -> None:
+        """Take the holding report number a worker's heartbeat names off the calling
+        thread."""
+        self._submit(self.check_holding(worker_id, holding_seq))
 
     def on_request(
         self,
@@ -186,24 +228,136 @@ class ContentHydrationAuthority:
                 exc_info=(type(exc), exc, exc.__traceback__),
             )
 
-    async def record_holding(
-        self, worker_id: str, held: Sequence[tuple[str, str]]
-    ) -> None:
-        """Note the objects a worker holds, from its write or its periodic report.
+    async def record_holding(self, worker_id: str, report: HoldingReport) -> None:
+        """Apply one of a worker's holding reports, after those it sent before it.
 
-        A report is what keeps a record live, and it arrives under the reporting
-        worker's current incarnation, so a restarted holder supersedes the records its
-        previous one left behind rather than waiting for them to lapse.
+        A report already applied, or one ahead of the worker's first whole report,
+        changes nothing. A whole report replaces the worker's records whatever its
+        number; any other that skips a number is applied, its number left unapplied
+        until a whole report, and the worker is asked for its whole holding.
         """
-        worker = await self._workers.get_worker_async(worker_id)
-        if worker is None:
+        async with self._serial_for(worker_id):
+            worker = await self._workers.get_worker_async(worker_id)
+            if worker is None:
+                # Keeps nothing for a worker its sweep may already have forgotten.
+                self._forget(worker_id)
+                return
+            applied = await self._applied_seq(worker_id)
+            # A registration reports its whole holding first, so a report before that
+            # was numbered under the registration before and its whole report covers it.
+            if not report.whole and (applied == 0 or report.seq <= applied):
+                return
+            # A report past a missing one is applied but not noted as applied, so the
+            # gap stays visible to a heartbeat until a whole report closes it, even
+            # across a restart that forgets the request for it.
+            contiguous = report.whole or report.seq == applied + 1
+            if report.whole:
+                recorded = await self._directory.replace_async(
+                    worker_id,
+                    report.added,
+                    node_id=worker.node_id,
+                    generation=worker.incarnation,
+                    seq=report.seq,
+                )
+            else:
+                recorded = await self._directory.apply_async(
+                    worker_id,
+                    node_id=worker.node_id,
+                    generation=worker.incarnation,
+                    added=report.added,
+                    dropped=report.dropped,
+                    seq=report.seq if contiguous else None,
+                )
+            if not recorded:
+                return
+            if contiguous:
+                self._applied[worker_id] = report.seq
+                self._behind.pop(worker_id, None)
+            if report.whole:
+                self._asked.pop(worker_id, None)
+            elif not contiguous:
+                await self._request_holding(
+                    worker, f"report {report.seq} followed {applied}"
+                )
+
+    async def check_holding(self, worker_id: str, holding_seq: int) -> None:
+        """Ask a worker for its whole holding once its heartbeats keep naming a report
+        never applied, or again once a whole holding asked for has not arrived."""
+        async with self._serial_for(worker_id):
+            if (asked := self._asked.get(worker_id)) is not None:
+                if time.monotonic() - asked < _RESYNC_RETRY_SEC:
+                    return
+                del self._asked[worker_id]
+                if (
+                    worker := await self._workers.get_worker_async(worker_id)
+                ) is not None:
+                    await self._request_holding(
+                        worker, "the whole holding asked for has not arrived"
+                    )
+                return
+            if holding_seq <= await self._applied_seq(worker_id):
+                self._behind.pop(worker_id, None)
+                return
+            behind = self._behind.get(worker_id, 0) + 1
+            if behind < _RESYNC_AFTER_HEARTBEATS:
+                self._behind[worker_id] = behind
+                return
+            self._behind.pop(worker_id, None)
+            if (worker := await self._workers.get_worker_async(worker_id)) is not None:
+                await self._request_holding(
+                    worker, f"its heartbeat names report {holding_seq}"
+                )
+
+    async def sweep_unregistered(self) -> int:
+        """Remove the records of every unregistered worker, and what is kept here for
+        it, and return how many workers had records."""
+        retired = await self._directory.unregistered_async()
+        for worker_id in retired:
+            async with self._serial_for(worker_id):
+                swept = await self._directory.sweep_async(worker_id)
+            self._forget(worker_id)
+            self._logger.info("swept %d content holder records of %s", swept, worker_id)
+        if tracked := self._tracked():
+            registered = await self._workers.get_worker_ids_async()
+            for worker_id in tracked - registered:
+                self._forget(worker_id)
+        return len(retired)
+
+    async def _sweep_on_cadence(self) -> None:
+        while True:
+            try:
+                await self.sweep_unregistered()
+            except Exception:
+                self._logger.exception("sweeping content holder records failed")
+            await asyncio.sleep(_SWEEP_INTERVAL_SEC)
+
+    def _tracked(self) -> set[str]:
+        return {*self._applied, *self._behind, *self._asked, *self._serial}
+
+    def _forget(self, worker_id: str) -> None:
+        self._applied.pop(worker_id, None)
+        self._behind.pop(worker_id, None)
+        self._asked.pop(worker_id, None)
+        self._serial.pop(worker_id, None)
+
+    async def _applied_seq(self, worker_id: str) -> int:
+        if (applied := self._applied.get(worker_id)) is None:
+            applied = await self._directory.applied_seq_async(worker_id)
+            self._applied[worker_id] = applied
+        return applied
+
+    def _serial_for(self, worker_id: str) -> asyncio.Lock:
+        """The lock ordering one worker's holding work."""
+        return self._serial.setdefault(worker_id, asyncio.Lock())
+
+    async def _request_holding(self, worker: Worker, reason: str) -> None:
+        if worker.id in self._asked:
             return
-        await self._directory.record_many_async(
-            held,
-            worker_id=worker_id,
-            node_id=worker.node_id,
-            generation=worker.incarnation,
+        self._asked[worker.id] = time.monotonic()
+        self._logger.info(
+            "asking %s for its whole content holding: %s", worker.id, reason
         )
+        await self._relay(worker, HOLDING_RESYNC_FRAME_KIND, {})
 
     async def authorize(
         self,
@@ -233,8 +387,7 @@ class ContentHydrationAuthority:
             reference.authorization_scope, reference.content_digest
         )
         if not reported:
-            # Nothing ever reported holding it — no copy was ever announced, or every
-            # holder's report has lapsed. Its consumer reads the shared store instead.
+            # No worker reports holding a copy, so its consumer reads the shared store.
             await self._deny(requester, request_id, HydrationDenial.NOT_TRACKED)
             return
         live = await self._live_holders(reference, reported, requester)
@@ -345,21 +498,27 @@ class ContentHydrationAuthority:
         reported: list[ContentHolderRecord],
         requester: Worker,
     ) -> list[Worker]:
-        """Every reported holder still running as the incarnation that reported."""
+        """Every reported holder still running as the incarnation that reported, with
+        a current heartbeat."""
         candidates = [r for r in reported if r.worker_id != requester.id]
-        found = await self._workers.get_workers_async([r.worker_id for r in candidates])
+        found = await self._workers.get_workers_heard_async(
+            [r.worker_id for r in candidates]
+        )
         live: list[Worker] = []
-        for record, holder in zip(candidates, found, strict=True):
+        for record, (holder, stale) in zip(candidates, found, strict=True):
             if holder is None or holder.incarnation != record.generation:
                 # The reporting worker is gone or came back as another incarnation, so
                 # its report describes content no one can serve. A restarted worker
-                # re-reports what it still holds, which lands under its new incarnation.
+                # reports its whole holding under its new registration.
                 await self._directory.forget_async(
                     reference.authorization_scope,
                     reference.content_digest,
                     record.worker_id,
                     record.generation,
                 )
+                continue
+            if stale:
+                # Its records stay: a worker whose heartbeat resumes still holds them.
                 continue
             live.append(holder)
         return live

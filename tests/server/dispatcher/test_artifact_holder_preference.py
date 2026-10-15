@@ -94,7 +94,7 @@ class _Holders:
 
 
 def _holder(worker_id: str, generation: int = 1) -> ContentHolderRecord:
-    return ContentHolderRecord(worker_id, "nde-1", generation, 2e9)
+    return ContentHolderRecord(worker_id, "nde-1", generation, 0.0)
 
 
 def _pool(*ids: str) -> list[Any]:

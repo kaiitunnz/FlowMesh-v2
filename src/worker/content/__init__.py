@@ -3,6 +3,7 @@
 from .access import ContentAccessDenied, ContentAccessRegistry
 from .client import ContentHydrationClient, GrantDenied
 from .holder import ContentHolder
+from .holding import HoldingReporter
 from .lane_host import ContentLaneHost
 from .plane import TaskContentStore, WorkerContentPlane
 from .store import WorkerContentCache
@@ -14,6 +15,7 @@ __all__ = [
     "ContentHydrationClient",
     "ContentLaneHost",
     "GrantDenied",
+    "HoldingReporter",
     "TaskContentStore",
     "WorkerContentPlane",
     "WorkerContentCache",
