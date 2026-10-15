@@ -184,7 +184,7 @@ def test_reports_skipping_numbers_while_the_whole_is_awaited_ask_once() -> None:
         authority.record_holding("wkr-1", HoldingReport(seq=1, added=(_A,), whole=True))
     )
 
-    for seq in range(3, 14):
+    for seq in range(3, 25, 2):
         asyncio.run(
             authority.record_holding("wkr-1", HoldingReport(seq=seq, added=(_B,)))
         )
