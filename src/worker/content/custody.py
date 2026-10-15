@@ -4,11 +4,11 @@ A task reports success once its artifacts are copied and hashed here; their uplo
 the shared store follows. Until control settles each upload, the bytes are held in a
 directory per dispatch beside the scope's objects, where no eviction, staging cleanup or
 output cleanup reaches: each staged object is the file its bytes were hashed into, so
-custody holds exactly what the success named. Where the worker runs a cache, the cache's
-name for the object is a second link to that file. The kernel's link count is what every
-process sharing the content directory sees, so a cached copy also held in custody is
-kept from eviction by any of them, and the custody file outlives any removal of the
-cache's name.
+custody holds exactly what the success named. Where the worker runs a cache and holds no
+copy of the object yet, the cache names that file as its copy, a second link to it. The
+kernel's link count is what every process sharing the content directory sees, so a
+cached copy also held in custody is kept from eviction by any of them, and the custody
+file outlives any removal of the cache's name.
 
 A dispatch's directory also holds its journal: what the worker staged, under which
 registration, and the success it reported, so the success and its uploads can be
@@ -169,6 +169,17 @@ class ArtifactCustody:
         path = self.publication_dir(journal.scope, journal.dispatch_id) / _JOURNAL
         data = journal.model_dump_json().encode("utf-8")
         write_replacing(path, lambda fh: fh.write(data), durable=True)
+
+    def journal(self, scope: str, dispatch_id: str) -> UploadJournal | None:
+        """Return a dispatch's journal as written, or None when there is none.
+
+        Raises ``OSError`` or ``ValidationError`` for one that cannot be read.
+        """
+        path = self.publication_dir(scope, dispatch_id) / _JOURNAL
+        try:
+            return UploadJournal.model_validate_json(path.read_bytes())
+        except FileNotFoundError:
+            return None
 
     def journals(self) -> Iterator[UploadJournal]:
         """Yield every journal under this content directory."""

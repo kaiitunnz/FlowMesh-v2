@@ -241,10 +241,12 @@ class WorkerContentPlane:
         """Put the object's verified bytes at ``dest`` for a reader to load.
 
         Where this worker keeps a copy, ``dest`` links to it, so what a task reads
-        counts against the cache's own bounds.
+        counts against the cache's own bounds. An object still uploading, read with
+        ``prefer_peer``, is copied instead, so a reader writing its input never
+        changes bytes its upload has yet to store.
         """
         lane = self._lane
-        if lane is None:
+        if lane is None or prefer_peer:
             self.hydrate_to(task_id, reference, dest, prefer_peer=prefer_peer)
             return
 

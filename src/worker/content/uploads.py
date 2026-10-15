@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
+
 from shared.content import ContentReference, ContentStoreError
 from shared.tasks.artifact_upload import UploadDisposition, UploadReport, UploadSettled
 
@@ -214,6 +216,8 @@ class ArtifactUploader:
                 return
             task.settled = True
             publication.due.pop(task.task_id, None)
+            if not publication.owned and not self._caught_up(publication):
+                return
             if journal.owes():
                 if publication.owned:
                     self._record(publication)
@@ -221,6 +225,25 @@ class ArtifactUploader:
             del self._publications[settled.dispatch_id]
             self._cv.notify_all()
         self._custody.release(journal.scope, journal.dispatch_id)
+
+    def _caught_up(self, publication: _Publication) -> bool:
+        """Take up the tasks another registration's journal gained since it was read,
+        and return whether its success was reported, so a settled answer may end its
+        custody."""
+        journal = publication.journal
+        try:
+            current = self._custody.journal(journal.scope, journal.dispatch_id)
+        except (OSError, ValidationError):
+            return False
+        if current is None:
+            return True
+        journal.task_id = current.task_id
+        for task_id, task in current.tasks.items():
+            if task_id not in journal.tasks:
+                journal.tasks[task_id] = task
+                if not task.settled:
+                    publication.due[task_id] = self._clock()
+        return bool(journal.task_id)
 
     def rebind(self) -> None:
         """Stop uploading what an earlier registration staged; it is evidence now."""
@@ -286,9 +309,10 @@ class ArtifactUploader:
         return True
 
     def _scan_evidence(self) -> None:
-        """Take up custody another registration left on the node and released
-        nothing of: a dispatch whose success this worker's earlier registration never
-        reported is simply released."""
+        """Take up the custody other registrations on the node hold, to ask control
+        about each upload they still owe; a dispatch this worker's earlier
+        registration staged without reporting its success is released, and another's
+        only once its success was reported and nothing it covers is owed."""
         self._scan_at = self._clock() + EVIDENCE_SCAN_SEC
         worker_id, _ = self._identity()
         for journal in self._custody.journals():
@@ -300,7 +324,8 @@ class ArtifactUploader:
                 self._custody.release(journal.scope, journal.dispatch_id)
                 continue
             if not journal.owes():
-                self._custody.release(journal.scope, journal.dispatch_id)
+                if journal.task_id:
+                    self._custody.release(journal.scope, journal.dispatch_id)
                 continue
             publication = _Publication(journal, owned=False)
             publication.due = {task.task_id: 0.0 for task in journal.owes()}
@@ -380,7 +405,7 @@ class ArtifactUploader:
                 failure = f"the custody copy of {member.content_digest} changed"
         except FileNotFoundError:
             failure = f"the custody copy of {member.content_digest} is gone"
-        except (ContentStoreError, OSError) as exc:
+        except Exception as exc:
             with self._cv:
                 wait = publication.backoff
                 publication.retry_at = self._clock() + wait
@@ -391,6 +416,7 @@ class ArtifactUploader:
                 journal.dispatch_id,
                 wait,
                 exc,
+                exc_info=not isinstance(exc, (ContentStoreError, OSError)),
             )
             return
         with self._cv:
@@ -414,9 +440,10 @@ class ArtifactUploader:
                         journal.dispatch_id,
                         failure,
                     )
-                    finished.append(task)
-                elif not remaining and task.failed is None:
-                    task.uploaded = True
+                # A failed task is reported once its other files are stored too, so
+                # control finds every one it can.
+                if not remaining:
+                    task.uploaded = task.failed is None
                     finished.append(task)
             if finished:
                 self._record(publication)

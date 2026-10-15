@@ -34,6 +34,8 @@ class _Ports:
         self.wrong = False
         self.explode = 0
         self.drop_reports = False
+        self.poisoned: set[bytes] = set()
+        self.stored_at_report: list[list[bytes]] = []
         self.cv = threading.Condition()
 
     def upload(
@@ -49,6 +51,8 @@ class _Ports:
             self.outage -= 1
             raise ContentUnavailable("store down")
         data = path.read_bytes()
+        if data in self.poisoned:
+            raise RuntimeError("unexpected")
         with self.cv:
             self.stored.append((task_id, scope, data))
             self.cv.notify_all()
@@ -69,6 +73,7 @@ class _Ports:
             return
         with self.cv:
             self.reports.append((task_id, dispatch_id, report, error))
+            self.stored_at_report.append([data for _, _, data in self.stored])
             self.cv.notify_all()
 
     def wait(self, predicate: Any, timeout: float = 5.0) -> None:
@@ -352,6 +357,66 @@ def test_one_unuploadable_member_fails_only_the_tasks_that_own_it(tmp_path) -> N
     assert report is UploadReport.UNUPLOADABLE and error is not None
     assert sorted(data for _, _, data in ports.stored) == [b"beta", b"gamma"]
     uploader.stop(1.0)
+
+
+def test_a_failed_task_is_reported_once_its_other_files_are_stored(tmp_path) -> None:
+    ports = _Ports()
+    root = tmp_path / "content"
+    uploader = _uploader(root, ports)
+    journal = _stage(
+        uploader, tmp_path, {"a.bin": b"alpha", "b.bin": b"beta"}, submit=False
+    )
+    ArtifactCustody(root).source(journal, journal.tasks["tsk-1"].members[0]).unlink()
+    uploader.submit(journal, "tsk-1", {"artifacts_pending": True})
+    uploader.start()
+
+    ports.wait(lambda: ports.reports)
+
+    assert ports.reports[0][2] is UploadReport.UNUPLOADABLE
+    assert ports.stored_at_report[0] == [b"beta"]
+    uploader.stop(1.0)
+
+
+def test_an_unexpected_failure_backs_off_only_its_own_dispatch(tmp_path) -> None:
+    ports = _Ports()
+    ports.poisoned.add(b"poison")
+    uploader = _uploader(tmp_path / "content", ports, _Clock())
+    _stage(uploader, tmp_path, {"a.bin": b"poison"})
+    _stage(
+        uploader,
+        tmp_path,
+        {"b.bin": b"fine"},
+        task_id="tsk-2",
+        journal=uploader.begin("dsp-2", "org"),
+    )
+    uploader.start()
+
+    ports.wait(lambda: ports.reports)
+
+    assert ports.reports[0][:3] == ("tsk-2", "dsp-2", UploadReport.UPLOADED)
+    uploader.stop(0.5)
+
+
+def test_another_workers_custody_is_kept_until_its_success_and_tasks_settle(
+    tmp_path,
+) -> None:
+    root = tmp_path / "content"
+    owner = _uploader(root, _Ports(), alias="w2", worker_id="wkr-2")
+    journal = _stage(owner, tmp_path, {"a.bin": b"alpha"}, submit=False)
+    ports = _Ports()
+    mine = _uploader(root, ports, _Clock())
+    mine.start()
+    ports.wait(lambda: ports.reports)
+
+    mine.settle(_settled(UploadDisposition.REJECTED))
+    assert list(ArtifactCustody(root).journals())
+    _stage(owner, tmp_path, {"b.bin": b"beta"}, task_id="tsk-2", journal=journal)
+    mine.settle(_settled(UploadDisposition.REJECTED))
+    assert list(ArtifactCustody(root).journals())
+
+    mine.settle(_settled(UploadDisposition.DURABLE, task_id="tsk-2"))
+    assert list(ArtifactCustody(root).journals()) == []
+    mine.stop(0.5)
 
 
 def test_an_earlier_registrations_custody_is_reported_and_never_uploaded(

@@ -311,6 +311,19 @@ def test_with_a_cache_the_task_reads_the_cached_copy_by_link(tmp_path: Path) -> 
     ]
 
 
+def test_an_object_still_uploading_is_copied_never_linked(tmp_path: Path) -> None:
+    store = SharedFilesystemObjectStore(tmp_path / "shared")
+    held = store.write(_SCOPE, b"still uploading")
+    lane = _CacheLane(tmp_path / "cache")
+    lane.cache.write(_SCOPE, b"still uploading")
+    plane = WorkerContentPlane(cast(Any, lane), cast(Any, _Access(store)))
+
+    plane.materialize_to("tsk-1", held, tmp_path / "input.bin", prefer_peer=True)
+
+    assert (tmp_path / "input.bin").stat().st_ino != _inode(lane.cache, held)
+    assert (tmp_path / "input.bin").read_bytes() == b"still uploading"
+
+
 def test_without_a_cache_the_task_holds_its_own_copy(tmp_path: Path) -> None:
     store = SharedFilesystemObjectStore(tmp_path / "shared")
     reference = store.write(_SCOPE, b"no cache here")
