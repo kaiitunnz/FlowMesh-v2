@@ -989,7 +989,7 @@ class Runner:
         )
 
     def _staging(self, msg: WorkerTaskMessage) -> "_Staging | None":
-        """Custody for a dispatch's final artifacts, when this worker uploads them
+        """Open custody for a dispatch's final artifacts, when this worker uploads them
         after its success."""
         uploads = self.lifecycle.artifact_uploads
         if uploads is None or msg.dispatch_id is None:

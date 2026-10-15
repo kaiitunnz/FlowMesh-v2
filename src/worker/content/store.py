@@ -1,12 +1,11 @@
 """The content this worker keeps a copy of.
 
-A cache over the shared durable store, not a holder of record: every object here is also
-there, so a copy may be dropped whenever it stops paying for itself and nothing is lost
-when a worker dies with copies on its disk. A copy of an artifact whose upload is still
-owed is also named by upload custody, which holds it until the upload settles. What the
-cache buys is the read — a task that needs an object this worker already has never
-leaves the node, and a task on another worker can be served from here instead of the
-shared store.
+A cache over the shared durable store, not a holder of record: a copy may be dropped
+whenever it stops paying for itself, since its object is in the store too. A copy of an
+artifact still uploading is the exception; upload custody holds it until the upload
+settles. What the cache buys is the read — a task that needs an object this worker
+already has never leaves the node, and a task on another worker can be served from here
+instead of the shared store.
 
 Copies are kept on disk rather than in memory so they survive the worker process, and
 the cache reports each copy it keeps or drops so a peer's read can be pointed at it.

@@ -79,9 +79,8 @@ class WorkerTaskMessage(BaseModel):
     pending_artifacts: list[str] | None = Field(
         default=None,
         description=(
-            "Digests of the artifacts the task reads whose upload to the shared store "
-            "is still owed: each is read from its producer first, and a miss is "
-            "reported as unavailable rather than missing."
+            "Digests of the artifacts the task reads that are still uploading, read "
+            "from a holder first."
         ),
     )
     input_element: ResultElementRef | None = Field(
