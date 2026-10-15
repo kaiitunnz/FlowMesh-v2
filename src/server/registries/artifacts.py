@@ -41,9 +41,7 @@ def queue_artifact_bindings(
         pipe.hset(
             task_artifacts_key(task_id),
             mapping={
-                artifact_field(
-                    binding.revision, binding.name
-                ): binding.model_dump_json()
+                artifact_field(*binding.key): binding.model_dump_json()
                 for binding in bindings
             },
         )

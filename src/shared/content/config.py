@@ -1,9 +1,9 @@
-"""Where the shared durable content store is, and how a process opens it.
+"""Where the shared durable content store is, how a process opens it, and whether
+workers cache and hydrate content.
 
 Both the workers that read and write content and the control plane that cuts their
 access describe the same external store, so they describe it the same way; each process
-builds this at its own configuration edge, as it does whether workers cache and hydrate
-content.
+builds this at its own configuration edge.
 """
 
 import os

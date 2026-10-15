@@ -1141,10 +1141,10 @@ class TaskRuntime:
         with self._lock:
             for workflow_id in workflow_ids:
                 for task in self._tasks.of_workflow(workflow_id):
-                    if task.has_artifacts:
-                        (
-                            settled if task.status in TERMINAL_TASK_STATUSES else live
-                        ).append(task.task_id)
+                    if not task.has_artifacts:
+                        continue
+                    group = settled if task.status in TERMINAL_TASK_STATUSES else live
+                    group.append(task.task_id)
         if not settled and not live:
             return
         registry = self._workflow_registry

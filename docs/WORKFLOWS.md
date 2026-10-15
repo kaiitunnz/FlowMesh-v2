@@ -180,7 +180,7 @@ the author owns: a failure before the episode's next seal may run it again, and
 the fabric neither deduplicates nor compensates it.
 
 An agent publishes files from its workspace by declaring them as `exports`, each a
-workspace path, an optional artifact `name` (the path by default), and `optional`:
+workspace path, an optional artifact `name` (the path by default), and an `optional` flag:
 
 ```yaml
 - name: coder
