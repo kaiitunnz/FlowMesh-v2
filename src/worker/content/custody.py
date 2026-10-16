@@ -3,14 +3,13 @@
 A task reports success once its artifacts are hashed and held here; their upload to
 the shared store follows. Until control settles each upload, the bytes are held in a
 directory per dispatch beside the scope's objects, where no eviction, staging cleanup or
-output cleanup reaches: each staged object is a link to the very file that was hashed,
-or a copy of it where the filesystem cannot link it here, so custody holds exactly what
-the success named while the task's output files are not modified after it completed.
-Cleaning up the output removes its names, never these bytes. Where the worker runs a
-cache and holds no copy of the object yet, the cache names that file as its copy,
-another link to it. Every process sharing the content directory keeps a cached copy of
-an object custody holds from eviction, and the custody file outlives any removal of the
-cache's name.
+output cleanup reaches: each staged object is a link to the file that was hashed, or a
+copy of it where the filesystem cannot link it here, so custody holds exactly what the
+success named, provided the task's output files are not modified after it completes.
+Where the worker runs a cache and holds no copy of the object yet, the cache names that
+file as its copy, another link to it. A cached copy of an object custody holds is kept
+from eviction by every process sharing the content directory, and the custody file
+outlives any removal of the cache's name.
 
 A dispatch's directory also holds its journal: what the worker staged, under which
 registration, and the success it reported, so the success and its uploads can be

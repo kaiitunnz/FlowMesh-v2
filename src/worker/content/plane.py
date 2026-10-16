@@ -187,8 +187,8 @@ class WorkerContentPlane:
         """Put an opened completed file's bytes in the shared store, then keep the
         file itself as the cache's copy.
 
-        The cache links the inode the store read through this descriptor, so the bytes
-        are written once; the file must not be modified after this.
+        The cache links the inode the store read through this descriptor, so no second
+        copy lands on disk; the file must not be modified after this.
         """
         reference = self._store(task_id, scope).write_file(
             scope, fd_path(source.fileno()), media_type=media_type, cancelled=cancelled

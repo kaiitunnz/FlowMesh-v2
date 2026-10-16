@@ -76,9 +76,8 @@ tree. An artifact named `results.json` fails the task, since that name downloads
 result.
 
 An executor finishes every write to its artifacts, by any process or thread it started,
-before it returns, and a trainer finishes each checkpoint before its save returns. The
-worker publishes and caches these files by hard link, so none may be modified
-afterwards. Each execution of a task starts from private writable copies of the output
+before it returns. The worker publishes and caches these files by hard link, so none may
+be modified afterwards. Each execution of a task starts from private writable copies of the output
 files an earlier execution left.
 
 A training executor publishes each checkpoint its trainer saves as the `checkpoints`
@@ -86,7 +85,8 @@ artifact at revision `step-<n>` while it runs, and leaves its
 `checkpoints/checkpoint-<n>` directories out of the `final` set; another task's
 `checkpoints` directory publishes as an ordinary artifact. A training result's
 `checkpoints_dir` names the last checkpoint the run published, which a consumer hydrates
-as `checkpoint-<n>/`. A save waits while two checkpoints are publishing, which bounds the
+as `checkpoint-<n>/`. A trainer finishes each checkpoint before its save returns, and
+leaves it unmodified after. A save waits while two checkpoints are publishing, which bounds the
 run's disk. A checkpoint that cannot be published after retries stops training at the
 next save (a PPO run at the first logged step after it) and fails the task.
 

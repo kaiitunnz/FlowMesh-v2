@@ -165,12 +165,13 @@ class WorkerContentCache(FabricObjectStore):
         self._kept(reference)
 
     def link_completed(self, reference: ContentReference, source: BinaryIO) -> bool:
-        """Take the file an opened descriptor holds in as the reference's copy by
-        linking its inode, when the descriptor's bytes were just stored as it; a copy
-        already named stays. Returns False when the filesystem cannot link it here.
+        """Adopt the file an opened descriptor holds as the reference's copy by
+        linking its inode, keeping a copy already named; the descriptor's bytes must be
+        the ones just stored as the reference.
 
-        The linked file is taken in only when it is the descriptor's inode at the
-        size the reference names; every read of a copy verifies its digest.
+        Adopts nothing unless the link is the descriptor's inode at the reference's
+        size, since every read of a copy verifies its digest. Returns False when the
+        filesystem cannot link it here.
         """
         opened = os.fstat(source.fileno())
         if opened.st_size != reference.size_bytes:
@@ -238,10 +239,10 @@ class WorkerContentCache(FabricObjectStore):
         """Link this worker's copy at ``dest`` once it verifies as the reference's
         bytes, so a reader gets the copy without a second one on disk.
 
-        A copy upload custody still holds is copied to ``dest`` instead, so a reader
-        writing its input never changes bytes an upload has yet to store. A linked copy
-        can be a producer's output file on this node, which a reader writing its input
-        changes too.
+        A copy upload custody still holds is copied to ``dest``, so a reader writing its
+        input never changes bytes an upload has yet to store. A linked copy can be a
+        producer's output file on this node, which a reader writing its input in place
+        changes too; every read of the cached copy verifies its digest.
         """
         for _ in self.open(reference):
             pass
@@ -279,7 +280,7 @@ class WorkerContentCache(FabricObjectStore):
         until its transfer is done, and one upload custody holds stays until its upload
         settles, whichever process on the node staged it; everything else is free to
         go, because the object itself is in the shared store either way. A copy other
-        names still link, such as a task's output or input, loses only its cache name.
+        names link, such as a task's output or input, loses only its cache name.
         """
         if self._retain_sec <= 0 and self._max_bytes <= 0:
             return 0

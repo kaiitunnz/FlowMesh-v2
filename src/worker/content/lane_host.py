@@ -326,9 +326,9 @@ class ContentLaneHost:
     def keep_completed(
         self, reference: ContentReference, source: BinaryIO
     ) -> ContentReference | None:
-        """Cache an opened completed file holding the reference's bytes as the file
-        itself, as ``keep`` does, or a copy of it where the filesystem cannot link it
-        into the cache."""
+        """Cache an opened completed file holding the reference's bytes, as ``keep``
+        does, by linking the file itself, or a copy of it where the filesystem cannot
+        link it into the cache."""
         if not self._store.link_completed(reference, source):
             return self.keep_file(reference, fd_path(source.fileno()))
         return self.held(reference)
