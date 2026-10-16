@@ -420,6 +420,25 @@ def test_an_unexpected_failure_backs_off_only_its_own_dispatch(tmp_path) -> None
     uploader.stop(0.5)
 
 
+def test_a_member_that_fails_unexpectedly_holds_up_none_of_its_dispatch(
+    tmp_path,
+) -> None:
+    ports = _Ports()
+    ports.poisoned.add(b"poison")
+    uploader = _uploader(tmp_path / "content", ports)
+    journal = uploader.begin("dsp-1", "org")
+    uploader.stage(journal, "tsk-1", _write(tmp_path, "a.bin", b"poison"))
+    uploader.stage(journal, "tsk-2", _write(tmp_path, "b.bin", b"fine"))
+    uploader.submit(journal, "tsk-1", {"artifacts_pending": True})
+    uploader.start()
+
+    ports.wait(lambda: ports.reports)
+    uploader.stop(0)
+
+    assert [data for _, _, data in ports.stored] == [b"fine"]
+    assert ports.reports[0][:3] == ("tsk-2", "dsp-1", UploadReport.UPLOADED)
+
+
 def test_another_workers_custody_is_kept_until_its_success_and_tasks_settle(
     tmp_path,
 ) -> None:

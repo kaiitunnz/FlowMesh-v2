@@ -409,6 +409,9 @@ class ArtifactUploader:
             failure = f"the custody copy of {member.content_digest} is gone"
         except Exception as exc:
             with self._cv:
+                # Its dispatch's other files are tried before it again.
+                if publication.queue and publication.queue[0] is member:
+                    publication.queue.rotate(-1)
                 wait = publication.backoff
                 publication.retry_at = self._clock() + wait
                 publication.backoff = min(_RETRY_MAX_SEC, wait * 2)
