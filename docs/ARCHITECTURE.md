@@ -554,20 +554,20 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   `step-<n>` into the shared content store while it runs. The worker reports success
   once it has hashed the `final` files and stored each tree's manifest, and uploads the
   files afterwards, so the task is `DONE` while its workflow does not finish until every
-  upload settles. An upload whose worker registration ends before finishing it settles
-  from what the store holds: an artifact with a file missing is lost, its task stays
-  `DONE`, and its workflow fails with an `artifact_lost` reason while its other work
-  runs on. Each name is published once per revision and its first publication stands, so
-  a retry never replaces what an earlier attempt published. The catalog is stored with
-  the task's record, so a freed workflow's artifacts list and download too. A consumer's
-  worker hydrates each upstream artifact its task reads before the task runs, as it does
-  any consumed value, from a holder's copy while it is still uploading; a model archive
-  loads as the directory it archives. A read that finds no copy waits, spending no
-  attempt, until the upload settles, and a reader of a lost artifact fails as
-  `input_unreadable`, naming it. A dispatch waits out a store outage for a tree its spec
-  loads, and fails on a missing one. A training run's save waits while two checkpoints
-  are publishing, and a run whose checkpoint cannot be published stops at its next save
-  and fails.
+  upload settles. An upload its worker has not finished when its registration ends or it
+  goes silent settles from what the store holds: an artifact with a file missing is
+  lost, its task stays `DONE`, and its workflow fails with an `artifact_lost` reason
+  while its other work runs on. Each name is published once per revision and its first
+  publication stands, so a retry never replaces what an earlier attempt published. The
+  catalog is stored with the task's record, so a freed workflow's artifacts list and
+  download too. A consumer's worker hydrates each upstream artifact its task reads
+  before the task runs, as it does any consumed value, from a holder's copy while it is
+  still uploading; a model archive loads as the directory it archives. A read that finds
+  no copy waits, spending no attempt, until the upload settles, and a reader of a lost
+  artifact fails as `input_unreadable`, naming it. A dispatch waits out a store outage
+  for a tree its spec loads, and fails on a missing one. A training run's save waits
+  while two checkpoints are publishing, and a run whose checkpoint cannot be published
+  stops at its next save and fails.
 - **Agent exports.** An agent declares workspace paths to publish as `exports`. When the
   agent completes, its worker copies them out of the quiesced workspace into the task's
   artifacts, which publish like any other. A missing export fails the agent unless it is
