@@ -55,7 +55,7 @@ def test_a_grant_the_holder_was_never_handed_is_refused() -> None:
         ("requester_subject", "wkr-9"),
         ("holder_generation", 4),
         ("transfer_session_id", "rly-9"),
-        ("expires_at_epoch", time.time() + 3000),
+        ("expires_at_epoch", 4_102_444_800.0),
     ],
 )
 def test_a_grant_altered_after_minting_is_refused(field, value) -> None:
