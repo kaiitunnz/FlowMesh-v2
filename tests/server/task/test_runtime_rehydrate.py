@@ -169,6 +169,9 @@ class FakeWorkflowRegistry(StoredTaskStates, StoredLedgers):
 
 
 class _WorkerRegistryStub:
+    async def get_workers_heard_async(self, ids: list[str]) -> list[Any]:
+        return [(self.get_worker(i), False) for i in ids]
+
     def get_worker(self, worker_id: str) -> Any:
         return SimpleNamespace(id=worker_id, node_id="nde-1")
 

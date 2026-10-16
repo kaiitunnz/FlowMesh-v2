@@ -196,9 +196,9 @@ def test_an_unfiltered_page_takes_two_round_trips_whatever_the_total(
     older_ids = [w["workflow_id"] for w in older.json()["entries"]]
     assert [w["workflow_id"] for w in page["entries"]] == ids[-limit:]
     assert older_ids == ids[-2 * limit : -limit]
-    # Per page, one index range and one read of the page's five keys per workflow.
+    # Per page, one index range and one read of the page's six keys per workflow.
     assert counting.round_trips == 4
-    assert counting.commands == 2 + 5 * (limit + len(older_ids))
+    assert counting.commands == 2 + 6 * (limit + len(older_ids))
 
 
 def test_workflows_registered_before_the_index_list_once_indexed(

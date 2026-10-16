@@ -37,6 +37,11 @@ from shared.tasks.artifact_binding import (
     ArtifactKind,
     latest_revision,
 )
+from shared.tasks.artifact_upload import (
+    ARTIFACTS_PENDING,
+    UPLOAD_SETTLED_FRAME_KIND,
+    UploadSettled,
+)
 from shared.tasks.credentials import dispatched_credentials
 from shared.tasks.specs import (
     EmbeddingSpecStrict,
@@ -74,12 +79,15 @@ from .content.artifacts import (
     ArtifactChanged,
     ArtifactPublisher,
     ReservedArtifactName,
+    StageFile,
     checkpoint_spool_dir,
     declared_archives,
 )
 from .content.checkpoints import CheckpointPublishFailed, CheckpointUploader
+from .content.custody import UploadJournal
 from .content.exports import EXPORT_STAGING_DIR
 from .content.inputs import TaskInputHydrator, input_unreadable, read_input
+from .content.uploads import ArtifactUploader
 from .egress import MediatedEgressSidecar, ModelEgress, SearchEgress
 from .executors.base_executor import ExecutionError, Executor, TaskCancelledError
 from .executors.episode_support import EpisodeStepResult, discard_step_captures
@@ -188,6 +196,30 @@ def _working_owner(out_dir: Path) -> str | None:
         return None
 
 
+class _Staging:
+    """A dispatch's final artifacts in upload custody, until its success reports
+    them."""
+
+    def __init__(self, uploads: ArtifactUploader, journal: UploadJournal) -> None:
+        self._uploads = uploads
+        self._journal = journal
+
+    def for_task(self, task_id: str) -> StageFile:
+        def stage(path: Path, cancelled: Callable[[], bool] | None) -> ContentReference:
+            return self._uploads.stage(self._journal, task_id, path, cancelled)
+
+        return stage
+
+    def staged(self) -> bool:
+        return bool(self._journal.tasks)
+
+    def submit(self, task_id: str, success: dict[str, Any]) -> None:
+        self._uploads.submit(self._journal, task_id, success)
+
+    def abandon(self) -> None:
+        self._uploads.abandon(self._journal)
+
+
 class Runner:
     def __init__(
         self,
@@ -221,6 +253,7 @@ class Runner:
         self.logger = logger
         self.default_executor = default_executor
         self._cleanup_after_publish = cleanup_after_publish
+        self._staged: dict[str, _Staging] = {}
         # TODO: an alias is unique per node, not per shared results directory.
         # The alias marks the task directories whose working directories it may clear.
         self._owner = owner
@@ -633,6 +666,10 @@ class Runner:
             if (lane := self.lifecycle.ssh_relay) is not None:
                 lane.route(frame_kind, frame)
             return
+        if frame_kind == UPLOAD_SETTLED_FRAME_KIND:
+            if (uploads := self.lifecycle.artifact_uploads) is not None:
+                uploads.settle(UploadSettled.model_validate(frame))
+            return
         if frame_kind.startswith("content_"):
             if (plane := self.lifecycle.content_plane) is not None:
                 plane.route(frame_kind, frame)
@@ -971,10 +1008,43 @@ class Runner:
         """
         if result is None:
             return {}
+        return self._write_staged_results(
+            msg, out_dir, result, checkpoints, self._staging(msg)
+        )
+
+    def _staging(self, msg: WorkerTaskMessage) -> _Staging | None:
+        """Open custody for a dispatch's final artifacts, when this worker uploads them
+        after its success."""
+        uploads = self.lifecycle.artifact_uploads
+        if uploads is None or msg.dispatch_id is None:
+            return None
+        staging = _Staging(uploads, uploads.begin(msg.dispatch_id, msg.content_scope))
+        self._staged[msg.dispatch_id] = staging
+        return staging
+
+    def _report_success(self, msg: WorkerTaskMessage, metadata: dict[str, Any]) -> None:
+        """Report a task's success, owing the upload of what it staged."""
+        staging = self._staged.pop(msg.dispatch_id or "", None)
+        if staging is not None:
+            if staging.staged():
+                metadata[ARTIFACTS_PENDING] = True
+                staging.submit(msg.task_id, metadata)
+            else:
+                staging.abandon()
+        self.lifecycle.set_succeeded(msg.task_id, metadata=metadata)
+
+    def _write_staged_results(
+        self,
+        msg: WorkerTaskMessage,
+        out_dir: Path,
+        result: BaseExecutorResult,
+        checkpoints: list[ArtifactBinding] | None,
+        staging: _Staging | None,
+    ) -> dict[str, Any]:
         own = result.model_copy(update={"children": {}})
         declared = _declared_result(own, msg.resolved_contract) or own
         artifacts = (
-            self._publish_artifacts(msg, msg.task_id, out_dir, own)
+            self._publish_artifacts(msg, msg.task_id, out_dir, own, staging)
             if _publishes_result(own)
             else []
         )
@@ -997,7 +1067,9 @@ class Runner:
             if child_info is None:
                 continue
             child_dir = self._resolve_output_dir(child_id)
-            published = self._publish_artifacts(msg, child_id, child_dir, child_result)
+            published = self._publish_artifacts(
+                msg, child_id, child_dir, child_result, staging
+            )
             child_reference = self._write_single_result(
                 msg, child_id, child_dir, child_result
             )
@@ -1017,12 +1089,14 @@ class Runner:
         task_id: str,
         out_dir: Path,
         result: BaseExecutorResult,
+        staging: _Staging | None = None,
     ) -> list[dict[str, Any]]:
         """Publish what a task left under its artifacts directory, returning the
         bindings its success reports.
 
-        Every file is in the shared store before this returns, so the success that
-        reports these bindings names bytes that outlive this worker.
+        With ``staging``, each file is copied and hashed into upload custody and
+        uploaded after the success, and only each tree's manifest is in the shared
+        store before this returns. Without it, every file is.
         """
         artifacts_dir = out_dir / ARTIFACTS_DIR
         if not artifacts_dir.is_dir() or not any(artifacts_dir.iterdir()):
@@ -1035,7 +1109,10 @@ class Runner:
                 retryable=True,
             )
         publisher = ArtifactPublisher(
-            store, msg.content_scope, cancelled=lambda: self._task_ending(task_id)
+            store,
+            msg.content_scope,
+            cancelled=lambda: self._task_ending(task_id),
+            stage=staging.for_task(task_id) if staging is not None else None,
         )
         started = time.monotonic()
         try:
@@ -1059,7 +1136,8 @@ class Runner:
                 retryable=True,
             ) from exc
         self.logger.info(
-            "Published %d artifact(s) of task %s (%d bytes) in %.1f s",
+            "%s %d artifact(s) of task %s (%d bytes) in %.1f s",
+            "Staged" if staging is not None else "Published",
             len(bindings),
             task_id,
             sum(b.size_bytes for b in bindings if b.kind is not ArtifactKind.ARCHIVE),
@@ -1605,7 +1683,7 @@ class Runner:
                             metadata["agent_export_failure"] = (
                                 out.export_failure.model_dump(mode="json")
                             )
-                    self.lifecycle.set_succeeded(task_id, metadata=metadata)
+                    self._report_success(msg, metadata)
                     unreported_step = None
                     self.logger.info("Task %s completed successfully", task_id)
                 except TaskCancelledError as e:
@@ -1670,6 +1748,10 @@ class Runner:
                 finally:
                     if unreported_step is not None:
                         discard_step_captures(self.lifecycle, task_id, unreported_step)
+                    if (
+                        staging := self._staged.pop(msg.dispatch_id or "", None)
+                    ) is not None:
+                        staging.abandon()
                     self._current_task_id = None
                     with self._cancel_lock:
                         self._executing = None

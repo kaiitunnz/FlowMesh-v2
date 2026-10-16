@@ -111,6 +111,10 @@ def workflow_cancelled_tasks_key(workflow_id: str) -> str:
     return f"workflow:{workflow_id}:cancelled_tasks"
 
 
+def workflow_uploads_key(workflow_id: str) -> str:
+    return f"workflow:{workflow_id}:uploads"
+
+
 def workflow_sched_key(workflow_id: str) -> str:
     return f"workflow:{workflow_id}:sched"
 

@@ -76,6 +76,13 @@ class WorkerTaskMessage(BaseModel):
             "task id."
         ),
     )
+    pending_artifacts: list[str] | None = Field(
+        default=None,
+        description=(
+            "Digests of the artifacts the task reads that are still uploading, read "
+            "from a holder first."
+        ),
+    )
     input_element: ResultElementRef | None = Field(
         default=None,
         description="Collection element a fan-out child runs on.",

@@ -30,6 +30,8 @@ from .client import FlowMesh
 from .config import FlowMeshConfig
 from .exceptions import (
     APIError,
+    ArtifactLostError,
+    ArtifactPendingError,
     AuthenticationError,
     ConfigInvalidError,
     ConfigNotFoundError,
@@ -54,6 +56,8 @@ __all__ = [
     "OutputPendingError",
     "ContentUnavailableError",
     "OutputUnreadableError",
+    "ArtifactPendingError",
+    "ArtifactLostError",
     "FlowMeshConnectionError",
     "ConfigNotFoundError",
     "ConfigInvalidError",

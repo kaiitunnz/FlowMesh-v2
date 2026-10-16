@@ -29,6 +29,8 @@ from .content import (
     WorkerContentCache,
     WorkerContentPlane,
 )
+from .content.custody import ArtifactCustody
+from .content.uploads import ArtifactUploader
 from .executors import EXECUTOR_REGISTRY, IMPORT_ERRORS, get_executor_class_name
 from .executors.base_executor import Executor
 from .executors.mp_executor import MPExecutor
@@ -383,6 +385,36 @@ def _build_content_plane(
     )
 
 
+def _build_artifact_uploads(
+    cfg: WorkerConfig,
+    client: SupervisorClient,
+    plane: WorkerContentPlane | None,
+    logger: logging.Logger,
+) -> ArtifactUploader | None:
+    """The uploader of artifacts this worker's successes announce before the store
+    has them, with custody on the content directory every worker on the node shares.
+
+    Where the worker keeps a cache, a staged copy is also a cached copy it reports
+    holding, so a consumer can read it from here before the upload lands.
+    """
+    if plane is None:
+        return None
+    cache = plane.cache
+    return ArtifactUploader(
+        ArtifactCustody(
+            cfg.content_dir,
+            keep=cache.keep_staged if cache is not None else None,
+            logger=logger,
+        ),
+        cfg.alias,
+        identity=lambda: (client.worker_id, client.incarnation),
+        upload=plane.upload_file,
+        resend_success=client.resend_task_succeeded,
+        report=client.report_artifact_upload,
+        logger=logger,
+    )
+
+
 def run_until_exit(
     runner: Runner, lifecycle: Lifecycle, gpu_sampler: GpuSampler
 ) -> None:
@@ -504,16 +536,16 @@ def main() -> None:
     )
     gpu_sampler.start()
 
-    lifecycle.start_content_plane(
-        _build_content_plane(
-            cfg,
-            supervisor_client,
-            lifecycle.dispatch_for,
-            logger,
-            listener_sock=content_sock,
-            peer_material=peer_material,
-        )
+    content_plane = _build_content_plane(
+        cfg,
+        supervisor_client,
+        lifecycle.dispatch_for,
+        logger,
+        listener_sock=content_sock,
+        peer_material=peer_material,
     )
+    uploads = _build_artifact_uploads(cfg, supervisor_client, content_plane, logger)
+    lifecycle.start_content_plane(content_plane, uploads)
     lifecycle.start_ssh_relay(
         SshRelayLane(
             registry=lifecycle.ssh_endpoints,

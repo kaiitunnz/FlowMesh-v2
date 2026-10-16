@@ -19,6 +19,7 @@ from pathlib import Path, PurePosixPath
 from typing import Self
 
 from shared.content import (
+    ContentHydrationError,
     ContentReference,
     ContentUnavailable,
     TreeManifest,
@@ -76,8 +77,10 @@ class ArtifactMaterializer:
         root: Path,
         cancelled: Callable[[], bool] = lambda: False,
         backoff_sec: float = _READ_BACKOFF_SEC,
+        pending: frozenset[str] = frozenset(),
     ) -> None:
         self._plane = plane
+        self._pending = pending
         self._task_id = task_id
         self._root = root
         self._cancelled = cancelled
@@ -96,10 +99,11 @@ class ArtifactMaterializer:
     def materialize(self, binding: ArtifactBinding) -> Path:
         """Hydrate an artifact under the root once, returning its local path."""
         digest = binding.reference.content_digest
+        pending = digest in self._pending
         if binding.kind is not ArtifactKind.TREE:
             rel = PurePosixPath(digest, PurePosixPath(binding.name).name)
             if not (self._dir / rel).exists():
-                self._fetch(binding.reference, self._dir / rel)
+                self._fetch(binding.reference, self._dir / rel, pending)
             return self._root / rel
         if (self._dir / digest).is_dir():
             return self._root / digest
@@ -108,20 +112,21 @@ class ArtifactMaterializer:
         shutil.rmtree(staging, ignore_errors=True)
         staging.mkdir()
         for reference, path in members:
-            self._fetch(reference, staging / path)
+            self._fetch(reference, staging / path, pending)
         staging.rename(self._dir / digest)
         return self._root / digest
 
     def copy_at(self, binding: ArtifactBinding, rel: PurePosixPath) -> Path:
         """Put a writable copy of the artifact at ``rel`` under the root, laid out as
         it was published: a file as ``rel``, a tree as a directory of its files."""
+        pending = binding.reference.content_digest in self._pending
         if binding.kind is not ArtifactKind.TREE:
-            self._copy(binding.reference, self._dir / rel)
+            self._copy(binding.reference, self._dir / rel, pending)
             return self._root / rel
         members = self._members(binding)
         (self._dir / rel).mkdir(parents=True, exist_ok=True)
         for reference, path in members:
-            self._copy(reference, self._dir / rel / path)
+            self._copy(reference, self._dir / rel / path, pending)
         return self._root / rel
 
     def _members(self, binding: ArtifactBinding) -> list[tuple[ContentReference, str]]:
@@ -135,10 +140,14 @@ class ArtifactMaterializer:
         scope = binding.reference.authorization_scope
         return [(member.reference(scope), member.path) for member in manifest.members]
 
-    def _copy(self, reference: ContentReference, dest: Path) -> None:
+    def _copy(self, reference: ContentReference, dest: Path, pending: bool) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)
         self._read(
-            reference, lambda: self._plane.hydrate_to(self._task_id, reference, dest)
+            reference,
+            lambda: self._plane.hydrate_to(
+                self._task_id, reference, dest, prefer_peer=pending
+            ),
+            pending,
         )
 
     def _manifest_bytes(self, reference: ContentReference) -> bytes:
@@ -146,7 +155,14 @@ class ArtifactMaterializer:
             reference, lambda: self._plane.hydrate(self._task_id, reference)
         )
 
-    def _read[T](self, reference: ContentReference, read: Callable[[], T]) -> T:
+    def _read[T](
+        self, reference: ContentReference, read: Callable[[], T], pending: bool = False
+    ) -> T:
+        """Read an object, retrying briefly while the store cannot be reached.
+
+        An object of an artifact whose upload is still owed that no holder served and
+        the store does not have yet is unavailable, not missing.
+        """
         if self._cancelled():
             raise TaskCancelledError(
                 f"Task {self._task_id} ended while reading its artifact inputs"
@@ -157,14 +173,21 @@ class ArtifactMaterializer:
             except (ContentUnavailable, ContentAccessDenied) as exc:
                 if attempt == _READ_ATTEMPTS:
                     raise ArtifactInputUnavailable(reference, exc) from exc
+            except ContentHydrationError as exc:
+                if pending:
+                    raise ArtifactInputUnavailable(reference, exc) from exc
+                raise
             time.sleep(self._backoff_sec)
         raise AssertionError("unreachable")
 
-    def _fetch(self, reference: ContentReference, dest: Path) -> None:
+    def _fetch(self, reference: ContentReference, dest: Path, pending: bool) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)
         self._read(
             reference,
-            lambda: self._plane.materialize_to(self._task_id, reference, dest),
+            lambda: self._plane.materialize_to(
+                self._task_id, reference, dest, prefer_peer=pending
+            ),
+            pending,
         )
         os.chmod(dest, 0o444)
 

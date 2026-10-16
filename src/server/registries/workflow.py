@@ -44,6 +44,7 @@ from ..clients.redis import (
     workflow_sched_key,
     workflow_sources_key,
     workflow_tasks_key,
+    workflow_uploads_key,
     workflow_v2_key,
 )
 from ..orchestration.ledger_layout import LedgerChanges, StoredLedger, decode_ledger
@@ -112,6 +113,10 @@ class WorkflowControl(BaseModel):
         }
 
 
+# The workflow-record field holding why a task's lost artifact failed the workflow.
+ARTIFACT_FAILURE_FIELD = "artifact_failure"
+
+
 class WorkflowRecord(BaseModel):
     workflow_id: str = Field(description="Workflow identifier.")
     task_ids: list[str] = Field(description="Task identifiers in the workflow.")
@@ -130,6 +135,11 @@ class WorkflowRecord(BaseModel):
     )
     control_cancelled: bool = Field(
         default=False, description="Whether the workflow was cancelled as a whole."
+    )
+    artifact_failure: str = Field(
+        default="",
+        description="Why a task's lost artifact failed the workflow, when one did.",
+        exclude_if=lambda failure: not failure,
     )
 
     @property
@@ -185,6 +195,10 @@ class Workflow(BaseModel):
     failure: str | None = Field(
         default=None,
         description="Why the workflow failed outside any of its tasks, when it did.",
+    )
+    pending_artifact_uploads: int = Field(
+        default=0,
+        description="How many of its tasks are still uploading artifacts.",
     )
 
 
@@ -256,6 +270,7 @@ def _queue_workflow_reads(pipe: _AnyPipeline, workflow_ids: Sequence[str]) -> No
         pipe.smembers(workflow_failed_tasks_key(workflow_id))
         pipe.smembers(workflow_cancelled_tasks_key(workflow_id))
         pipe.smembers(workflow_tasks_key(workflow_id))
+        pipe.scard(workflow_uploads_key(workflow_id))
 
 
 def _queue_submission_stamps(pipe: _AnyPipeline, ids: Sequence[str]) -> None:
@@ -320,10 +335,29 @@ def _queue_revision(pipe: _AnyPipeline, *workflow_ids: str) -> None:
 
 def _queue_task_states(pipe: _AnyPipeline, items: Sequence[PersistedTask]) -> None:
     for item in items:
-        pipe.set(task_state_key(item.record.task_id), item.model_dump_json())
-        queue_artifact_bindings(
-            pipe, item.record.task_id, item.record.unwritten_artifacts
+        record = item.record
+        pipe.set(task_state_key(record.task_id), item.model_dump_json())
+        queue_artifact_bindings(pipe, record.task_id, record.unwritten_artifacts)
+        _queue_upload_state(pipe, record)
+
+
+def _queue_upload_state(pipe: _AnyPipeline, record: TaskRecord) -> None:
+    """Queue what a task's artifact upload makes of its workflow, from the upload as
+    the record now holds it: whether it holds the workflow open, and the failure its
+    loss gives the workflow."""
+    if (upload := record.artifact_upload) is None:
+        return
+    uploads = workflow_uploads_key(record.workflow_id)
+    if upload.pending:
+        pipe.sadd(uploads, record.task_id)
+        return
+    if upload.lost:
+        pipe.hsetnx(
+            workflow_key(record.workflow_id),
+            ARTIFACT_FAILURE_FIELD,
+            upload.failure(record.task_id),
         )
+    pipe.srem(uploads, record.task_id)
 
 
 def task_sources(items: Sequence[PersistedTask]) -> dict[str, dict[str, str]]:
@@ -564,6 +598,7 @@ class WorkflowRegistry(WorkflowHistoryStore, ArtifactCatalogStore):
             pipe.delete(*(workflow_sources_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_credential_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_revision_key(wid) for wid in workflow_ids))
+            pipe.delete(*(workflow_uploads_key(wid) for wid in workflow_ids))
             for task_id in task_ids:
                 pipe.delete(task_state_key(task_id), task_artifacts_key(task_id))
             pipe.execute()
@@ -588,6 +623,7 @@ class WorkflowRegistry(WorkflowHistoryStore, ArtifactCatalogStore):
             pipe.delete(*(workflow_sources_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_credential_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_revision_key(wid) for wid in workflow_ids))
+            pipe.delete(*(workflow_uploads_key(wid) for wid in workflow_ids))
             for task_id in task_ids:
                 pipe.delete(task_state_key(task_id), task_artifacts_key(task_id))
             await pipe.execute()
@@ -1111,11 +1147,13 @@ class WorkflowRegistry(WorkflowHistoryStore, ArtifactCatalogStore):
         failed_tasks: set[str],
         cancelled_tasks: set[str],
         remaining_tasks: set[str],
+        pending_uploads: int,
     ) -> Workflow:
         active_dispatched = dispatched_tasks.intersection(remaining_tasks)
-        if failed_tasks or record.control_failure:
+        failure = record.control_failure or record.artifact_failure
+        if failed_tasks or failure:
             status = WorkflowStatus.FAILED
-        elif remaining_tasks or record.control_open:
+        elif remaining_tasks or record.control_open or pending_uploads:
             if active_dispatched:
                 status = WorkflowStatus.DISPATCHED
             else:
@@ -1137,7 +1175,8 @@ class WorkflowRegistry(WorkflowHistoryStore, ArtifactCatalogStore):
             completed_tasks=list(completed_tasks),
             failed_tasks=list(failed_tasks),
             cancelled_tasks=list(cancelled_tasks),
-            failure=record.control_failure or None,
+            failure=failure or None,
+            pending_artifact_uploads=pending_uploads,
         )
 
     def _built_workflows(self, replies: Sequence[Any]) -> list[Workflow]:
@@ -1148,8 +1187,11 @@ class WorkflowRegistry(WorkflowHistoryStore, ArtifactCatalogStore):
                 failed,
                 cancelled,
                 remaining,
+                uploads,
             )
-            for data, dispatched, failed, cancelled, remaining in batched(replies, 5)
+            for data, dispatched, failed, cancelled, remaining, uploads in batched(
+                replies, 6
+            )
             if data
         ]
 

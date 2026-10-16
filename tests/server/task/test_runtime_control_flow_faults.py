@@ -245,6 +245,7 @@ def _durable_status(registry: FakeRegistry, workflow_id: str) -> str:
         {r.task_id for r in records if r.status == TaskStatus.FAILED},
         {r.task_id for r in records if r.status == TaskStatus.CANCELLED},
         registry.remaining_of(workflow_id),
+        0,
     )
     return str(built.status.value).lower()
 

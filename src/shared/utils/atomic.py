@@ -43,12 +43,14 @@ def temp_path(directory: Path) -> Path:
     return directory / _temp_name()
 
 
-def write_replacing(dest: Path, write: Callable[[BinaryIO], Any]) -> None:
+def write_replacing(
+    dest: Path, write: Callable[[BinaryIO], Any], *, durable: bool = False
+) -> None:
     """Replace ``dest`` with what ``write`` puts in a temp file beside it.
 
     ``dest`` only ever appears whole, with its bytes on disk; a write that fails leaves
-    nothing behind. The rename itself is not flushed, so ``dest`` may be absent after a
-    crash.
+    nothing behind. Without ``durable`` the rename itself is not flushed, so ``dest``
+    may be absent after a crash.
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = temp_path(dest.parent)
@@ -61,6 +63,8 @@ def write_replacing(dest: Path, write: Callable[[BinaryIO], Any]) -> None:
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
+    if durable:
+        _fsync_dir(dest.parent)
 
 
 def link_no_replace(tmp: Path, target: Path, *, durable: bool = False) -> bool:

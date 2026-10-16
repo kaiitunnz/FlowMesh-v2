@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from shared.content import (
+    ContentHydrationError,
     ContentReference,
     ContentStoreError,
     FabricObjectStore,
@@ -16,6 +17,7 @@ from shared.content import (
 from shared.harness.adapter import HarnessResult, HarnessResultKind
 from shared.schemas.result import BaseExecutorResult, ResultEnvelope
 from shared.tasks import MergedChildTaskStrict
+from shared.tasks.artifact_upload import ARTIFACTS_PENDING
 from shared.tasks.task_type import TaskType
 from tests.worker.factories import (
     make_worker_hardware,
@@ -23,6 +25,8 @@ from tests.worker.factories import (
     no_mediated_op,
 )
 from worker.content.artifacts import checkpoint_spool_dir, spool_checkpoint
+from worker.content.custody import ArtifactCustody, UploadJournal
+from worker.content.uploads import ArtifactUploader
 from worker.executors.base_executor import Executor
 from worker.executors.episode_support import EpisodeStepResult
 from worker.runner import Runner
@@ -332,3 +336,97 @@ def test_a_starting_worker_clears_the_working_dirs_a_crash_left(
 
     assert sorted(p.name for p in left.iterdir()) == [".working-owner", "artifacts"]
     assert (outside / "kept").read_bytes() == b"not the worker's"
+
+
+def _run_staged(
+    tmp_path: Path, store: FabricObjectStore, executor: Executor
+) -> tuple[MagicMock, ArtifactCustody, list[list[UploadJournal]]]:
+    custody = ArtifactCustody(tmp_path / "content")
+    uploads = ArtifactUploader(
+        custody,
+        "w1",
+        identity=lambda: ("wrk-test", 1),
+        upload=MagicMock(),
+        resend_success=MagicMock(),
+        report=MagicMock(),
+    )
+    lifecycle = MagicMock()
+    lifecycle.worker_id = "wrk-test"
+    lifecycle.cost_per_hour = 1.0
+    lifecycle.client.create_task_log_emitter.return_value = None
+    lifecycle.client.iter_interrupts.return_value = []
+    lifecycle.client.iter_stops.return_value = []
+    lifecycle.client.next_mediated_op.side_effect = no_mediated_op
+    lifecycle.content_plane = _Plane(store)
+    lifecycle.artifact_uploads = uploads
+    owed_at_success: list[list[UploadJournal]] = []
+    lifecycle.set_succeeded.side_effect = lambda *_, **__: owed_at_success.append(
+        list(custody.journals())
+    )
+    msg = make_worker_task_message(
+        {"taskType": "echo"},
+        task_type=TaskType.ECHO,
+        task_id="tsk-1",
+        content_scope="org-a",
+        dispatch_id="dsp-1",
+    )
+    Runner(
+        lifecycle=lifecycle,
+        task_stream=[msg],
+        results_dir=tmp_path / "out",
+        hardware=make_worker_hardware(),
+        executors={"echo": executor, "default": executor},
+        default_executor=executor,
+        logger=MagicMock(),
+    ).start()
+    return lifecycle, custody, owed_at_success
+
+
+def test_a_staged_success_owes_its_upload_before_it_is_reported(
+    tmp_path: Path,
+) -> None:
+    store = SharedFilesystemObjectStore(tmp_path / "cas")
+
+    lifecycle, custody, owed = _run_staged(
+        tmp_path, store, _Producing(BaseExecutorResult())
+    )
+
+    metadata = _metadata(lifecycle)
+    assert metadata[ARTIFACTS_PENDING] is True
+    (journal,) = owed[0]
+    assert journal.task_id == "tsk-1" and journal.success == metadata
+    (member,) = journal.tasks["tsk-1"].members
+    assert custody.source(journal, member).read_bytes() == b"weights"
+    with pytest.raises(ContentHydrationError):
+        store.stored_size(member)
+    (binding,) = metadata["artifacts"]
+    assert store.hydrate(ContentReference.model_validate(binding["reference"]))
+
+
+def test_a_success_with_nothing_staged_owes_no_upload(tmp_path: Path) -> None:
+    lifecycle, custody, owed = _run_staged(
+        tmp_path,
+        SharedFilesystemObjectStore(tmp_path / "cas"),
+        _Returning(BaseExecutorResult()),
+    )
+
+    assert ARTIFACTS_PENDING not in _metadata(lifecycle)
+    assert owed == [[]]
+    assert not any((tmp_path / "content").rglob("journal.json"))
+
+
+def test_a_task_failing_after_staging_ends_its_custody(tmp_path: Path) -> None:
+    class _NoManifests(SharedFilesystemObjectStore):
+        def write(self, scope: str, data: bytes, *, media_type: str = "") -> Any:
+            raise ContentStoreError("store unreachable")
+
+    lifecycle, custody, _ = _run_staged(
+        tmp_path,
+        _NoManifests(tmp_path / "cas"),
+        _Producing(BaseExecutorResult()),
+    )
+
+    lifecycle.set_succeeded.assert_not_called()
+    assert lifecycle.set_failed.call_args.kwargs["retryable"] is True
+    assert list(custody.journals()) == []
+    assert not custody.publication_dir("org-a", "dsp-1").exists()

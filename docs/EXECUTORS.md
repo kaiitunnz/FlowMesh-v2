@@ -67,12 +67,13 @@ task fails before the result is stored; stored results read through the tolerant
 ## Artifact publication
 
 An executor writes its artifacts under `out_dir/artifacts/`, and the worker publishes
-them in the shared content store when the executor returns, before it reports the task
-done: each top-level file as one object and each top-level directory as a tree whose
-manifest names its files. A result field ending in `_archive` whose ref names a
-directory with `.tar.gz` appended (`final_model_archive`, `final_lora_archive`)
-declares a `.tar.gz` archive view of that tree. An artifact named `results.json` fails
-the task, since that name downloads its result.
+them as the task's `final` set when the executor returns: each top-level file as one
+object and each top-level directory as a tree whose manifest names its files. The files
+reach the shared content store after the task is reported done. A result field ending
+in `_archive` whose ref names a directory with `.tar.gz` appended
+(`final_model_archive`, `final_lora_archive`) declares a `.tar.gz` archive view of that
+tree. An artifact named `results.json` fails the task, since that name downloads its
+result.
 
 A training executor publishes each checkpoint its trainer saves as the `checkpoints`
 artifact at revision `step-<n>` while it runs, and leaves its

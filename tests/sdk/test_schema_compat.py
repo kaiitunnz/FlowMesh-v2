@@ -10,10 +10,13 @@ from flowmesh import models as sdk_models
 # SDK-side imports
 from flowmesh.models import (
     ArtifactContext,
+    ArtifactDurability,
+    ArtifactKind,
     ArtifactRef,
     BaseExecutorResult,
     CPUInfo,
     Diagnostic,
+    DurabilityError,
     GpuInfo,
     GpuPlatformInfo,
     HostInfo,
@@ -79,6 +82,7 @@ from server.registries.worker import Worker as SrvWorker
 from server.registries.worker import WorkerInfo as SrvWorkerInfo
 from server.registries.workflow import Workflow as SrvWorkflow
 from server.registries.workflow import WorkflowStatus as SrvWorkflowStatus
+from server.schemas.artifacts import DurabilityError as SrvDurabilityError
 from server.schemas.artifacts import PublishedArtifact as SrvPublishedArtifact
 from server.schemas.artifacts import PublishedArtifactList as SrvPublishedArtifactList
 from server.schemas.common import OkResponse as SrvOkResponse
@@ -136,6 +140,8 @@ from shared.schemas.result import BaseExecutorResult as SrvBaseExecutorResult
 from shared.schemas.result import ResultEnvelope as SrvResultEnvelope
 from shared.schemas.worker import SSHLimits as SrvSSHLimits
 from shared.schemas.worker import WorkerCapabilities as SrvWorkerCapabilities
+from shared.tasks.artifact_binding import ArtifactKind as SrvArtifactKind
+from shared.tasks.artifact_upload import ArtifactDurability as SrvArtifactDurability
 from shared.tasks.task_type import TaskType as SrvTaskType
 
 from .helpers import (
@@ -262,6 +268,7 @@ MODEL_PAIRS = [
     (SrvArtifactContext, ArtifactContext),
     (SrvArtifactRef, ArtifactRef),
     (SrvPublishedArtifact, PublishedArtifact),
+    (SrvDurabilityError, DurabilityError),
     (SrvPublishedArtifactList, PublishedArtifactList),
     # Telemetry queries
     (SrvTraceSpanNode, TraceSpanNode),
@@ -333,6 +340,8 @@ ENUM_PAIRS = [
     (SrvLogStream, LogStream),
     (SrvNodeRole, NodeRole),
     (SrvOutputOutcome, OutputOutcome),
+    (SrvArtifactDurability, ArtifactDurability),
+    (SrvArtifactKind, ArtifactKind),
 ]
 
 

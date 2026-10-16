@@ -45,6 +45,7 @@ from shared.outcome import (
 
 from .access import ContentAccessDenied, ContentAccessRegistry
 from .lane_host import ContentLaneHost
+from .store import WorkerContentCache
 
 
 class _Missed:
@@ -172,6 +173,20 @@ class WorkerContentPlane:
             self._cache(reference, lambda: lane.keep_file(reference, path))
         return reference
 
+    def upload_file(
+        self, task_id: str, scope: str, path: Path, media_type: str = OCTET_STREAM
+    ) -> ContentReference:
+        """Put a file's bytes in the shared store under a task's access, and return the
+        reference naming exactly what was stored; this worker already has its copy."""
+        return self._store(task_id, scope).write_file(
+            scope, path, media_type=media_type
+        )
+
+    @property
+    def cache(self) -> WorkerContentCache | None:
+        """This worker's cache, when it runs one."""
+        return self._lane.store if self._lane is not None else None
+
     def hydrate(self, task_id: str, reference: ContentReference) -> bytes:
         """The object's verified bytes, from the nearest place that has them.
 
@@ -189,12 +204,24 @@ class WorkerContentPlane:
             ),
         )
 
-    def hydrate_to(self, task_id: str, reference: ContentReference, dest: Path) -> None:
+    def hydrate_to(
+        self,
+        task_id: str,
+        reference: ContentReference,
+        dest: Path,
+        *,
+        prefer_peer: bool = False,
+    ) -> None:
         """Write the object's verified bytes to ``dest``, from the nearest place that
-        has them, never holding the object whole."""
+        has them, never holding the object whole.
+
+        With ``prefer_peer`` a holder is read before the store at any size, over any
+        route, as for an object the store may not have yet.
+        """
         scope = reference.authorization_scope
         self._read(
             reference,
+            prefer_peer=prefer_peer,
             local=lambda lane: lane.copy_local(reference, dest),
             peer=lambda lane, peer_only: lane.copy_peer(
                 reference, task_id, dest, peer_only
@@ -204,16 +231,23 @@ class WorkerContentPlane:
         )
 
     def materialize_to(
-        self, task_id: str, reference: ContentReference, dest: Path
+        self,
+        task_id: str,
+        reference: ContentReference,
+        dest: Path,
+        *,
+        prefer_peer: bool = False,
     ) -> None:
         """Put the object's verified bytes at ``dest`` for a reader to load.
 
         Where this worker keeps a copy, ``dest`` links to it, so what a task reads
-        counts against the cache's own bounds.
+        counts against the cache's own bounds. An object still uploading, read with
+        ``prefer_peer``, is copied instead, so a reader writing its input never
+        changes bytes its upload has yet to store.
         """
         lane = self._lane
-        if lane is None:
-            self.hydrate_to(task_id, reference, dest)
+        if lane is None or prefer_peer:
+            self.hydrate_to(task_id, reference, dest, prefer_peer=prefer_peer)
             return
 
         def link() -> None:
@@ -222,7 +256,7 @@ class WorkerContentPlane:
         if not isinstance(self._attempt(reference, link), _Missed):
             return
         staged = dest.with_name(f"{dest.name}.fetching")
-        self.hydrate_to(task_id, reference, staged)
+        self.hydrate_to(task_id, reference, staged, prefer_peer=prefer_peer)
         if not isinstance(self._attempt(reference, link), _Missed):
             staged.unlink(missing_ok=True)
             return
@@ -259,6 +293,7 @@ class WorkerContentPlane:
         peer: Callable[[ContentLaneHost, bool], T],
         stored: Callable[[], T],
         keep: Callable[[ContentLaneHost, T], ContentReference | None],
+        prefer_peer: bool = False,
     ) -> T:
         """Read from this worker's copy, a peer's, or the shared store, in that order;
         keep a copy of what the store supplied.
@@ -273,7 +308,7 @@ class WorkerContentPlane:
                 got := self._attempt(reference, lambda: local(lane)), _Missed
             ):
                 return got
-            relayable = self._relayable(reference)
+            relayable = prefer_peer or self._relayable(reference)
             if not isinstance(
                 got := self._attempt(reference, lambda: peer(lane, not relayable)),
                 _Missed,

@@ -2,8 +2,10 @@
 
 from .artifacts import (
     ArtifactContext,
+    ArtifactDurability,
     ArtifactKind,
     ArtifactRef,
+    DurabilityError,
     PublishedArtifact,
     PublishedArtifactList,
 )
@@ -146,6 +148,8 @@ __all__ = [
     "ArtifactRef",
     "ArtifactKind",
     "PublishedArtifact",
+    "ArtifactDurability",
+    "DurabilityError",
     "PublishedArtifactList",
     "AssetSummary",
     "BaseExecutorResult",

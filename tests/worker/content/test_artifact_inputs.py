@@ -37,6 +37,7 @@ from tests.worker.factories import (
 )
 from worker.content import WorkerContentCache, WorkerContentPlane
 from worker.content.artifact_inputs import ArtifactMaterializer
+from worker.content.custody import ArtifactCustody
 from worker.content.inputs import TaskInputHydrator
 from worker.executors.base_executor import (
     ExecutionError,
@@ -309,6 +310,53 @@ def test_with_a_cache_the_task_reads_the_cached_copy_by_link(tmp_path: Path) -> 
         "fetched.bin",
         "held.bin",
     ]
+
+
+def test_an_object_still_uploading_is_copied_never_linked(tmp_path: Path) -> None:
+    store = SharedFilesystemObjectStore(tmp_path / "shared")
+    held = store.write(_SCOPE, b"still uploading")
+    lane = _CacheLane(tmp_path / "cache")
+    lane.cache.write(_SCOPE, b"still uploading")
+    plane = WorkerContentPlane(cast(Any, lane), cast(Any, _Access(store)))
+
+    plane.materialize_to("tsk-1", held, tmp_path / "input.bin", prefer_peer=True)
+
+    assert (tmp_path / "input.bin").stat().st_ino != _inode(lane.cache, held)
+    assert (tmp_path / "input.bin").read_bytes() == b"still uploading"
+
+
+def test_a_copy_another_upload_holds_is_copied_never_linked(tmp_path: Path) -> None:
+    store = SharedFilesystemObjectStore(tmp_path / "shared")
+    data = b"a tokenizer two model trees share"
+    durable = store.write(_SCOPE, data)
+    lane = _CacheLane(tmp_path / "cache")
+    custody = ArtifactCustody(tmp_path / "cache", keep=lane.cache.keep_staged)
+    source = tmp_path / "staged.json"
+    source.write_bytes(data)
+    staged = custody.stage(_SCOPE, "dsp-2", source)
+    held = custody.publication_dir(_SCOPE, "dsp-2") / staged.content_digest
+    plane = WorkerContentPlane(cast(Any, lane), cast(Any, _Access(store)))
+
+    plane.materialize_to("tsk-1", durable, tmp_path / "input.json")
+    with (tmp_path / "input.json").open("r+b") as fh:
+        fh.write(b"X")
+
+    assert not os.path.samefile(tmp_path / "input.json", held)
+    assert held.read_bytes() == data
+
+
+def test_readers_of_a_copy_no_upload_holds_share_it(tmp_path: Path) -> None:
+    store = SharedFilesystemObjectStore(tmp_path / "shared")
+    reference = store.write(_SCOPE, b"weights")
+    lane = _CacheLane(tmp_path / "cache")
+    lane.cache.write(_SCOPE, b"weights")
+    plane = WorkerContentPlane(cast(Any, lane), cast(Any, _Access(store)))
+
+    for name in ("first.bin", "second.bin"):
+        plane.materialize_to("tsk-1", reference, tmp_path / name)
+
+    assert (tmp_path / "second.bin").stat().st_ino == _inode(lane.cache, reference)
+    assert (tmp_path / "second.bin").stat().st_nlink == 3
 
 
 def test_without_a_cache_the_task_holds_its_own_copy(tmp_path: Path) -> None:

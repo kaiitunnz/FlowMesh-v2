@@ -1,10 +1,11 @@
 """The content this worker keeps a copy of.
 
-A cache over the shared durable store, not a holder of record: every object here is also
-there, so a copy may be dropped whenever it stops paying for itself and nothing is lost
-when a worker dies with copies on its disk. What the cache buys is the read — a task
-that needs an object this worker already has never leaves the node, and a task on
-another worker can be served from here instead of the shared store.
+A cache over the shared durable store, not a holder of record: a copy may be dropped
+whenever it stops paying for itself, since its object is in the store too. A copy of an
+artifact still uploading is the exception; upload custody holds it until the upload
+settles. What the cache buys is the read — a task that needs an object this worker
+already has never leaves the node, and a task on another worker can be served from here
+instead of the shared store.
 
 Copies are kept on disk rather than in memory so they survive the worker process, and
 the cache reports each copy it keeps or drops so a peer's read can be pointed at it.
@@ -17,6 +18,7 @@ has the object.
 
 import logging
 import os
+import shutil
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -33,7 +35,9 @@ from shared.content import (
     FilesystemObjectBacking,
     verify_content,
 )
+from shared.utils.atomic import temp_path
 
+from .custody import holds_inode
 from .holding import AnnounceHolding, HoldingReporter
 
 _STALE_STAGING_SEC = 3600.0
@@ -51,6 +55,7 @@ class WorkerContentCache(FabricObjectStore):
         announce: AnnounceHolding | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
+        self._root = root
         self._objects = FilesystemObjectBacking(root, repair=True)
         self._objects.clear_staging(_STALE_STAGING_SEC)
         self._retain_sec = retain_sec
@@ -126,6 +131,20 @@ class WorkerContentCache(FabricObjectStore):
         self._objects.touch(reference.authorization_scope, reference.content_digest)
         self._kept(reference)
 
+    def keep_staged(self, reference: ContentReference, held: Path) -> None:
+        """Name a file upload custody holds as this object's copy, leaving it in place;
+        a copy already named stays."""
+        target = self._objects.object_path(
+            reference.authorization_scope, reference.content_digest
+        )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.link(held, target)
+        except FileExistsError:
+            pass
+        self._objects.touch(reference.authorization_scope, reference.content_digest)
+        self._kept(reference)
+
     def fetch(self, reference: ContentReference) -> bytes:
         data = self._objects.read(
             reference.authorization_scope, reference.content_digest
@@ -169,7 +188,11 @@ class WorkerContentCache(FabricObjectStore):
 
     def link_to(self, reference: ContentReference, dest: Path) -> None:
         """Link this worker's copy at ``dest`` once it verifies as the reference's
-        bytes, so a reader gets the copy without a second one on disk."""
+        bytes, so a reader gets the copy without a second one on disk.
+
+        A copy upload custody still holds is copied to ``dest`` instead, so a reader
+        writing its input never changes bytes an upload has yet to store.
+        """
         for _ in self.open(reference):
             pass
         source = self._objects.object_path(
@@ -177,6 +200,16 @@ class WorkerContentCache(FabricObjectStore):
         )
         dest.parent.mkdir(parents=True, exist_ok=True)
         os.link(source, dest)
+        # Only the copy and this link: no custody holds it.
+        if (linked := os.stat(dest)).st_nlink > 2 and holds_inode(
+            self._root, reference, linked
+        ):
+            copied = temp_path(dest.parent)
+            try:
+                shutil.copyfile(dest, copied)
+                os.replace(copied, dest)
+            finally:
+                copied.unlink(missing_ok=True)
 
     def drop(self, reference: ContentReference) -> None:
         """Remove a copy."""
@@ -193,7 +226,9 @@ class WorkerContentCache(FabricObjectStore):
 
         Copies unused past the retention window go first, then the least recently used
         until what is left fits the disk budget. A copy being served right now stays
-        until its transfer is done; everything else is free to go, because the object
+        until its transfer is done, and one with another link — held in upload custody,
+        or linked into a running task's inputs — stays while that link does, whichever
+        process on the node made it; everything else is free to go, because the object
         itself is in the shared store either way.
         """
         if self._retain_sec <= 0 and self._max_bytes <= 0:
@@ -240,11 +275,16 @@ class WorkerContentCache(FabricObjectStore):
         return self._objects.stat(entry[2], entry[3]) is None
 
     def _remove_unused(self, entry: tuple[float, int, str, str]) -> bool:
-        """Remove a copy the walk found, unless it was used or replaced since."""
+        """Remove a copy the walk found, unless it was used or replaced since, or has
+        another link."""
         used_at, size, scope, digest = entry
         with self._lock:
             stat = self._objects.stat(scope, digest)
-            if stat is None or (stat.st_mtime, stat.st_size) != (used_at, size):
+            if (
+                stat is None
+                or (stat.st_mtime, stat.st_size) != (used_at, size)
+                or stat.st_nlink > 1
+            ):
                 return False
             self._remove(scope, digest)
         return True

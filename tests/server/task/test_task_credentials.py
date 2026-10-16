@@ -56,9 +56,13 @@ spec:
 def _runtime(
     registry: FakeRegistry | None = None, vault: InMemoryCredentialVault | None = None
 ) -> TaskRuntime:
+    workers = mock.Mock()
+    workers.get_workers_heard_async = mock.AsyncMock(
+        side_effect=lambda ids: [(mock.Mock(), False) for _ in ids]
+    )
     return TaskRuntime(
         cast(Any, registry or FakeRegistry()),
-        cast(Any, mock.Mock()),
+        cast(Any, workers),
         OrchestrationConfig(),
         make_result_reader(),
         logging.getLogger("task-credentials"),

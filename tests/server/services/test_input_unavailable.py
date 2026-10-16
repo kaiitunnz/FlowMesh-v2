@@ -18,10 +18,19 @@ from server.services.task_events import TaskEventPublisher
 from server.task.models import TaskStatus
 from server.task.redrive import StoreRedriveScheduler
 from server.task.results import ResultUnavailable, ResultUnreadable
-from server.task.runtime import TaskRuntime, TransitionNotDurable, scheduling
+from server.task.runtime import TaskRuntime, TransitionNotDurable, facade, scheduling
+from server.task.runtime.artifact_uploads import manual_reconciler
 from server.task.runtime.input_checks import INPUT_RECHECK_PACE_SEC
-from shared.content import ContentReference, reference_for
+from shared.content import (
+    TREE_MEDIA_TYPE,
+    ContentReference,
+    TreeManifest,
+    TreeMember,
+    reference_for,
+)
 from shared.schemas.event import TaskEvent, TaskFailureKind
+from shared.tasks.artifact_binding import ArtifactBinding, ArtifactKind
+from shared.tasks.artifact_upload import ARTIFACTS_PENDING, UploadReport
 from tests.server.credential_vault_helpers import InMemoryCredentialVault
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader, result_payload
@@ -269,6 +278,7 @@ class _Attributing:
             logging.getLogger("input-unavailable"),
             credential_vault=InMemoryCredentialVault(),
             redrive=_scheduler,
+            reconciler=manual_reconciler,
         )
         self.scheduler = schedulers[0]
         self.monitor = _monitor(self.runtime)
@@ -715,3 +725,144 @@ async def test_verdicts_reported_again_while_the_monitor_lags_back_off() -> None
     assert _finalized(fixture).count(task_id) == 1
     assert task_id not in runtime._inputs.input_checks
     assert workflow_id not in fixture.scheduler._recheck_streak
+
+
+async def _consumer_of_staged(
+    fixture: _Attributing,
+) -> tuple[str, str, ContentReference]:
+    """A dispatched task reading a producer's tree whose upload is still owed."""
+    runtime = fixture.runtime
+    _, ids = await _register(runtime, _CHAIN)
+    producer = _next(runtime)
+    record_dispatch(runtime, producer, "wkr-0", "dsp-0")
+    member = reference_for("org", b"weights")
+    manifest = TreeManifest.of([TreeMember("w.bin", member.content_digest, 7)])
+    store = runtime._results.store  # type: ignore[attr-defined]
+    tree = ArtifactBinding(
+        name="final_model",
+        kind=ArtifactKind.TREE,
+        reference=store.write("org", manifest.encode(), media_type=TREE_MEDIA_TYPE),
+        size_bytes=7,
+        files=1,
+    )
+    payload = result_payload(runtime._results, producer, {"value": "x"}, "org")
+    payload["artifacts"] = [tree.model_dump(mode="json")]
+    payload[ARTIFACTS_PENDING] = True
+    runtime.mark_succeeded(producer, "wkr-0", payload, _TS, dispatch_id="dsp-0")
+    task_id = _next(runtime)
+    assert task_id == ids["b"]
+    record_dispatch(runtime, task_id, "wkr-1", "dsp-1")
+    runtime.note_artifact_inputs(
+        task_id, [], [producer], (frozenset({member.identity}),)
+    )
+    return task_id, producer, member
+
+
+@pytest.mark.anyio
+async def test_an_input_whose_upload_is_owed_waits_for_it_reading_nothing() -> None:
+    fixture = _Attributing()
+    runtime = fixture.runtime
+    task_id, producer, member = await _consumer_of_staged(fixture)
+
+    fixture.report(_unavailable(task_id, [member]))
+    fixture.scheduler.run_due()
+
+    record = runtime._tasks[task_id]
+    assert record.status == TaskStatus.PENDING and record.attempts == 0
+    assert fixture.stored.reads == [] and fixture.ready() is None
+
+    runtime.record_artifact_upload(producer, "wkr-0", "dsp-0", UploadReport.UPLOADED)
+    fixture.scheduler.run_due()
+
+    assert fixture.stored.reads == [member]
+    assert task_id not in runtime._inputs.input_checks
+    assert fixture.ready_once_paced() == task_id
+
+
+@pytest.mark.anyio
+async def test_an_input_whose_upload_was_lost_fails_its_reader_as_lost() -> None:
+    fixture = _Attributing()
+    runtime = fixture.runtime
+    task_id, producer, member = await _consumer_of_staged(fixture)
+    fixture.report(_unavailable(task_id, [member]))
+    fixture.stored.error = ResultUnreadable("no content")
+
+    runtime.artifact_owner_lost("wkr-0")
+    runtime._reconciler.check(producer)
+    fixture.scheduler.run_due()
+
+    upload = runtime._tasks[producer].artifact_upload
+    assert upload is not None and upload.lost
+    assert runtime._tasks[producer].status == TaskStatus.DONE
+    record = runtime._tasks[task_id]
+    assert record.status == TaskStatus.FAILED
+    assert record.error is not None and "artifact_lost" in record.error
+
+
+@pytest.mark.anyio
+async def test_a_reader_of_an_upload_lost_before_it_read_fails_as_lost() -> None:
+    fixture = _Attributing()
+    runtime = fixture.runtime
+    task_id, producer, member = await _consumer_of_staged(fixture)
+    fixture.stored.error = ResultUnreadable("no content")
+    runtime.artifact_owner_lost("wkr-0")
+    runtime._reconciler.check(producer)
+    upload = runtime._tasks[producer].artifact_upload
+    assert upload is not None and upload.lost
+
+    fixture.report(_unavailable(task_id, [member]))
+    fixture.scheduler.run_due()
+
+    record = runtime._tasks[task_id]
+    assert record.status == TaskStatus.FAILED
+    assert record.error is not None and "artifact_lost" in record.error
+
+
+@pytest.mark.anyio
+async def test_a_waiting_reader_is_placed_again_when_its_producer_is_heard_again() -> (
+    None
+):
+    fixture = _Attributing()
+    runtime = fixture.runtime
+    task_id, _, member = await _consumer_of_staged(fixture)
+    fixture.report(_unavailable(task_id, [member]))
+    now = time.monotonic()
+
+    for heard in (now, now + 10, now + 20):
+        with mock.patch.object(facade.time, "monotonic", return_value=heard):
+            runtime.artifact_owner_heard("wkr-0", 30)
+    assert task_id in runtime._inputs.input_checks
+    later = now + 60
+    committer = runtime._committer
+    with (
+        mock.patch.object(facade.time, "monotonic", return_value=later),
+        mock.patch.object(
+            committer, "commit_records_locked", wraps=committer.commit_records_locked
+        ) as writes,
+    ):
+        runtime.artifact_owner_heard("wkr-0", 30)
+
+    assert task_id not in runtime._inputs.input_checks
+    assert runtime._tasks[task_id].avoided_worker is None
+    assert [call.args[1] for call in writes.call_args_list] == [()]
+    paced = later + INPUT_RECHECK_PACE_SEC
+    with mock.patch.object(scheduling.time, "monotonic", return_value=paced):
+        assert fixture.ready() == task_id
+
+
+@pytest.mark.anyio
+async def test_a_waiting_reader_is_placed_again_when_its_producer_holds_copies() -> (
+    None
+):
+    fixture = _Attributing()
+    runtime = fixture.runtime
+    task_id, _, member = await _consumer_of_staged(fixture)
+    fixture.report(_unavailable(task_id, [member]))
+    missed = (member.authorization_scope, member.content_digest)
+
+    runtime.artifact_owner_holds("wkr-1", [missed])
+    runtime.artifact_owner_holds("wkr-0", [("org", "0" * 64)])
+    assert task_id in runtime._inputs.input_checks
+    runtime.artifact_owner_holds("wkr-0", [("org", "0" * 64), missed])
+
+    assert task_id not in runtime._inputs.input_checks

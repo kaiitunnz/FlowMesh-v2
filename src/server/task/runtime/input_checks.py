@@ -3,10 +3,13 @@
 import logging
 import threading
 import time
+from collections import defaultdict
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 
-from shared.content import ContentReference
+from shared.content import ContentReference, HeldCopy
 from shared.schemas.event import TaskEvent, TaskFailureKind
+from shared.tasks.artifact_binding import ArtifactBinding
 
 from ..models import TaskRecord, TaskStatus
 from ..redrive import StoreRedriveScheduler
@@ -28,6 +31,28 @@ class _InputCheck:
     # Why control found an input unreadable, once it has; the task then fails as a
     # report of the dispatch that could not read it.
     unreadable: str | None = None
+    # The upstream tasks whose accepted artifacts the task reads and whose upload is
+    # still owed; control reads nothing until they settle.
+    awaiting: frozenset[str] = frozenset()
+    # The accepted artifacts the task reads, whose loss an unreadable verdict names.
+    reads: tuple[ArtifactBinding, ...] = ()
+
+    @property
+    def checkable(self) -> bool:
+        """Whether control reads the check's inputs now."""
+        return not self.awaiting
+
+
+def _awaits(
+    check: _InputCheck, producer_ids: set[str], copies: set[HeldCopy] | None
+) -> bool:
+    return bool(check.awaiting & producer_ids) and (
+        copies is None
+        or any(
+            (reference.authorization_scope, reference.content_digest) in copies
+            for reference in check.references
+        )
+    )
 
 
 INPUT_VERDICT_REPORT = "TASK_FAILED:input_unreadable"
@@ -64,6 +89,7 @@ class InputChecks:
         redrive: StoreRedriveScheduler,
         logger: logging.Logger,
         cv: threading.Condition,
+        lost_reads: Callable[[Iterable[ArtifactBinding]], str | None],
     ) -> None:
         self._ready = ready
         self._committer = committer
@@ -72,6 +98,7 @@ class InputChecks:
         self._redrive = redrive
         self._logger = logger
         self._cv = cv
+        self._lost_reads = lost_reads
         self.input_checks: dict[str, _InputCheck] = {}
 
     def settle_input_checks_locked(
@@ -104,8 +131,12 @@ class InputChecks:
                 self._logger.warning(
                     "Task %s input is unreadable at control: %s", task_id, verdict
                 )
+                lost = self._lost_reads(check.reads)
                 check = self.input_checks[task_id] = replace(
-                    check, unreadable=str(verdict)
+                    check,
+                    unreadable=(
+                        f"{lost}: {verdict}" if lost is not None else str(verdict)
+                    ),
                 )
                 failures.append(_input_verdict(task_id, check))
                 continue
@@ -167,13 +198,67 @@ class InputChecks:
         dispatch_id: str | None,
         references: tuple[ContentReference, ...],
         members: frozenset[ContentReference] = frozenset(),
+        awaiting: frozenset[str] = frozenset(),
+        reads: tuple[ArtifactBinding, ...] = (),
     ) -> None:
-        """Keep a returned task out of the queue until control has read its inputs."""
+        """Keep a returned task out of the queue until control has read its inputs,
+        or, while uploads it reads are still owed in ``awaiting``, until they settle.
+        ``reads`` are the accepted artifacts it reads."""
         self._ready.remove_from_ready_locked(record.task_id)
         self.input_checks[record.task_id] = _InputCheck(
-            worker_id, dispatch_id, references, members
+            worker_id, dispatch_id, references, members, awaiting=awaiting, reads=reads
         )
-        self._redrive.drive_now(record.workflow_id)
+        if not awaiting:
+            self._redrive.drive_now(record.workflow_id)
+
+    def wake_uploaded_locked(self, producer_id: str) -> None:
+        """Let the checks waiting on a task's upload read their inputs, now that it
+        settled."""
+        for task_id, check in list(self.input_checks.items()):
+            if producer_id not in check.awaiting:
+                continue
+            check = self.input_checks[task_id] = replace(
+                check, awaiting=check.awaiting - {producer_id}
+            )
+            if check.checkable and (record := self._tasks.get(task_id)) is not None:
+                self._redrive.drive_now(record.workflow_id)
+
+    def awaits_any_locked(
+        self, producer_ids: set[str], copies: set[HeldCopy] | None = None
+    ) -> bool:
+        """Return whether a check waits on one of these tasks' uploads, for one of
+        ``copies`` when given."""
+        return any(
+            _awaits(check, producer_ids, copies) for check in self.input_checks.values()
+        )
+
+    def retry_awaiting_locked(
+        self, producer_ids: set[str], copies: set[HeldCopy] | None = None
+    ) -> None:
+        """Place again each task waiting on one of these tasks' uploads, as a holder
+        can serve it before the upload lands, and when ``copies`` is given only one
+        that missed one of them; it waits again if the read still misses."""
+        retried: dict[str, list[str]] = defaultdict(list)
+        for task_id, check in list(self.input_checks.items()):
+            if not _awaits(check, producer_ids, copies):
+                continue
+            record = self._tasks.get(task_id)
+            if record is None or record.status != TaskStatus.PENDING:
+                continue
+            del self.input_checks[task_id]
+            record.avoided_worker = None
+            if self._ready.enqueue_ready_locked(
+                task_id,
+                front=False,
+                not_before=time.monotonic() + INPUT_RECHECK_PACE_SEC,
+            ):
+                self._cv.notify_all()
+            retried[record.workflow_id].append(task_id)
+        for workflow_id in retried:
+            # The record is unchanged; only the workflow's schedule moved.
+            self._committer.commit_records_locked(
+                workflow_id, (), with_membership=False, sched=True
+            )
 
     def is_input_verdict_locked(
         self,

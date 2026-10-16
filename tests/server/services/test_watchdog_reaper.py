@@ -240,3 +240,17 @@ def test_a_heartbeat_landing_before_the_reap_keeps_the_worker() -> None:
     registry.reap_stale_worker.assert_called_once_with("wkr-1")
     wd._redis.publish_telemetry.assert_not_called()
     assert "wkr-1" in state.dead_since
+
+
+def test_a_worker_declared_dead_loses_the_uploads_it_owes() -> None:
+    wd: Any = _watchdog(worker_registry=_stale_registry({"wkr-1"}), grace_seconds=60)
+    state = _WatchdogState()
+
+    wd._scan({"wkr-1"}, state, 0.0)
+    wd._runtime.artifact_owner_lost.assert_not_called()
+
+    wd._scan({"wkr-1"}, state, 60.0)
+    wd._runtime.artifact_owner_lost.assert_called_once_with("wkr-1")
+
+    wd._scan({"wkr-1"}, state, 120.0)
+    wd._runtime.artifact_owner_lost.assert_called_once_with("wkr-1")

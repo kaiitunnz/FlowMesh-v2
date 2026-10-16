@@ -47,20 +47,25 @@ stop window, and a call that cannot finish in time fails its task. A leaf whose
 call finished runs its next step on another worker. An agent runs its steps on
 the worker holding its sealed private state, so an agent whose private state
 only a drained or lost worker held fails at its next step; one given up before
-its first seal reruns elsewhere. A worker that leaves without unregistering,
-such as one that crashed, is unregistered by its supervisor, and its tasks
-requeue at the cost of an attempt when they can safely re-run and fail
-otherwise. A recreated node's supervisor re-creates its configured workers,
-which re-register themselves on startup. No cordon step is required.
+its first seal reruns elsewhere. A draining worker also finishes uploading the
+artifacts of the tasks it reported done within its stop window; an artifact not
+stored by then is lost and fails its workflow. A worker that leaves without
+unregistering, such as one that crashed, is unregistered by its supervisor: its
+tasks requeue at the cost of an attempt when they can safely re-run and fail
+otherwise, and artifacts its done tasks had not stored are lost. A recreated node's supervisor re-creates its
+configured workers, which re-register themselves on startup. No cordon step is
+required.
 
 **Undrained supervisor stops.** A supervisor that stops without a drain — a
 crash, an OOM kill, or a `docker kill` of the `server` container — leaves its
 Docker and Vast.ai workers running. When it starts again it takes them back from
 their records: each keeps its container or instance and registers again under a
 new id, and the tasks it held requeue at the cost of an attempt when they can
-safely re-run and fail otherwise. A worker that does not register again within
-five minutes is removed. A survivor keeps the settings and image it was launched
-with until a draining `flowmesh stack restart`. Each entry of the configured
+safely re-run and fail otherwise. The new registration does not resume the
+uploads of the old one, so artifacts a done task had not stored are lost and fail
+their workflow. A worker that does not register again within five minutes is
+removed. A survivor keeps the settings and image it was launched with until a
+draining `flowmesh stack restart`. Each entry of the configured
 workers file sets `worker_config.worker_alias`, and a file missing one creates
 none of its workers. A starting supervisor creates only the entries no recorded
 worker holds, so removing an entry leaves its survivor running.

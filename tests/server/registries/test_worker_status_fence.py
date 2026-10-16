@@ -64,9 +64,41 @@ class _Sync:
         return None
 
 
+class _AsyncPipeline:
+    """A control pipeline awaited by the registry's async reads, run on the sync
+    client so it binds no event loop."""
+
+    def __init__(self, client: redis.Redis) -> None:
+        self._pipe = client.pipeline()
+
+    async def __aenter__(self) -> "_AsyncPipeline":
+        return self
+
+    async def __aexit__(self, *_exc: Any) -> None:
+        self._pipe.reset()
+
+    def hgetall(self, key: str) -> None:
+        self._pipe.hgetall(key)
+
+    def ttl(self, key: str) -> None:
+        self._pipe.ttl(key)
+
+    async def execute(self) -> list[Any]:
+        return self._pipe.execute()
+
+
+class _Async:
+    def __init__(self, client: redis.Redis) -> None:
+        self._client = client
+
+    def control_pipeline(self) -> _AsyncPipeline:
+        return _AsyncPipeline(self._client)
+
+
 class _Rds:
     def __init__(self, client: redis.Redis) -> None:
         self.sync = _Sync(client)
+        self.asyncio = _Async(client)
 
 
 @pytest.fixture

@@ -28,6 +28,7 @@ from .supervisor_client import SupervisorClient
 
 if TYPE_CHECKING:
     from .content import WorkerContentPlane
+    from .content.uploads import ArtifactUploader
     from .model_turn import ResponsesFacade
 
 logger = logging.getLogger(__name__)
@@ -64,6 +65,9 @@ class Lifecycle:
         # This worker's content plane: started once the worker id is known, read by
         # whatever reaches fabric content, and stopped when the worker shuts down.
         self.content_plane: WorkerContentPlane | None = None
+        # The uploads of artifacts a success announced before the store had them,
+        # owed until control settles each.
+        self.artifact_uploads: ArtifactUploader | None = None
         # The loopback endpoints this worker's executors published for relaying, and
         # the lane that serves relayed SSH connections against them.
         self.ssh_endpoints = SshEndpointRegistry()
@@ -98,12 +102,18 @@ class Lifecycle:
         return self.client.worker_id
 
     def dispatch_for(self, task_id: str) -> str | None:
-        """The dispatch a task's work runs for: the one running it, or the one a
-        boundary it holds off-lane was captured under."""
+        """The dispatch a task's work runs for: the one running it, the one a
+        boundary it holds off-lane was captured under, or the one owing the upload
+        of its artifacts."""
         return (
             self.client.dispatch_id(task_id)
             or self.pending_egress_requests.dispatch_of(task_id)
             or self.resident_requests.dispatch_of(task_id)
+            or (
+                uploads.dispatch_of(task_id)
+                if (uploads := self.artifact_uploads) is not None
+                else None
+            )
         )
 
     def set_abandon_handler(self, abandon: Callable[[str | None], None]) -> None:
@@ -113,11 +123,14 @@ class Lifecycle:
 
     def _on_reregistered(self, abandoned_dispatch: str | None) -> None:
         """Leave everything bound to the previous registration behind: the dispatch it
-        ran, the requests its boundaries captured, and the content it held."""
+        ran, the requests its boundaries captured, the uploads it owed, and the content
+        it held."""
         if (abandon := self._abandon_running) is not None:
             abandon(abandoned_dispatch)
         self.pending_egress_requests.clear()
         self.resident_requests.clear()
+        if (uploads := self.artifact_uploads) is not None:
+            uploads.rebind()
         if (plane := self.content_plane) is not None:
             plane.rebind(self.client.worker_id, self.client.incarnation)
 
@@ -412,11 +425,19 @@ class Lifecycle:
             + self.resident_requests.occurrences()
         )
 
-    def start_content_plane(self, plane: "WorkerContentPlane | None") -> None:
-        """Own the worker's content plane from here to shutdown."""
+    def start_content_plane(
+        self,
+        plane: "WorkerContentPlane | None",
+        uploads: "ArtifactUploader | None" = None,
+    ) -> None:
+        """Own the worker's content plane, and the artifact uploads it carries, from
+        here to shutdown."""
         self.content_plane = plane
+        self.artifact_uploads = uploads
         if plane is not None:
             plane.start()
+        if uploads is not None:
+            uploads.start()
 
     def start_ssh_relay(self, lane: SshRelayLane) -> None:
         """Own the worker's SSH relay lane from here to shutdown."""
@@ -436,6 +457,15 @@ class Lifecycle:
             try:
                 remaining = left()
                 self.ssh_relay.stop(10.0 if remaining is None else remaining)
+            except Exception:
+                pass
+        if self.artifact_uploads is not None:
+            # Before the plane: an upload owed for a reported success goes to the store
+            # under access the plane holds, and its report leaves over the attachment
+            # unregistering closes.
+            try:
+                remaining = left()
+                self.artifact_uploads.stop(10.0 if remaining is None else remaining)
             except Exception:
                 pass
         if self.content_plane is not None:

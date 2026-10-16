@@ -55,6 +55,39 @@ class ResultUnavailable(RuntimeError):
     """The store holding a bound result could not be reached; a retry may succeed."""
 
 
+class _TreeCache[T]:
+    """Decoded trees' member sets, the most recently read first, within a budget of
+    members; a tree over the budget is kept alone, as the most recent one."""
+
+    def __init__(self) -> None:
+        self._trees: OrderedDict[ObjectIdentity, frozenset[T]] = OrderedDict()
+        self._members = 0
+        self._oversize: tuple[ObjectIdentity, frozenset[T]] | None = None
+        self._lock = threading.Lock()
+
+    def get(
+        self, key: ObjectIdentity, decode: Callable[[], frozenset[T]]
+    ) -> frozenset[T]:
+        """Return a tree's members, decoding them when they are not kept."""
+        with self._lock:
+            if (cached := self._trees.get(key)) is not None:
+                self._trees.move_to_end(key)
+                return cached
+            if self._oversize is not None and self._oversize[0] == key:
+                return self._oversize[1]
+        members = decode()
+        with self._lock:
+            if len(members) > _TREE_MEMBERS_MAX:
+                self._oversize = (key, members)
+            elif key not in self._trees:
+                self._trees[key] = members
+                self._members += len(members)
+                while self._members > _TREE_MEMBERS_MAX:
+                    _, evicted = self._trees.popitem(last=False)
+                    self._members -= len(evicted)
+        return members
+
+
 class ResultReader:
     """Reads stored result envelopes, verified against the reference naming them."""
 
@@ -65,11 +98,8 @@ class ResultReader:
         self._cache_max_bytes = cache_max_bytes
         self._cache: OrderedDict[ContentReference, bytes] = OrderedDict()
         self._cached_bytes = 0
-        self._trees: OrderedDict[ObjectIdentity, frozenset[ObjectIdentity]] = (
-            OrderedDict()
-        )
-        self._tree_members = 0
-        self._oversize: tuple[ObjectIdentity, frozenset[ObjectIdentity]] | None = None
+        self._trees: _TreeCache[ObjectIdentity] = _TreeCache()
+        self._paths: _TreeCache[str] = _TreeCache()
         self._lock = threading.Lock()
 
     def read_bytes(self, binding: ResultBinding) -> bytes:
@@ -110,30 +140,24 @@ class ResultReader:
         the most recent one too large to share the cache, so a check against its
         members is a set lookup.
         """
-        key = reference.identity
-        with self._lock:
-            if (cached := self._trees.get(key)) is not None:
-                self._trees.move_to_end(key)
-                return cached
-            if self._oversize is not None and self._oversize[0] == key:
-                return self._oversize[1]
         scope = reference.authorization_scope
-        members = frozenset(
-            (scope, DigestAlgorithm.SHA256.value, member.digest)
-            for member in self.read_manifest(reference).members
+        return self._trees.get(
+            reference.identity,
+            lambda: frozenset(
+                (scope, DigestAlgorithm.SHA256.value, member.digest)
+                for member in self.read_manifest(reference).members
+            ),
         )
-        if len(members) > _TREE_MEMBERS_MAX:
-            with self._lock:
-                self._oversize = (key, members)
-        else:
-            with self._lock:
-                if key not in self._trees:
-                    self._trees[key] = members
-                    self._tree_members += len(members)
-                    while self._tree_members > _TREE_MEMBERS_MAX:
-                        _, evicted = self._trees.popitem(last=False)
-                        self._tree_members -= len(evicted)
-        return members
+
+    def tree_paths(self, reference: ContentReference) -> frozenset[str]:
+        """Return the paths of a stored tree's members, kept as ``tree_members``
+        keeps its identities."""
+        return self._paths.get(
+            reference.identity,
+            lambda: frozenset(
+                member.path for member in self.read_manifest(reference).members
+            ),
+        )
 
     def open(self, reference: ContentReference) -> Iterator[bytes]:
         """Return an object's bytes in chunks, raising before the last one unless they

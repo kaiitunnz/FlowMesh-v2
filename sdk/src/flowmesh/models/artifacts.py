@@ -26,6 +26,23 @@ class ArtifactKind(StrEnum):
     ARCHIVE = "archive"
 
 
+class ArtifactDurability(StrEnum):
+    """Where an artifact's bytes are."""
+
+    # Accepted at its task's success and still uploading to the shared store.
+    PENDING = "pending"
+    DURABLE = "durable"
+    # Its producer left before storing it.
+    LOST = "lost"
+
+
+class DurabilityError(BaseModel):
+    """Why an artifact is not durable."""
+
+    code: str
+    message: str
+
+
 class PublishedArtifact(BaseModel):
     """One artifact a task published: a file, a tree of files, or an archive of a
     tree."""
@@ -38,6 +55,8 @@ class PublishedArtifact(BaseModel):
     sha256: str | None = None
     archive_of: str | None = None
     published_at: str | None = None
+    durability: ArtifactDurability = ArtifactDurability.DURABLE
+    durability_error: DurabilityError | None = None
 
 
 class PublishedArtifactList(BaseModel):

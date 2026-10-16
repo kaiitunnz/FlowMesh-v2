@@ -1,6 +1,12 @@
 from pydantic import BaseModel, Field
 
 from shared.tasks.artifact_binding import ArtifactKind
+from shared.tasks.artifact_upload import ArtifactDurability
+
+
+class DurabilityError(BaseModel):
+    code: str = Field(description="Why the artifact is not durable.")
+    message: str = Field(description="What was lost, and why.")
 
 
 class PublishedArtifact(BaseModel):
@@ -19,6 +25,13 @@ class PublishedArtifact(BaseModel):
     )
     published_at: str | None = Field(
         default=None, description="When the artifact was published."
+    )
+    durability: ArtifactDurability = Field(
+        default=ArtifactDurability.DURABLE,
+        description="Whether the artifact is still uploading, stored, or lost.",
+    )
+    durability_error: DurabilityError | None = Field(
+        default=None, description="Why a lost artifact was lost."
     )
 
 
