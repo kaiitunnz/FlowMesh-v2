@@ -92,6 +92,7 @@ def test_the_registry_loads_a_stored_task_carrying_mounts() -> None:
 
     assert loaded is not None
     assert "mounts" not in loaded.record.task.spec.model_dump()
+    assert loaded.record.internal.credential_refs == {}
 
 
 def test_a_rehydrated_task_carrying_mounts_dispatches_and_reads_without_them() -> None:
