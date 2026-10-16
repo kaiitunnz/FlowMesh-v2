@@ -1,6 +1,7 @@
 """The runner stores a task's result in the shared store before reporting success."""
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -66,6 +67,20 @@ def _run(
     store: FabricObjectStore,
     **message: Any,
 ) -> tuple[MagicMock, _Plane]:
+    return _run_executor(tmp_path, _Returning(result), store, **message)
+
+
+def _run_with(tmp_path: Path, executor: Executor, **message: Any) -> MagicMock:
+    store = SharedFilesystemObjectStore(tmp_path / "cas")
+    return _run_executor(tmp_path, executor, store, **message)[0]
+
+
+def _run_executor(
+    tmp_path: Path,
+    executor: Executor,
+    store: FabricObjectStore,
+    **message: Any,
+) -> tuple[MagicMock, _Plane]:
     lifecycle = MagicMock()
     lifecycle.worker_id = "wrk-test"
     lifecycle.cost_per_hour = 1.0
@@ -82,7 +97,6 @@ def _run(
         content_scope="org-a",
         **message,
     )
-    executor = _Returning(result)
     Runner(
         lifecycle=lifecycle,
         task_stream=[msg],
@@ -430,3 +444,67 @@ def test_a_task_failing_after_staging_ends_its_custody(tmp_path: Path) -> None:
     assert lifecycle.set_failed.call_args.kwargs["retryable"] is True
     assert list(custody.journals()) == []
     assert not custody.publication_dir("org-a", "dsp-1").exists()
+
+
+class _Rewriting(_Returning):
+    """Rewrites in place the outputs an earlier attempt left, its own and a merged
+    child's."""
+
+    ran = False
+
+    def run(self, task: Any, out_dir: Path) -> BaseExecutorResult:
+        self.ran = True
+        for task_dir in (out_dir, out_dir.parent / "tsk-c"):
+            with open(task_dir / "artifacts" / "model", "r+b") as model:
+                model.write(b"rewritten")
+        return self.result
+
+
+def _published(tmp_path: Path, task_id: str) -> Path:
+    model = tmp_path / "out" / task_id / "artifacts" / "model"
+    model.parent.mkdir(parents=True)
+    model.write_bytes(b"accepted")
+    held = tmp_path / f"custody-{task_id}"
+    os.link(model, held)
+    return held
+
+
+def _child() -> MergedChildTaskStrict:
+    return MergedChildTaskStrict(
+        task_id="tsk-c",
+        owner_id="usr-test",
+        workflow_id="wfl-test",
+        spec=make_worker_task_message(
+            {"taskType": "echo"}, task_type=TaskType.ECHO
+        ).spec,
+    )
+
+
+def test_a_rerun_writing_its_outputs_never_changes_what_was_published(
+    tmp_path: Path,
+) -> None:
+    held = [_published(tmp_path, task_id) for task_id in ("tsk-1", "tsk-c")]
+    result = BaseExecutorResult()
+    result.children = {"tsk-c": BaseExecutorResult()}
+    executor = _Rewriting(result)
+
+    _run_with(tmp_path, executor, merged_children=[_child()])
+
+    assert executor.ran
+    assert [path.read_bytes() for path in held] == [b"accepted", b"accepted"]
+
+
+def test_an_output_that_cannot_be_detached_fails_before_the_executor_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _published(tmp_path, "tsk-1")
+    monkeypatch.setattr(
+        "worker.runner.detach_shared_files", MagicMock(side_effect=OSError(28, "full"))
+    )
+    executor = _Rewriting(BaseExecutorResult())
+
+    lifecycle = _run_with(tmp_path, executor)
+
+    assert not executor.ran
+    lifecycle.set_succeeded.assert_not_called()
+    assert lifecycle.set_failed.call_args.kwargs["retryable"] is True

@@ -23,7 +23,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, NamedTuple
 
 from shared.content import (
     OCTET_STREAM,
@@ -37,10 +37,26 @@ from shared.content import (
 )
 from shared.utils.atomic import temp_path
 
-from .custody import holds_inode
+from .custody import custody_holds, holds_inode
 from .holding import AnnounceHolding, HoldingReporter
 
 _STALE_STAGING_SEC = 3600.0
+
+
+class _Walked(NamedTuple):
+    """A copy as an eviction walk found it, oldest use first."""
+
+    used_at: float
+    size: int
+    scope: str
+    digest: str
+    inode: tuple[int, int]
+
+    @classmethod
+    def of(cls, scope: str, digest: str, stat: os.stat_result) -> "_Walked":
+        return cls(
+            stat.st_mtime, stat.st_size, scope, digest, (stat.st_dev, stat.st_ino)
+        )
 
 
 class WorkerContentCache(FabricObjectStore):
@@ -226,29 +242,28 @@ class WorkerContentCache(FabricObjectStore):
 
         Copies unused past the retention window go first, then the least recently used
         until what is left fits the disk budget. A copy being served right now stays
-        until its transfer is done, and one with another link — held in upload custody,
-        or linked into a running task's inputs — stays while that link does, whichever
-        process on the node made it; everything else is free to go, because the object
-        itself is in the shared store either way.
+        until its transfer is done, and one upload custody holds stays until its upload
+        settles, whichever process on the node staged it; everything else is free to
+        go, because the object itself is in the shared store either way. A copy other
+        names still link, such as a task's output or input, loses only its cache name.
         """
         if self._retain_sec <= 0 and self._max_bytes <= 0:
             return 0
         # The walk runs outside the lock, so a keep waits only on each removal; a copy
-        # used since the walk read it is left for the next pass.
-        held: list[tuple[float, int, str, str]] = []
+        # used or replaced since the walk read it is left for the next pass.
+        held: list[_Walked] = []
         for scope, digest in list(self._objects.iter_objects()):
             if (stat := self._objects.stat(scope, digest)) is not None:
-                held.append((stat.st_mtime, stat.st_size, scope, digest))
+                held.append(_Walked.of(scope, digest, stat))
         held.sort()
         evicted = 0
-        kept: list[tuple[float, int, str, str]] = []
+        kept: list[_Walked] = []
         deadline = time.time() - self._retain_sec
         for entry in held:
-            used_at, _, _, digest = entry
             if (
                 self._retain_sec > 0
-                and used_at <= deadline
-                and digest not in in_transfer
+                and entry.used_at <= deadline
+                and entry.digest not in in_transfer
             ):
                 if self._remove_unused(entry):
                     evicted += 1
@@ -257,36 +272,35 @@ class WorkerContentCache(FabricObjectStore):
                     continue
             kept.append(entry)
         if self._max_bytes > 0:
-            total = sum(size for _, size, _, _ in kept)
+            total = sum(entry.size for entry in kept)
             for entry in kept:
                 if total <= self._max_bytes:
                     break
-                if entry[3] in in_transfer:
+                if entry.digest in in_transfer:
                     continue
                 if self._remove_unused(entry):
                     evicted += 1
-                    total -= entry[1]
+                    total -= entry.size
                 elif self._gone(entry):
                     # Another eviction, or a drop, freed it since the walk.
-                    total -= entry[1]
+                    total -= entry.size
         return evicted
 
-    def _gone(self, entry: tuple[float, int, str, str]) -> bool:
-        return self._objects.stat(entry[2], entry[3]) is None
+    def _gone(self, entry: "_Walked") -> bool:
+        return self._objects.stat(entry.scope, entry.digest) is None
 
-    def _remove_unused(self, entry: tuple[float, int, str, str]) -> bool:
-        """Remove a copy the walk found, unless it was used or replaced since, or has
-        another link."""
-        used_at, size, scope, digest = entry
+    def _remove_unused(self, entry: "_Walked") -> bool:
+        """Remove a copy the walk found, unless it was used or replaced since, or
+        upload custody holds it."""
         with self._lock:
-            stat = self._objects.stat(scope, digest)
+            stat = self._objects.stat(entry.scope, entry.digest)
             if (
                 stat is None
-                or (stat.st_mtime, stat.st_size) != (used_at, size)
-                or stat.st_nlink > 1
+                or _Walked.of(entry.scope, entry.digest, stat) != entry
+                or custody_holds(self._root, entry.scope, entry.digest)
             ):
                 return False
-            self._remove(scope, digest)
+            self._remove(entry.scope, entry.digest)
         return True
 
     def _kept(self, reference: ContentReference) -> None:

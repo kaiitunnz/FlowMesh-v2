@@ -5,10 +5,9 @@ the shared store follows. Until control settles each upload, the bytes are held 
 directory per dispatch beside the scope's objects, where no eviction, staging cleanup or
 output cleanup reaches: each staged object is the file its bytes were hashed into, so
 custody holds exactly what the success named. Where the worker runs a cache and holds no
-copy of the object yet, the cache names that file as its copy, a second link to it. The
-kernel's link count is what every process sharing the content directory sees, so a
-cached copy also held in custody is kept from eviction by any of them, and the custody
-file outlives any removal of the cache's name.
+copy of the object yet, the cache names that file as its copy, a second link to it.
+Every process sharing the content directory keeps a cached copy of an object custody
+holds from eviction, and the custody file outlives any removal of the cache's name.
 
 A dispatch's directory also holds its journal: what the worker staged, under which
 registration, and the success it reported, so the success and its uploads can be
@@ -42,6 +41,22 @@ CUSTODY_DIR = "custody"
 _JOURNAL = "journal.json"
 
 type KeepCopy = Callable[[ContentReference, Path], None]
+
+
+def custody_holds(root: Path, scope: str, digest: str) -> bool:
+    """Return whether any dispatch's custody under the content directory ``root``
+    holds staged bytes of ``digest`` in ``scope``."""
+    custody = root / safe_segment(scope) / CUSTODY_DIR
+    name = safe_segment(digest)
+    try:
+        publications = os.scandir(custody)
+    except FileNotFoundError:
+        return False
+    with publications:
+        return any(
+            os.path.lexists(Path(publication.path) / name)
+            for publication in publications
+        )
 
 
 def holds_inode(root: Path, reference: ContentReference, held: os.stat_result) -> bool:

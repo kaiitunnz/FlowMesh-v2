@@ -1,10 +1,13 @@
 """Directory and file access below a directory that never follows a link."""
 
+import contextlib
+import errno
 import os
 import stat
 import tracemalloc
+from collections.abc import Iterator
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, BinaryIO
 
 import pytest
 
@@ -221,3 +224,82 @@ def test_a_walk_of_a_very_deep_tree_holds_bounded_memory(tmp_path: Path) -> None
 
     assert levels == nofollow._MAX_WALK_DEPTH + 1
     assert peak < 4 << 20
+
+
+def _other_filesystem(path: Path) -> Path | None:
+    for candidate in (Path("/dev/shm"), Path("/run/user") / str(os.getuid())):
+        try:
+            if candidate.is_dir() and os.access(candidate, os.W_OK):
+                if os.stat(candidate).st_dev != os.stat(path).st_dev:
+                    return candidate
+        except OSError:
+            continue
+    return None
+
+
+def test_linking_an_opened_file_names_its_inode(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.write_bytes(b"bytes")
+    kept = tmp_path / "kept"
+    os.link(source, kept)
+    with open_regular_path(source) as opened, open_dir(tmp_path) as dir_fd:
+        replacement = tmp_path / "replacement"
+        replacement.write_bytes(b"replacement")
+        os.replace(replacement, source)
+
+        assert nofollow.link_opened(opened.fileno(), dir_fd, "linked")
+
+    linked = tmp_path / "linked"
+    assert os.path.samestat(linked.stat(), kept.stat())
+    assert linked.read_bytes() == b"bytes"
+
+
+def test_an_opened_file_on_another_filesystem_is_not_linked(tmp_path: Path) -> None:
+    if (other := _other_filesystem(tmp_path)) is None:
+        pytest.skip("no second writable filesystem")
+    source = tmp_path / "source"
+    source.write_bytes(b"bytes")
+    with open_regular_path(source) as opened, open_dir(other) as dir_fd:
+        name = f"flowmesh-link-test-{os.getpid()}"
+        try:
+            assert not nofollow.link_opened(opened.fileno(), dir_fd, name)
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(name, dir_fd=dir_fd)
+
+
+@pytest.mark.parametrize(
+    "code", [errno.EXDEV, errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP]
+)
+def test_a_link_the_filesystem_cannot_make_reports_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: int
+) -> None:
+    monkeypatch.setattr(nofollow.os, "link", _raising(code))
+    with open_dir(tmp_path) as dir_fd:
+        assert not nofollow.link_opened(0, dir_fd, "linked")
+
+
+@pytest.mark.parametrize("code", [errno.ENOSPC, errno.EIO, errno.EEXIST])
+def test_any_other_link_failure_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: int
+) -> None:
+    monkeypatch.setattr(nofollow.os, "link", _raising(code))
+    with open_dir(tmp_path) as dir_fd, pytest.raises(OSError) as raised:
+        nofollow.link_opened(0, dir_fd, "linked")
+    assert raised.value.errno == code
+
+
+def _raising(code: int) -> Any:
+    def link(*args: Any, **kwargs: Any) -> None:
+        raise OSError(code, os.strerror(code))
+
+    return link
+
+
+@contextlib.contextmanager
+def open_regular_path(path: Path) -> Iterator[BinaryIO]:
+    with open_dir(path.parent) as dir_fd:
+        opened = open_regular(dir_fd, path.name)
+    assert opened is not None
+    with opened:
+        yield opened

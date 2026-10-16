@@ -298,7 +298,7 @@ def test_evictions_running_together_free_only_the_budget_s_excess(
     remove_unused = cache._remove_unused
     waited = threading.local()
 
-    def after_both_walks(entry: tuple[float, int, str, str]) -> bool:
+    def after_both_walks(entry: Any) -> bool:
         if not getattr(waited, "done", False):
             waited.done = True
             both_walked.wait(5.0)

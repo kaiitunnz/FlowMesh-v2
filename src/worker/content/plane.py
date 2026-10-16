@@ -240,8 +240,8 @@ class WorkerContentPlane:
     ) -> None:
         """Put the object's verified bytes at ``dest`` for a reader to load.
 
-        Where this worker keeps a copy, ``dest`` links to it, so what a task reads
-        counts against the cache's own bounds. An object still uploading, read with
+        Where this worker keeps a copy, ``dest`` links to it, so a task reads it
+        without a second copy on disk. An object still uploading, read with
         ``prefer_peer``, is copied instead, so a reader writing its input never
         changes bytes its upload has yet to store.
         """

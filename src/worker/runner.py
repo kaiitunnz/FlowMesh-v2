@@ -71,7 +71,12 @@ from shared.utils.hardware import available_devices, gpus_fit_dispatch
 from shared.utils.nofollow import PathRefused, open_dir, open_regular, remove_below
 from shared.utils.recent import RecentSet
 from shared.utils.redact import credential_scrubber
-from shared.utils.task_output import ARTIFACTS_DIR, clear_directory, prepare_output_dir
+from shared.utils.task_output import (
+    ARTIFACTS_DIR,
+    clear_directory,
+    detach_shared_files,
+    prepare_output_dir,
+)
 from shared.utils.time import now_iso
 
 from .content.artifact_inputs import artifact_inputs_dir, ssh_inputs_dir
@@ -946,6 +951,25 @@ class Runner:
                 )
         return out_dir
 
+    def _detach_outputs(self, msg: WorkerTaskMessage, out_dir: Path) -> None:
+        """Give this execution private copies of the output files an earlier one
+        published, before anything can write them, for the task and each merged child.
+
+        A published file's inode is shared with upload custody and the cache, so
+        writing it in place would change bytes an earlier attempt already named.
+        """
+        dirs = [out_dir] + [
+            self.results_dir / child.task_id for child in msg.merged_children or ()
+        ]
+        try:
+            for task_dir in dirs:
+                detach_shared_files(task_dir / ARTIFACTS_DIR)
+        except OSError as exc:
+            raise ExecutionError(
+                f"task {msg.task_id} could not prepare its output: {exc}",
+                retryable=True,
+            ) from exc
+
     def _checkpoint_uploader(
         self, msg: WorkerTaskMessage, out_dir: Path
     ) -> CheckpointUploader | None:
@@ -1511,6 +1535,7 @@ class Runner:
                     self._raise_if_cancel_pending(task_id)
                     self._current_task_id = task_id
                     self._refuse_if_gpu_is_held(msg)
+                    self._detach_outputs(msg, out_dir)
                     self._input_hydrator.hydrate(msg)
                     self._input_hydrator.install_artifacts(
                         msg, artifact_inputs_dir(out_dir)
