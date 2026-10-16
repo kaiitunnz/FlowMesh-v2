@@ -292,13 +292,12 @@ async def download_result_file(
 
 
 def _names_member(reader: ResultReader, binding: ArtifactBinding, inner: str) -> bool:
-    """Return whether a path inside an artifact names something it holds, from the
-    tree's cached member paths rather than a fresh read of its manifest."""
-    if not inner:
-        return True
-    return binding.kind is ArtifactKind.TREE and inner in reader.tree_paths(
-        binding.reference
-    )
+    """Return whether a path names something an artifact holds: a member of a tree,
+    from its cached member paths rather than a fresh read of its manifest, or the
+    artifact's own name otherwise."""
+    if binding.kind is not ArtifactKind.TREE:
+        return not inner
+    return bool(inner) and inner in reader.tree_paths(binding.reference)
 
 
 @router.get(

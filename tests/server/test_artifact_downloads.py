@@ -808,12 +808,12 @@ async def test_polling_a_pending_artifact_reads_no_manifest_again(
 
 
 @pytest.mark.anyio
-async def test_an_unknown_path_under_a_pending_or_lost_artifact_is_not_found(
+async def test_a_name_no_file_has_under_a_pending_or_lost_artifact_is_not_found(
     runtime: _Runtime, published: dict[str, ArtifactBinding]
 ) -> None:
     for lost in (None, {"final\0final_model": ArtifactLoss(message="gone")}):
         _owed(runtime, lost)
-        for name in ("final_model/absent.json", "notes.txt/inner"):
+        for name in ("final_model", "final_model/absent.json", "notes.txt/inner"):
             with pytest.raises(HTTPException) as raised:
                 await _download(runtime, name)
             assert raised.value.status_code == status.HTTP_404_NOT_FOUND
