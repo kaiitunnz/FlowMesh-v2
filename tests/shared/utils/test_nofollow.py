@@ -23,6 +23,7 @@ from shared.utils.nofollow import (
     regular_files,
     walk,
 )
+from tests.support.filesystems import other_filesystem
 
 
 @pytest.fixture
@@ -226,17 +227,6 @@ def test_a_walk_of_a_very_deep_tree_holds_bounded_memory(tmp_path: Path) -> None
     assert peak < 4 << 20
 
 
-def _other_filesystem(path: Path) -> Path | None:
-    for candidate in (Path("/dev/shm"), Path("/run/user") / str(os.getuid())):
-        try:
-            if candidate.is_dir() and os.access(candidate, os.W_OK):
-                if os.stat(candidate).st_dev != os.stat(path).st_dev:
-                    return candidate
-        except OSError:
-            continue
-    return None
-
-
 def test_linking_an_opened_file_names_its_inode(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.write_bytes(b"bytes")
@@ -255,7 +245,7 @@ def test_linking_an_opened_file_names_its_inode(tmp_path: Path) -> None:
 
 
 def test_an_opened_file_on_another_filesystem_is_not_linked(tmp_path: Path) -> None:
-    if (other := _other_filesystem(tmp_path)) is None:
+    if (other := other_filesystem(tmp_path)) is None:
         pytest.skip("no second writable filesystem")
     source = tmp_path / "source"
     source.write_bytes(b"bytes")
@@ -269,7 +259,7 @@ def test_an_opened_file_on_another_filesystem_is_not_linked(tmp_path: Path) -> N
 
 
 @pytest.mark.parametrize(
-    "code", [errno.EXDEV, errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP]
+    "code", [errno.EXDEV, errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EMLINK]
 )
 def test_a_link_the_filesystem_cannot_make_reports_false(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: int

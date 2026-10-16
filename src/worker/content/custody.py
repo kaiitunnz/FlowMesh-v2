@@ -39,7 +39,7 @@ from shared.content import (
 )
 from shared.content.filesystem import safe_segment
 from shared.utils.atomic import temp_path, write_replacing
-from shared.utils.nofollow import link_opened, open_dir
+from shared.utils.nofollow import UNLINKABLE_ERRNOS, link_opened, open_dir
 
 CUSTODY_DIR = "custody"
 _JOURNAL = "journal.json"
@@ -178,19 +178,43 @@ class ArtifactCustody:
         """Hold an opened file in a dispatch's custody, named by the digest of its
         bytes, and return its reference.
 
-        The file's own inode is linked in, so hashing is the only pass over its bytes,
-        or, where the filesystem cannot link it here, copied and hashed from the same
-        descriptor. Either way custody holds exactly the bytes hashed, as long
-        as the file is not modified after its task completed.
+        Links the file's own inode in and hashes it, or, where the filesystem cannot
+        link it here, copies it from the same descriptor while hashing. Custody holds
+        exactly the bytes hashed as long as the file is not modified after its task
+        completes.
         """
         directory = self.publication_dir(scope, dispatch_id)
         directory.mkdir(parents=True, exist_ok=True)
+        held = self._hold(scope, directory, source, media_type, cancelled, link=True)
+        if held is None:
+            held = self._hold(
+                scope, directory, source, media_type, cancelled, link=False
+            )
+            assert held is not None
+        reference, path = held
+        if self._keep is not None:
+            self._keep(reference, path)
+        return reference
+
+    def _hold(
+        self,
+        scope: str,
+        directory: Path,
+        source: BinaryIO,
+        media_type: str,
+        cancelled: Callable[[], bool] | None,
+        *,
+        link: bool,
+    ) -> tuple[ContentReference, Path] | None:
+        """Stage ``source`` under its digest in ``directory``, linking its inode when
+        ``link`` is set; None when that inode can take no further link."""
         tmp = temp_path(directory)
         try:
-            with open_dir(directory) as dir_fd:
-                linked = link_opened(source.fileno(), dir_fd, tmp.name)
+            if link:
+                with open_dir(directory) as dir_fd:
+                    link = link_opened(source.fileno(), dir_fd, tmp.name)
             source.seek(0)
-            if linked:
+            if link:
                 size, digest = _hash(source, cancelled)
             else:
                 with tmp.open("xb") as copy:
@@ -208,7 +232,9 @@ class ArtifactCustody:
                 # The dispatch staged the same bytes under another name already.
                 pass
             except OSError as exc:
-                if exc.errno in (errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP):
+                if link and exc.errno == errno.EMLINK:
+                    return None
+                if exc.errno in UNLINKABLE_ERRNOS:
                     raise ContentStoreError(
                         "the content filesystem must support hard links to hold "
                         f"staged artifacts: {exc}"
@@ -216,9 +242,7 @@ class ArtifactCustody:
                 raise
         finally:
             tmp.unlink(missing_ok=True)
-        if self._keep is not None:
-            self._keep(reference, held)
-        return reference
+        return reference, held
 
     def record(self, journal: UploadJournal) -> None:
         """Write a dispatch's journal durably, replacing the one there."""

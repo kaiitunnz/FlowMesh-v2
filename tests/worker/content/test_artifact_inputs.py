@@ -29,6 +29,7 @@ from shared.tasks.artifact_binding import (
 )
 from shared.tasks.result_binding import ResultBinding
 from shared.tasks.specs import EchoSpecStrict, SSHSpecStrict
+from tests.support.custody import stage
 from tests.worker.content.test_plane_routing import _Access, _Lane
 from tests.worker.factories import (
     DEFAULT_WORKER_CONFIG,
@@ -49,13 +50,6 @@ from worker.executors.ssh_session.inputs import resolve_inputs, stage_inputs_loc
 
 _SCOPE = "local"
 _FILES = {"config.json": b"{}", "weights/model.safetensors": b"w" * 100}
-
-
-def _stage(
-    custody: ArtifactCustody, scope: str, dispatch_id: str, source: Path
-) -> ContentReference:
-    with source.open("rb") as opened:
-        return custody.stage(scope, dispatch_id, opened)
 
 
 def _publish_tree(
@@ -340,7 +334,7 @@ def test_a_copy_another_upload_holds_is_copied_never_linked(tmp_path: Path) -> N
     custody = ArtifactCustody(tmp_path / "cache", keep=lane.cache.keep_staged)
     source = tmp_path / "staged.json"
     source.write_bytes(data)
-    staged = _stage(custody, _SCOPE, "dsp-2", source)
+    staged = stage(custody, _SCOPE, "dsp-2", source)
     held = custody.publication_dir(_SCOPE, "dsp-2") / staged.content_digest
     plane = WorkerContentPlane(cast(Any, lane), cast(Any, _Access(store)))
 
