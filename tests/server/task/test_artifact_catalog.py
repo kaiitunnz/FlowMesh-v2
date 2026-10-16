@@ -389,9 +389,9 @@ def test_a_restart_keeps_what_a_dispatch_s_artifact_inputs_hold(
     asyncio.run(restored.rehydrate())
     _widened(restored, use)
 
-    record = restored._tasks[use]
-    assert record.internal.dispatched_artifacts == ((tree,) if tokens else ())
-    assert record.internal.dispatched_producers == (() if tokens else (train,))
+    record_internal = restored._tasks[use].internal
+    assert record_internal.dispatched_artifacts == ((tree,) if tokens else ())
+    assert record_internal.dispatched_producers == (() if tokens else (train,))
     assert restored.content_binding_authorizes(use, "wkr-1", tree.reference)
     assert restored.content_binding_authorizes(use, "wkr-1", member)
 
@@ -477,13 +477,13 @@ def test_a_settled_dispatch_lends_nothing_more() -> None:
 
     _succeed(runtime, use, [], "dsp-2")
 
-    record = runtime._tasks[use]
+    record_internal = runtime._tasks[use].internal
     assert (
-        record.internal.dispatched_artifacts
-        == record.internal.dispatched_producers
+        record_internal.dispatched_artifacts
+        == record_internal.dispatched_producers
         == ()
     )
-    assert record.internal.runtime.dispatched_objects == ()
+    assert record_internal.runtime.dispatched_objects == ()
     stored = raw_control(registry).get(task_state_key(use))
     assert stored is not None and tree.reference.content_digest not in stored
 

@@ -159,9 +159,10 @@ def test_a_dispatch_carries_the_task_its_own_credentials(api_version):
     # The record the dispatch rendered from keeps only the refs.
     record = runtime.get_record(ids["call"])
     assert record is not None and _no_secret(record.model_dump_json())
-    assert record.internal.credential_refs
+    record_internal = record.internal
+    assert record_internal.credential_refs
     assert message.credential_pointers == {
-        ids["call"]: sorted(record.internal.credential_refs)
+        ids["call"]: sorted(record_internal.credential_refs)
     }
 
 
@@ -330,8 +331,10 @@ def test_a_merged_child_whose_credential_is_gone_leaves_the_merge():
     payload = _inference_workflow({"a": _T1, "b": _T1}, {"a": _K1, "b": _K2})
     workflow_id, ids = _register(runtime, payload)
     child = runtime.get_record(ids["b"])
-    assert child is not None and child.internal.credential_refs is not None
-    gone = child.internal.credential_refs["/data/api_key"]
+    assert child is not None
+    child_internal = child.internal
+    assert child_internal.credential_refs is not None
+    gone = child_internal.credential_refs["/data/api_key"]
     del vault.redis.hashes[workflow_credential_key(workflow_id)][gone]
 
     registry, disp = _dispatch(runtime, ids["a"])

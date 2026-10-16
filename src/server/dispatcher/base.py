@@ -490,6 +490,8 @@ class Dispatcher:
         record = self._runtime.get_record(task_id)
         if not record:
             return True
+        record_internal = record.internal
+        record_runtime = record_internal.runtime
 
         # A leaf whose source declares no envelope is prepared first: this dispatch
         # resolves its inputs on a worker and reports the request it materialized, and
@@ -554,7 +556,7 @@ class Dispatcher:
                 if c.id == owner.worker_id and c.incarnation == owner.incarnation
             ]
             if not pool:
-                record.internal.runtime.no_eligible_since = None
+                record_runtime.no_eligible_since = None
                 self._wait_for_owner(task_id, owner)
                 self.requeue_task(
                     task_id, reason="private_state_owner_busy", count_retry=False
@@ -562,7 +564,7 @@ class Dispatcher:
                 return False
             self._end_owner_wait(task_id)
 
-        failed_ids = set(record.internal.failed_workers)
+        failed_ids = set(record_internal.failed_workers)
         if owner is not None:
             # The owner is the only holder that can supply the bound generation, so a
             # failure there is retried on it under the attempt budget. Diverting to an
@@ -584,7 +586,7 @@ class Dispatcher:
                 )
             if not (eligible - failed_ids):
                 return self._grace_then_fail_exhausted(task_id, record, failed_ids)
-            record.internal.runtime.no_eligible_since = None
+            record_runtime.no_eligible_since = None
             reason = (
                 "candidate_workers_busy" if record.selected_worker else "no_idle_worker"
             )
@@ -599,7 +601,7 @@ class Dispatcher:
                 pool = filtered_pool
             elif self.eligible_worker_ids(record, relay=relays_only) - failed_ids:
                 # Untried eligible workers exist but are busy; wait for them.
-                record.internal.runtime.no_eligible_since = None
+                record_runtime.no_eligible_since = None
                 self._logger.debug(
                     "All idle candidates for %s already failed it; waiting for an "
                     "untried worker",
@@ -614,7 +616,7 @@ class Dispatcher:
                 # newly joined worker can still pick it up.
                 return self._grace_then_fail_exhausted(task_id, record, failed_ids)
 
-        record.internal.runtime.no_eligible_since = None
+        record_runtime.no_eligible_since = None
 
         # 4b. A long-lived allocation keeps off a worker holding an unsettled
         # activation's private state, since only that worker can resume the
@@ -638,7 +640,7 @@ class Dispatcher:
         # A worker that could not reach an input of the task is passed over while
         # another idle worker can take it: the input reads fine at control, so the
         # fault is likely its own path to the store.
-        if (avoided := record.internal.runtime.avoided_worker) is not None:
+        if (avoided := record_runtime.avoided_worker) is not None:
             pool = [c for c in pool if c.id != avoided] or pool
 
         # 5. Worker selection (best-fit scoring by default)
@@ -1003,7 +1005,7 @@ class Dispatcher:
             )
 
         # 9. Mark dispatched
-        record.internal.runtime.no_dispatch_since = None
+        record_runtime.no_dispatch_since = None
         self._runtime.mark_dispatched(task_id)
         if rendered_children:
             self._logger.info(
@@ -1457,15 +1459,18 @@ class Dispatcher:
         candidates: set[str] | None = None
         for producer, references in by_producer.items():
             record = self._runtime.get_record(producer)
+            if record is None:
+                continue
+            record_internal = record.internal
+            record_runtime = record_internal.runtime
             if (
-                record is None
-                or record.status != TaskStatus.DONE
+                record.status != TaskStatus.DONE
                 or (worker_id := record.assigned_worker) is None
-                or record.internal.runtime.succeeded_monotonic is None
-                or now - record.internal.runtime.succeeded_monotonic >= HOLDER_GRACE_SEC
+                or record_runtime.succeeded_monotonic is None
+                or now - record_runtime.succeeded_monotonic >= HOLDER_GRACE_SEC
             ):
                 continue
-            key = (task_id, producer, record.internal.dispatch_id or "")
+            key = (task_id, producer, record_internal.dispatch_id or "")
             if (grace := self._holder_graces.get(key)) is not None:
                 closes, ended = grace
                 if ended or now >= closes:
@@ -1483,7 +1488,7 @@ class Dispatcher:
                 candidates = waitable()
             settling = worker_id in candidates and any(
                 self._settling_holder(
-                    reference, worker_id, record.internal.dispatch_id, grace is not None
+                    reference, worker_id, record_internal.dispatch_id, grace is not None
                 )
                 for reference in references
             )
@@ -2123,9 +2128,10 @@ class Dispatcher:
 def _serve_elapsed_sec(record: TaskRecord) -> float | None:
     """Return the seconds since a serve task's first start, which its TTL counts
     across re-runs; None for any other task or one that never started."""
+    record_internal = record.internal
     if (
         record.task_type not in SERVE_TASK_TYPES
-        or record.internal.first_started_ts is None
+        or record_internal.first_started_ts is None
     ):
         return None
-    return max(0.0, time.time() - record.internal.first_started_ts)
+    return max(0.0, time.time() - record_internal.first_started_ts)

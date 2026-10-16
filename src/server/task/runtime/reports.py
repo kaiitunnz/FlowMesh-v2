@@ -81,10 +81,12 @@ def reset_to_pending(record: TaskRecord) -> None:
 
 def clear_dispatched_inputs(record: TaskRecord) -> None:
     """Drop what a task's ended dispatch let its worker read from a peer."""
-    record.internal.dispatched_artifacts = ()
-    record.internal.dispatched_producers = ()
-    record.internal.runtime.dispatched_objects = ()
-    record.internal.runtime.members_pending = False
+    record_internal = record.internal
+    record_internal.dispatched_artifacts = ()
+    record_internal.dispatched_producers = ()
+    record_runtime = record_internal.runtime
+    record_runtime.dispatched_objects = ()
+    record_runtime.members_pending = False
 
 
 def membership(record: TaskRecord) -> str:

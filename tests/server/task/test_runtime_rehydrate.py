@@ -881,8 +881,10 @@ async def test_rehydrate_keeps_a_requeued_serve_tasks_first_start() -> None:
     record_dispatch(runtime, a, cast(Any, worker))
     runtime.mark_started(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
     record = runtime.get_record(a)
-    assert record is not None and record.internal.first_started_ts is not None
-    first_started = record.internal.first_started_ts
+    assert record is not None
+    record_internal = record.internal
+    assert record_internal.first_started_ts is not None
+    first_started = record_internal.first_started_ts
     runtime.return_dispatch(a, "wkr-1", increment_retry=False, front=True)
 
     restored = _runtime(registry)

@@ -123,8 +123,9 @@ def test_a_settled_task_stores_no_dispatched_artifacts_and_keeps_its_own() -> No
 
     assert "dispatched_artifacts" not in stored
     assert "dispatched_producers" not in stored
-    assert record.internal.dispatched_artifacts == (_file(),)
-    assert record.internal.dispatched_producers == ("tsk-0",)
+    record_internal = record.internal
+    assert record_internal.dispatched_artifacts == (_file(),)
+    assert record_internal.dispatched_producers == ("tsk-0",)
 
 
 def test_the_internal_state_is_served_by_no_api() -> None:
@@ -147,35 +148,38 @@ def test_the_internal_state_is_served_by_no_api() -> None:
 
 def test_a_copy_of_a_record_owns_its_internal_state_and_runtime_state() -> None:
     record = _record(dispatch_id="dsp-1")
-    record.internal.runtime.avoided_worker = "wkr-1"
+    record_internal = record.internal
+    record_internal.runtime.avoided_worker = "wkr-1"
 
-    copied = copy.copy(record)
-    copied.internal.dispatch_id = "dsp-2"
-    copied.internal.runtime.avoided_worker = "wkr-2"
-    record.internal.first_started_ts = 1.0
+    copied_internal = copy.copy(record).internal
+    copied_internal.dispatch_id = "dsp-2"
+    copied_internal.runtime.avoided_worker = "wkr-2"
+    record_internal.first_started_ts = 1.0
 
-    assert (record.internal.dispatch_id, copied.internal.dispatch_id) == (
+    assert (record_internal.dispatch_id, copied_internal.dispatch_id) == (
         "dsp-1",
         "dsp-2",
     )
-    assert record.internal.runtime.avoided_worker == "wkr-1"
-    assert copied.internal.runtime.avoided_worker == "wkr-2"
-    assert copied.internal.first_started_ts is None
+    assert record_internal.runtime.avoided_worker == "wkr-1"
+    assert copied_internal.runtime.avoided_worker == "wkr-2"
+    assert copied_internal.first_started_ts is None
 
 
 def _mutate(record: TaskRecord, worker: str) -> None:
     assert record.selected_worker is not None
     record.selected_worker.append(worker)
-    record.internal.failed_workers.append(worker)
-    record.internal.runtime.unwritten_artifacts.append(_file())
-    record.internal.dispatch_id = worker
+    record_internal = record.internal
+    record_internal.failed_workers.append(worker)
+    record_internal.runtime.unwritten_artifacts.append(_file())
+    record_internal.dispatch_id = worker
 
 
 def _assert_unmutated(record: TaskRecord) -> None:
     assert record.selected_worker == ["wkr-0"]
-    assert record.internal.failed_workers == ["wkr-0"]
-    assert record.internal.runtime.unwritten_artifacts == []
-    assert record.internal.dispatch_id == "dsp-1"
+    record_internal = record.internal
+    assert record_internal.failed_workers == ["wkr-0"]
+    assert record_internal.runtime.unwritten_artifacts == []
+    assert record_internal.dispatch_id == "dsp-1"
 
 
 def _source() -> TaskRecord:

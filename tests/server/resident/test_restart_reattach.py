@@ -46,8 +46,10 @@ def test_a_restart_reattaches_a_warm_replica_and_keeps_its_serve_task() -> None:
     assert replica.endpoint is not None and replica.endpoint.api_key is None
     assert node.status(warm.serve_task_id) == TaskStatus.DISPATCHED
     record = node.runtime.get_record(warm.serve_task_id)
-    assert record is not None and record.internal.dispatch_id is not None
-    assert record.internal.latest_update_dispatch_id == record.internal.dispatch_id
+    assert record is not None
+    record_internal = record.internal
+    assert record_internal.dispatch_id is not None
+    assert record_internal.latest_update_dispatch_id == record_internal.dispatch_id
     assert node.control.stores.pools.feasible_candidates(
         FAMILY.family, AdmissionProfile(engine_batch_key=FAMILY.engine_batch_key)
     )

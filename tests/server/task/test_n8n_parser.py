@@ -147,8 +147,10 @@ async def test_the_runtime_decrypts_n8n_credentials_with_its_configured_password
         "owner", "org", _encrypted_openai_payload(), format="n8n"
     )
     record = runtime.get_record(results[0].task_id)
-    assert record is not None and record.internal.credential_refs is not None
-    ref = record.internal.credential_refs["/api/headers/Authorization"]
+    assert record is not None
+    record_internal = record.internal
+    assert record_internal.credential_refs is not None
+    ref = record_internal.credential_refs["/api/headers/Authorization"]
     assert vault.resolve_values(workflow_id, [ref]) == {ref: "Bearer sk-n8n"}
 
 
@@ -161,9 +163,11 @@ async def test_an_encrypted_url_is_vaulted_however_it_is_shaped():
         "owner", "org", _encrypted_openai_payload(url), format="n8n"
     )
     record = runtime.get_record(results[0].task_id)
-    assert record is not None and record.internal.credential_refs is not None
+    assert record is not None
+    record_internal = record.internal
+    assert record_internal.credential_refs is not None
     assert "private-gateway" not in record.model_dump_json()
-    ref = record.internal.credential_refs["/api/url"]
+    ref = record_internal.credential_refs["/api/url"]
     assert vault.resolve_values(workflow_id, [ref]) == {ref: f"{url}/chat/completions"}
 
 

@@ -458,8 +458,9 @@ class TaskRecord(BaseModel):
     def _drop_unheld_credential_refs(self) -> Self:
         # A ref into a field the spec does not hold has nowhere to be restored at
         # dispatch.
-        if refs := self.internal.credential_refs:
-            self.internal.credential_refs = {
+        internal = self.internal
+        if refs := internal.credential_refs:
+            internal.credential_refs = {
                 pointer: ref
                 for pointer, ref in refs.items()
                 if holds_pointer(self.task.spec, pointer)

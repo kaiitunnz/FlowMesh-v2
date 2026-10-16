@@ -330,11 +330,12 @@ async def test_an_unreachable_artifact_member_is_held_like_any_input() -> None:
     record = runtime._tasks[task_id]
     assert record.status == TaskStatus.PENDING
     assert record.attempts == 0
-    assert record.internal.failed_workers == []
+    record_internal = record.internal
+    assert record_internal.failed_workers == []
     fixture.scheduler.run_due()
     assert fixture.probe.reads == []
     assert fixture.stored.reads == [member]
-    assert record.internal.runtime.avoided_worker == "wkr-1"
+    assert record_internal.runtime.avoided_worker == "wkr-1"
 
 
 @pytest.mark.anyio
