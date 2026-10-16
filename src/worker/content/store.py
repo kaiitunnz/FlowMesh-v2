@@ -23,7 +23,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import BinaryIO, NamedTuple
+from typing import BinaryIO, NamedTuple, Self
 
 from shared.content import (
     OCTET_STREAM,
@@ -54,7 +54,7 @@ class _Walked(NamedTuple):
     inode: tuple[int, int]
 
     @classmethod
-    def of(cls, scope: str, digest: str, stat: os.stat_result) -> "_Walked":
+    def of(cls, scope: str, digest: str, stat: os.stat_result) -> Self:
         return cls(
             stat.st_mtime, stat.st_size, scope, digest, (stat.st_dev, stat.st_ino)
         )
@@ -320,10 +320,10 @@ class WorkerContentCache(FabricObjectStore):
                     total -= entry.size
         return evicted
 
-    def _gone(self, entry: "_Walked") -> bool:
+    def _gone(self, entry: _Walked) -> bool:
         return self._objects.stat(entry.scope, entry.digest) is None
 
-    def _remove_unused(self, entry: "_Walked") -> bool:
+    def _remove_unused(self, entry: _Walked) -> bool:
         """Remove a copy the walk found, unless it was used or replaced since, or
         upload custody holds it."""
         with self._lock:

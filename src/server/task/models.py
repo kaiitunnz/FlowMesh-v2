@@ -245,6 +245,20 @@ class TaskRecordRuntimeState(BaseModel):
         "catalog.",
     )
 
+    def no_eligible_for(self, now: float) -> float:
+        """Return how long the task has had no eligible worker as of ``now``, which
+        starts the clock when it is not running."""
+        if self.no_eligible_since is None:
+            self.no_eligible_since = now
+        return now - self.no_eligible_since
+
+    def no_dispatch_for(self, now: float) -> float:
+        """Return how long the task's selected worker has been undeliverable as of
+        ``now``, which starts the clock when it is not running."""
+        if self.no_dispatch_since is None:
+            self.no_dispatch_since = now
+        return now - self.no_dispatch_since
+
 
 class TaskInternalState(BaseModel):
     """A task's server-internal bookkeeping, stored with its record and hidden from

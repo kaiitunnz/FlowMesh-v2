@@ -256,3 +256,13 @@ def test_a_stored_task_info_is_detached_both_ways(
     assert info is not None
     _mutate(record, "wkr-2")
     _assert_unmutated(info)
+
+
+def test_a_wait_clock_starts_once_and_reports_the_time_since() -> None:
+    runtime = TaskRecordRuntimeState()
+
+    assert runtime.no_eligible_for(10.0) == 0.0
+    assert runtime.no_eligible_for(12.5) == 2.5
+    assert runtime.no_dispatch_for(11.0) == 0.0
+    assert runtime.no_dispatch_for(14.0) == 3.0
+    assert (runtime.no_eligible_since, runtime.no_dispatch_since) == (10.0, 11.0)

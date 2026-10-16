@@ -260,11 +260,7 @@ class Dispatcher:
         extra_payload: dict[str, Any] | None = None,
     ) -> bool:
         """Wait out the no-worker grace, then fail the task terminally."""
-        now = time.time()
-        runtime = record.internal.runtime
-        if runtime.no_eligible_since is None:
-            runtime.no_eligible_since = now
-        waited = now - runtime.no_eligible_since
+        waited = record.internal.runtime.no_eligible_for(time.time())
         if waited >= self._no_worker_grace_sec:
             self._logger.warning(
                 "No worker for %s after %.0fs (%s); failing", task_id, waited, reason
@@ -298,11 +294,7 @@ class Dispatcher:
         """
         self._runtime.release_merge(task_id)
         self._runtime.note_dispatch_error(task_id, message)
-        now = time.time()
-        runtime = record.internal.runtime
-        if runtime.no_dispatch_since is None:
-            runtime.no_dispatch_since = now
-        waited = now - runtime.no_dispatch_since
+        waited = record.internal.runtime.no_dispatch_for(time.time())
         if waited >= self._no_worker_grace_sec:
             self._logger.warning(
                 "Task %s undeliverable after %.0fs (%s); failing",
@@ -355,11 +347,8 @@ class Dispatcher:
         A brief grace absorbs a heartbeat flap; past it the episode fails closed rather
         than resuming against an empty home on another worker.
         """
-        now = time.time()
-        runtime = record.internal.runtime
-        if runtime.no_eligible_since is None:
-            runtime.no_eligible_since = now
-        if now - runtime.no_eligible_since < self._no_worker_grace_sec:
+        waited = record.internal.runtime.no_eligible_for(time.time())
+        if waited < self._no_worker_grace_sec:
             self.requeue_task(
                 task_id, reason="private_state_owner_lost", count_retry=False
             )
