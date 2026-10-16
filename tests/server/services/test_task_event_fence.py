@@ -153,7 +153,7 @@ async def test_an_event_from_a_superseded_worker_changes_nothing(
     )
 
     _assert_held_by(runtime, task_id, "wkr-2")
-    assert runtime._tasks[task_id].failed_workers == []
+    assert runtime._tasks[task_id].internal.failed_workers == []
     assert runtime._tasks[task_id].last_error is None
     assert metrics.record_task_event.call_count == 0
 
@@ -192,7 +192,7 @@ async def test_an_earlier_dispatch_to_the_same_worker_changes_nothing(
     monitor.handle_task_event(_event(event_type, runtime, task_id, "wkr-1", "dsp-1"))
 
     _assert_held_by(runtime, task_id, "wkr-1")
-    assert runtime._tasks[task_id].dispatch_id == "dsp-2"
+    assert runtime._tasks[task_id].internal.dispatch_id == "dsp-2"
 
 
 @pytest.mark.anyio
@@ -271,7 +271,7 @@ async def test_a_loss_reported_by_unregister_and_the_worker_spends_one_attempt()
     record = runtime._tasks[task_id]
     assert record.status == TaskStatus.PENDING
     assert record.attempts == 1
-    assert record.failed_workers == []
+    assert record.internal.failed_workers == []
 
 
 @pytest.mark.anyio
@@ -460,7 +460,7 @@ async def test_a_success_reported_before_its_dispatch_was_recorded_replays() -> 
     )
 
     assert (replay.effect, replay.status) == (EventEffect.SETTLED, TaskStatus.DONE)
-    assert runtime._tasks[task_id].dispatch_id == message.dispatch_id
+    assert runtime._tasks[task_id].internal.dispatch_id == message.dispatch_id
 
 
 @pytest.mark.anyio
@@ -576,7 +576,7 @@ async def test_a_merged_batch_failing_before_it_is_recorded_runs_each_task_alone
         record = runtime._tasks[task_id]
         assert record.status == TaskStatus.PENDING
         assert record.attempts == 0
-        assert record.failed_workers == []
+        assert record.internal.failed_workers == []
         assert record.merge_key is None
 
 
@@ -720,7 +720,7 @@ async def test_a_late_report_on_a_settled_task_records_nothing(
 
     record = runtime._tasks[task_id]
     assert record.status == settled
-    assert record.failed_workers == []
+    assert record.internal.failed_workers == []
     assert record.last_error is None
     assert metrics.record_task_event.call_count == 0
     assert metrics.finalize_task_failure.call_count == 0

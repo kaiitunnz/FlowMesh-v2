@@ -289,7 +289,7 @@ def _hold_dispatch(runtime: TaskRuntime, task_id: str, worker: str = "wkr-1") ->
     engine.on_dispatched(task_id, worker)
     record = runtime._tasks[task_id]
     record.assigned_worker = worker
-    record.dispatch_id = HELD_DISPATCH
+    record.internal.dispatch_id = HELD_DISPATCH
     record.status = TaskStatus.DISPATCHED
     return engine
 
@@ -1337,7 +1337,7 @@ def test_a_stale_step_leaves_what_a_new_dispatch_to_its_worker_captured() -> Non
         _, ids = await _register(runtime, _SEARCH_WF)
         writer = ids["writer"]
         _, stale = _run_agent_step(runtime, writer)
-        runtime._tasks[writer].dispatch_id = "dsp-1"
+        runtime._tasks[writer].internal.dispatch_id = "dsp-1"
         runtime.return_dispatch(writer, "wkr-1", increment_retry=False, front=True)
         # The next dispatch goes to the same worker, which captures the same call anew.
         worker = cast(Worker, SimpleNamespace(id="wkr-1", node_id="nde-1"))
@@ -1429,7 +1429,7 @@ def test_a_late_step_of_a_dispatch_settled_cancelled_reaps_and_routes_nothing(
         writer = ids["writer"]
         _, payload = _run_agent_step(runtime, writer, seal_in=tmp_path)
         record = runtime._tasks[writer]
-        record.dispatch_id = "dsp-1"
+        record.internal.dispatch_id = "dsp-1"
         runtime.cancel_workflow(workflow_id)
         runtime.resolve_disowned_dispatch(writer, "dsp-1", "wkr-1", 0.0)
         assert record.status is TaskStatus.CANCELLED
@@ -1450,7 +1450,7 @@ def test_a_late_completion_of_a_dispatch_settled_cancelled_routes_no_group() -> 
         writer = ids["writer"]
         _hold_dispatch(runtime, writer)
         record = runtime._tasks[writer]
-        record.dispatch_id = "dsp-1"
+        record.internal.dispatch_id = "dsp-1"
         group = _stash_search_group(runtime, writer)
         runtime.cancel_workflow(workflow_id)
         runtime.resolve_disowned_dispatch(writer, "dsp-1", "wkr-1", 0.0)

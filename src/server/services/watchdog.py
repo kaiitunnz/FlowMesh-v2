@@ -268,7 +268,7 @@ class WorkerWatchdog:
                 type="TASK_FAILED",
                 task_id=task_id,
                 worker_id=worker_id,
-                dispatch_id=record.dispatch_id if record is not None else None,
+                dispatch_id=record.internal.dispatch_id if record is not None else None,
                 error="worker_heartbeat_expired",
                 payload=payload,
             )

@@ -128,7 +128,7 @@ async def test_a_running_residual_child_is_interrupted_and_settles_cancelled() -
     assert not runtime.workflow_settlement(workflow_id).settled
     record = runtime.get_record(loser)
     assert record is not None
-    runtime.mark_succeeded(loser, "wkr-2", {}, _TS, record.dispatch_id)
+    runtime.mark_succeeded(loser, "wkr-2", {}, _TS, record.internal.dispatch_id)
     assert _status(runtime, loser) == TaskStatus.CANCELLED
     assert runtime.workflow_settlement(workflow_id).settled
 
@@ -158,7 +158,9 @@ def test_a_restart_cancels_a_residual_child_a_crash_left_behind(
             assert interrupts.sent == [(loser, "wkr-2")]
             record = restored.get_record(loser)
             assert record is not None
-            restored.mark_succeeded(loser, "wkr-2", {}, _TS, record.dispatch_id)
+            restored.mark_succeeded(
+                loser, "wkr-2", {}, _TS, record.internal.dispatch_id
+            )
         assert _status(restored, loser) == TaskStatus.CANCELLED
         assert _pop_ready(restored) == [ids["after"]]
         _finish(restored, ids["after"])
@@ -366,7 +368,7 @@ def test_a_residual_cancel_reaches_a_cancelled_agents_own_children(state: str) -
             assert interrupts.sent == [(sub, "wkr-3")]
             record = runtime.get_record(sub)
             assert record is not None
-            runtime.mark_succeeded(sub, "wkr-3", {}, _TS, record.dispatch_id)
+            runtime.mark_succeeded(sub, "wkr-3", {}, _TS, record.internal.dispatch_id)
         assert _pop_ready(runtime) == []
         assert _status(runtime, sub) == TaskStatus.CANCELLED
         assert runtime.workflow_settlement(workflow_id).settled

@@ -428,7 +428,7 @@ async def test_a_root_task_reads_the_branch_arm_and_merge_it_takes() -> None:
     spec, _ = _dispatch(run, "joined")
     assert spec["data"]["items"] == ["hit"]
     record = run.runtime.get_record(run.ids["on_miss"])
-    assert record is not None and record.result_skip is not None
+    assert record is not None and record.internal.result_skip is not None
 
 
 _ROOT_JOIN = f"""

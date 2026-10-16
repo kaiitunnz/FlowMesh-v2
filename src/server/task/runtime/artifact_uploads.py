@@ -57,7 +57,7 @@ class ArtifactUploads:
         """Index a record's upload as it now stands."""
         task_id = record.task_id
         self._untrack(task_id)
-        if (upload := record.artifact_upload) is None:
+        if (upload := record.internal.artifact_upload) is None:
             return
         if upload.pending:
             self._pending[record.workflow_id].add(task_id)

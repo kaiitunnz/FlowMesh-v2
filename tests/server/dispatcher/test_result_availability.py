@@ -244,7 +244,7 @@ def test_a_worker_that_could_not_reach_an_input_is_passed_over() -> None:
     )
     record = runtime.get_record(b)
     assert record is not None
-    record.avoided_worker = "wkr-1"
+    record.internal.runtime.avoided_worker = "wkr-1"
 
     dispatcher.dispatch_once(b)
 
@@ -287,7 +287,7 @@ def _avoiding(
     )
     record = runtime.get_record(b)
     assert record is not None
-    record.avoided_worker = "wkr-1"
+    record.internal.runtime.avoided_worker = "wkr-1"
     with runtime._cv:
         assert runtime._ready.pop_ready_locked() == b
     return runtime, b, registry, dispatcher

@@ -50,9 +50,9 @@ async def _off_loop(fn: Any, *args: Any) -> None:
 async def _ask_yield(node: Node, serve_task_id: str) -> None:
     """Ask resident capacity to free the worker the serve task's dispatch occupies."""
     record = node.runtime.get_record(serve_task_id)
-    assert record is not None and record.dispatch_id is not None
+    assert record is not None and record.internal.dispatch_id is not None
     await _off_loop(
-        node.runtime.request_resident_yield, serve_task_id, record.dispatch_id
+        node.runtime.request_resident_yield, serve_task_id, record.internal.dispatch_id
     )
     await asyncio.sleep(0)
 
@@ -281,14 +281,14 @@ def test_a_retryable_cold_start_failure_retries_the_same_task_elsewhere() -> Non
         assert cold.state is ReplicaState.MATERIALIZING
         assert node.status(serve_task_id) == TaskStatus.PENDING
         record = node.runtime.get_record(serve_task_id)
-        assert record is not None and record.failed_workers == ["wkr-1"]
+        assert record is not None and record.internal.failed_workers == ["wkr-1"]
 
         node.serve(serve_task_id, "wkr-2", "dsp-b", port=8002)
         node.control._promote_ready_replicas(FAMILY.family)
 
         assert cold.state is ReplicaState.WARM
         assert cold.endpoint is not None
-        assert record.latest_update_dispatch_id == "dsp-b"
+        assert record.internal.latest_update_dispatch_id == "dsp-b"
 
     asyncio.run(run())
 
@@ -590,6 +590,6 @@ def test_a_root_rewrite_never_relabels_a_newer_worker_update() -> None:
         assert not node.runtime.rewrite_update(serve_task_id, read, dict(read))
 
         assert record.latest_update is newer
-        assert record.latest_update_dispatch_id == "dsp-a"
+        assert record.internal.latest_update_dispatch_id == "dsp-a"
 
     asyncio.run(run())

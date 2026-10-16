@@ -176,12 +176,20 @@ def _run_to_end(runtime: TaskRuntime, workflow_id: str) -> None:
             if record.status == TaskStatus.DISPATCHED:
                 assert record.assigned_worker is not None
                 runtime.mark_succeeded(
-                    record.task_id, record.assigned_worker, {}, _TS, record.dispatch_id
+                    record.task_id,
+                    record.assigned_worker,
+                    {},
+                    _TS,
+                    record.internal.dispatch_id,
                 )
             elif record.status == TaskStatus.CANCELLING:
                 assert record.assigned_worker is not None
                 runtime.mark_cancelled(
-                    record.task_id, record.assigned_worker, {}, _TS, record.dispatch_id
+                    record.task_id,
+                    record.assigned_worker,
+                    {},
+                    _TS,
+                    record.internal.dispatch_id,
                 )
         _dispatch_ready(runtime)
 

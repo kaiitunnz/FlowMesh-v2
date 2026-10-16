@@ -97,8 +97,8 @@ def build_resident_capacity(
             record is None
             or record.status != TaskStatus.DISPATCHED
             or not record.latest_update
-            or record.latest_update_dispatch_id is None
-            or record.latest_update_dispatch_id != record.dispatch_id
+            or record.internal.latest_update_dispatch_id is None
+            or record.internal.latest_update_dispatch_id != record.internal.dispatch_id
         ):
             return None
         serve = record.latest_update.get("serve")

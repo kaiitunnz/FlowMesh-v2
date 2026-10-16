@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest import mock
 
-from server.task.models import TaskRecord
+from server.task.models import TaskInternalState, TaskRecord, TaskRecordRuntimeState
 from tests.server.dispatcher.helpers import make_capturing_dispatcher
 
 
@@ -17,7 +17,9 @@ def _record(
     rec = SimpleNamespace(
         task=SimpleNamespace(),
         selected_worker=selected_worker,
-        no_eligible_since=no_eligible_since,
+        internal=TaskInternalState(
+            runtime=TaskRecordRuntimeState(no_eligible_since=no_eligible_since)
+        ),
         last_error=last_error,
         last_failed_worker=last_failed_worker,
     )
@@ -43,7 +45,7 @@ def test_grace_then_fail_waits_within_grace() -> None:
             "tsk-1", record, reason="no_eligible_worker", message="no worker"
         )
     assert result is False
-    assert record.no_eligible_since == 1000.0
+    assert record.internal.runtime.no_eligible_since == 1000.0
     assert disp.failed == []
     assert disp.requeued and disp.requeued[0][1]["count_retry"] is False
 

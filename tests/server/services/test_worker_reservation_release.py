@@ -144,7 +144,7 @@ def test_a_restart_releases_a_reservation_whose_dispatch_ended(
 ) -> None:
     runtime, monitor, task_id, _ = _dispatched(client)
     cast(Any, monitor._dispatcher).dispatch_once(task_id)
-    dispatch_id = runtime._tasks[task_id].dispatch_id
+    dispatch_id = runtime._tasks[task_id].internal.dispatch_id
     registry = WorkerRegistry(cast(Any, _Rds(client)))
 
     runtime.release_ended_reservations()

@@ -147,8 +147,8 @@ def test_a_success_binds_its_artifacts_with_its_record() -> None:
     assert set(stored) == {("final", "final_model"), ("final", "final_model.tar.gz")}
     assert {b.dispatch_id for b in stored.values()} == {"dsp-1"}
     assert all(b.published_at for b in stored.values())
-    assert runtime._tasks[train].artifacts == stored
-    assert runtime._tasks[train].unwritten_artifacts == []
+    assert runtime._tasks[train].internal.runtime.artifacts == stored
+    assert runtime._tasks[train].internal.runtime.unwritten_artifacts == []
 
 
 def test_a_replayed_success_adds_nothing() -> None:
@@ -273,7 +273,9 @@ def test_a_conflicting_publication_keeps_the_first() -> None:
         )
 
     assert len(first) == 1 and again == []
-    assert record.artifacts[("final", "final_model")].reference == _ref(b"tree")
+    assert record.internal.runtime.artifacts[
+        ("final", "final_model")
+    ].reference == _ref(b"tree")
     assert _conflicts(reader) == 1
 
 
@@ -300,10 +302,10 @@ def test_a_held_commit_writes_its_artifacts_when_it_lands() -> None:
     _succeed(runtime, train, [_tree()], "dsp-1")
 
     assert _stored(registry, train) == {}
-    assert runtime._tasks[train].unwritten_artifacts
+    assert runtime._tasks[train].internal.runtime.unwritten_artifacts
     runtime._retry_durability(workflow_id)
     assert set(_stored(registry, train)) == {("final", "final_model")}
-    assert runtime._tasks[train].unwritten_artifacts == []
+    assert runtime._tasks[train].internal.runtime.unwritten_artifacts == []
 
 
 def test_a_restart_restores_the_catalog() -> None:
@@ -317,9 +319,9 @@ def test_a_restart_restores_the_catalog() -> None:
     restored = _runtime(registry, make_result_reader(reader.store))
     assert asyncio.run(restored.rehydrate()) == 1
 
-    assert restored._tasks[train].artifacts == _stored(registry, train)
-    assert restored._tasks[train].has_artifacts
-    assert not restored._tasks[use].has_artifacts
+    assert restored._tasks[train].internal.runtime.artifacts == _stored(registry, train)
+    assert restored._tasks[train].internal.has_artifacts
+    assert not restored._tasks[use].internal.has_artifacts
 
 
 def test_a_workflow_failed_at_restore_keeps_its_catalog(
@@ -341,12 +343,15 @@ def test_a_workflow_failed_at_restore_keeps_its_catalog(
     asyncio.run(restored.rehydrate())
 
     assert restored._tasks[use].status == TaskStatus.FAILED
-    assert restored._tasks[train].artifacts == _stored(registry, train)
+    assert restored._tasks[train].internal.runtime.artifacts == _stored(registry, train)
 
 
 def _widened(runtime: TaskRuntime, task_id: str) -> None:
     deadline = time.monotonic() + 10
-    while runtime._tasks[task_id].members_pending and time.monotonic() < deadline:
+    while (
+        runtime._tasks[task_id].internal.runtime.members_pending
+        and time.monotonic() < deadline
+    ):
         time.sleep(0.01)
 
 
@@ -356,7 +361,7 @@ def _dispatched_use(
     _, (train, use) = _register(runtime)
     record_dispatch(runtime, train, dispatch_id="dsp-1")
     _succeed(runtime, train, [_tree()], "dsp-1")
-    tree = runtime._tasks[train].artifacts[("final", "final_model")]
+    tree = runtime._tasks[train].internal.runtime.artifacts[("final", "final_model")]
     runtime.note_artifact_inputs(
         use,
         [tree] if tokens else [],
@@ -385,8 +390,8 @@ def test_a_restart_keeps_what_a_dispatch_s_artifact_inputs_hold(
     _widened(restored, use)
 
     record = restored._tasks[use]
-    assert record.dispatched_artifacts == ((tree,) if tokens else ())
-    assert record.dispatched_producers == (() if tokens else (train,))
+    assert record.internal.dispatched_artifacts == ((tree,) if tokens else ())
+    assert record.internal.dispatched_producers == (() if tokens else (train,))
     assert restored.content_binding_authorizes(use, "wkr-1", tree.reference)
     assert restored.content_binding_authorizes(use, "wkr-1", member)
 
@@ -412,7 +417,7 @@ def test_a_restart_never_waits_on_the_store_for_members(
 
     record = restored._tasks[use]
     assert took < 5
-    assert record.members_pending
+    assert record.internal.runtime.members_pending
     assert restored.content_binding_authorizes(use, "wkr-1", tree.reference)
     unknown = _ref(b"a member not yet lent")
     with restored._lock:
@@ -444,7 +449,7 @@ def test_members_unread_at_restart_are_lent_once_the_store_returns(
     asyncio.run(restored.rehydrate())
     _widened(restored, use)
 
-    assert not restored._tasks[use].members_pending
+    assert not restored._tasks[use].internal.runtime.members_pending
     assert restored.content_binding_authorizes(use, "wkr-1", member)
     assert len(reads) == 2
 
@@ -473,8 +478,12 @@ def test_a_settled_dispatch_lends_nothing_more() -> None:
     _succeed(runtime, use, [], "dsp-2")
 
     record = runtime._tasks[use]
-    assert record.dispatched_artifacts == record.dispatched_producers == ()
-    assert record.dispatched_objects == ()
+    assert (
+        record.internal.dispatched_artifacts
+        == record.internal.dispatched_producers
+        == ()
+    )
+    assert record.internal.runtime.dispatched_objects == ()
     stored = raw_control(registry).get(task_state_key(use))
     assert stored is not None and tree.reference.content_digest not in stored
 
@@ -491,14 +500,16 @@ def test_a_stored_dispatched_artifact_that_no_longer_reads_is_dropped() -> None:
                 "kind": "Task",
                 "spec": {"taskType": "echo"},
             },
-            "dispatched_artifacts": [
-                {"name": "x", "kind": "nonsense"},
-                _tree().model_dump(mode="json"),
-            ],
+            "internal": {
+                "dispatched_artifacts": [
+                    {"name": "x", "kind": "nonsense"},
+                    _tree().model_dump(mode="json"),
+                ]
+            },
         }
     )
 
-    assert record.dispatched_artifacts == (_tree(),)
+    assert record.internal.dispatched_artifacts == (_tree(),)
 
 
 def test_unregistering_a_workflow_removes_its_catalogs() -> None:
@@ -570,7 +581,7 @@ def test_a_running_task_binds_no_final_revision() -> None:
     record_dispatch(runtime, train, dispatch_id="dsp-1")
 
     assert _publish(runtime, train, _tree(), "dsp-1") is False
-    assert runtime._tasks[train].artifacts == {}
+    assert runtime._tasks[train].internal.runtime.artifacts == {}
 
 
 def test_a_stale_or_settled_dispatch_binds_no_checkpoint() -> None:
@@ -636,11 +647,15 @@ def test_a_settled_task_keeps_only_its_final_set_in_memory() -> None:
     _, (train, _use) = _register(runtime)
     record_dispatch(runtime, train, dispatch_id="dsp-1")
     _publish(runtime, train, _step(10), "dsp-1")
-    assert set(runtime._tasks[train].artifacts) == {("step-10", "checkpoints")}
+    assert set(runtime._tasks[train].internal.runtime.artifacts) == {
+        ("step-10", "checkpoints")
+    }
 
     _succeed(runtime, train, [_tree()], "dsp-1")
 
-    assert set(runtime._tasks[train].artifacts) == {("final", "final_model")}
+    assert set(runtime._tasks[train].internal.runtime.artifacts) == {
+        ("final", "final_model")
+    }
     assert set(runtime.artifact_bindings(train) or {}) == {
         ("step-10", "checkpoints"),
         ("final", "final_model"),
@@ -702,12 +717,16 @@ def test_a_restart_restores_every_revision_only_for_a_running_task() -> None:
     restored = _runtime(registry, make_result_reader(reader.store))
     assert asyncio.run(restored.rehydrate()) == 1
 
-    assert set(restored._tasks[train].artifacts) == {("final", "final_model")}
+    assert set(restored._tasks[train].internal.runtime.artifacts) == {
+        ("final", "final_model")
+    }
     assert set(restored.artifact_bindings(train) or {}) == {
         ("step-10", "checkpoints"),
         ("final", "final_model"),
     }
-    assert set(restored._tasks[use].artifacts) == {("step-5", "checkpoints")}
+    assert set(restored._tasks[use].internal.runtime.artifacts) == {
+        ("step-5", "checkpoints")
+    }
 
 
 def test_a_revision_read_decodes_only_that_revision() -> None:

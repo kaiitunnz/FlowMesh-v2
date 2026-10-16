@@ -207,7 +207,7 @@ class AfterCommitActions:
                 task_id=record.task_id,
                 worker_id=record.assigned_worker,
                 reason=reason,
-                dispatch_id=record.dispatch_id,
+                dispatch_id=record.internal.dispatch_id,
             )
         )
 

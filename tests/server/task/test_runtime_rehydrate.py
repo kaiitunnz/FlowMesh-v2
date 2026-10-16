@@ -273,16 +273,15 @@ async def test_persisted_task_round_trips_failed_workers_and_deps() -> None:
 
     record = runtime.get_record(b)
     assert record is not None
-    record.failed_workers.append("wkr-dead")
+    record.internal.failed_workers.append("wkr-dead")
 
     pt = PersistedTask(record=record, depends_on={a}, epoch_index=2)
     restored = load_task_state(
         pt.model_dump_json(), task_sources([pt])[pt.record.workflow_id]
     )
 
-    # failed_workers is exclude=True on TaskRecord but must survive persistence;
     # depends_on round-trips through a JSON list back to a set.
-    assert restored.record.failed_workers == ["wkr-dead"]
+    assert restored.record.internal.failed_workers == ["wkr-dead"]
     assert restored.depends_on == {a}
     assert restored.epoch_index == 2
     assert restored.record.task_id == b
@@ -882,8 +881,8 @@ async def test_rehydrate_keeps_a_requeued_serve_tasks_first_start() -> None:
     record_dispatch(runtime, a, cast(Any, worker))
     runtime.mark_started(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
     record = runtime.get_record(a)
-    assert record is not None and record.first_started_ts is not None
-    first_started = record.first_started_ts
+    assert record is not None and record.internal.first_started_ts is not None
+    first_started = record.internal.first_started_ts
     runtime.return_dispatch(a, "wkr-1", increment_retry=False, front=True)
 
     restored = _runtime(registry)
@@ -893,7 +892,7 @@ async def test_rehydrate_keeps_a_requeued_serve_tasks_first_start() -> None:
     assert restored_record is not None
     assert restored_record.status == TaskStatus.PENDING
     assert restored_record.started_ts is None
-    assert restored_record.first_started_ts == first_started
+    assert restored_record.internal.first_started_ts == first_started
 
 
 def _succeed_all(runtime: TaskRuntime, ids: dict[str, str]) -> None:

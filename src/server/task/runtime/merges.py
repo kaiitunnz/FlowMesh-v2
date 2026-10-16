@@ -270,7 +270,7 @@ class TaskMerges:
         self._content_bindings.bind_result_locked(child_record, reference, None)
         child_record.error = None
         child_record.finished_ts = finished_ts
-        child_record.succeeded_monotonic = time.monotonic()
+        child_record.internal.runtime.succeeded_monotonic = time.monotonic()
         if started_ts is not None and child_record.started_ts is None:
             child_record.started_ts = started_ts
         if worker_id:

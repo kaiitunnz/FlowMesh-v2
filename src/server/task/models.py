@@ -201,6 +201,142 @@ def source_digest(source: str) -> str:
     return hashlib.sha256(source.encode()).hexdigest()
 
 
+class TaskRecordRuntimeState(BaseModel):
+    """A task's bookkeeping this process alone holds, rebuilt rather than stored."""
+
+    no_eligible_since: float | None = Field(
+        default=None,
+        description="Epoch seconds when no eligible worker was first observed.",
+    )
+    no_dispatch_since: float | None = Field(
+        default=None,
+        description="Epoch seconds when a selected worker was first found "
+        "undeliverable.",
+    )
+    artifacts: dict[tuple[str, str], ArtifactBinding] = Field(
+        default_factory=dict,
+        description="The task's published artifacts by revision and name, loaded "
+        "from the catalog stored beside its record.",
+    )
+    dispatched_objects: tuple[frozenset[tuple[str, str, str]], ...] = Field(
+        default=(),
+        description="Identities of every object the dispatched artifacts hold.",
+    )
+    avoided_worker: str | None = Field(
+        default=None,
+        description="Worker that could not reach an input; placement passes it over.",
+    )
+    succeeded_monotonic: float | None = Field(
+        default=None,
+        description="The control plane's monotonic time when the task's success "
+        "committed.",
+    )
+    members_pending: bool = Field(
+        default=False,
+        description="Whether a restored dispatch's tree members are still being read.",
+    )
+    unwritten_artifacts: list[ArtifactBinding] = Field(
+        default_factory=list,
+        description="Accepted artifacts the task's next record write adds to its "
+        "catalog.",
+    )
+
+
+class TaskInternalState(BaseModel):
+    """A task's server-internal bookkeeping, stored with its record and served by no
+    API."""
+
+    dispatch_id: str | None = Field(
+        default=None, description="Dispatch holding the task."
+    )
+    first_started_ts: float | None = Field(
+        default=None,
+        description="First start timestamp across re-runs (epoch seconds).",
+    )
+    failed_workers: list[str] = Field(
+        default_factory=list,
+        description="Distinct workers that have failed this task.",
+    )
+    merged_dispatch_worker: str | None = Field(
+        default=None,
+        description="Worker the task's last merged dispatch went to.",
+    )
+    latest_update_dispatch_id: str | None = Field(
+        default=None,
+        description="Dispatch whose report set the latest update.",
+    )
+    result_reference: ContentReference | None = Field(
+        default=None,
+        description="The stored result envelope this task's success is bound to; "
+        "set once, at success.",
+    )
+    result_skip: dict[str, Any] | None = Field(
+        default=None,
+        description="Why a conditional task settled without running, when it did.",
+    )
+    has_artifacts: bool = Field(
+        default=False,
+        description="Whether the task has published an artifact.",
+    )
+    dispatched_artifacts: tuple[ArtifactBinding, ...] = Field(
+        default=(),
+        description="Published artifacts the task's current dispatch names by token.",
+    )
+    dispatched_producers: tuple[str, ...] = Field(
+        default=(),
+        description="Upstream tasks whose final sets the task's current dispatch "
+        "carries.",
+    )
+    artifact_upload: ArtifactUpload | None = Field(
+        default=None,
+        description="The upload of the final artifacts its success accepted.",
+    )
+    early_upload_receipt: EarlyUploadReceipt | None = Field(
+        default=None,
+        description="An upload report that arrived ahead of its success.",
+    )
+    credential_refs: dict[str, str] | None = Field(
+        default=None,
+        description="The vault ref of each inline credential masked in the spec, by "
+        "its pointer; None on a record stored before its credentials were vaulted.",
+    )
+    runtime: TaskRecordRuntimeState = Field(
+        default_factory=TaskRecordRuntimeState,
+        description="What the task's record holds only in this process.",
+        exclude=True,
+    )
+
+    @field_validator("dispatched_artifacts", mode="before")
+    @classmethod
+    def _drop_unreadable_dispatched_artifacts(cls, value: Any) -> Any:
+        if not isinstance(value, (list, tuple)):
+            return ()
+        kept = []
+        for item in value:
+            try:
+                kept.append(ArtifactBinding.model_validate(item))
+            except ValidationError:
+                _logger.warning("Dropping a dispatched artifact that no longer reads")
+        return tuple(kept)
+
+    def detached(self) -> Self:
+        """Return a copy whose containers are its own, sharing their members."""
+        return self.model_copy(
+            update={
+                **_copied_containers(self),
+                "runtime": self.runtime.model_copy(
+                    update=_copied_containers(self.runtime)
+                ),
+            }
+        )
+
+
+def _copied_containers(model: BaseModel) -> dict[str, Any]:
+    return {
+        name: value.copy() for name, value in model if isinstance(value, (list, dict))
+    }
+
+
 class TaskRecord(BaseModel):
     # The digest of the workflow source, with the source text it was taken of: a
     # plain slot, so it is no part of the record's value, and carried by a copy.
@@ -229,9 +365,6 @@ class TaskRecord(BaseModel):
     assigned_worker: str | None = Field(
         default=None, description="Assigned worker identifier."
     )
-    dispatch_id: str | None = Field(
-        default=None, description="Dispatch holding the task.", exclude=True
-    )
     topic: str | None = Field(default=None, description="Dispatch topic.")
     submitted_at: str = Field(
         default_factory=now_iso, description="Submission timestamp."
@@ -248,11 +381,6 @@ class TaskRecord(BaseModel):
     started_ts: float | None = Field(
         default=None, description="Start timestamp (epoch seconds)."
     )
-    first_started_ts: float | None = Field(
-        default=None,
-        description="First start timestamp across re-runs (epoch seconds).",
-        exclude=True,
-    )
     finished_ts: float | None = Field(
         default=None, description="Finish timestamp (epoch seconds)."
     )
@@ -268,24 +396,8 @@ class TaskRecord(BaseModel):
     shard_index: int | None = Field(default=None, description="Shard index.")
     shard_total: int | None = Field(default=None, description="Total shard count.")
     next_retry_at: str | None = Field(default=None, description="Next retry timestamp.")
-    failed_workers: list[str] = Field(
-        default_factory=list,
-        description="Distinct workers that have failed this task.",
-        exclude=True,
-    )
     last_error: str | None = Field(
         default=None, description="Most recent executor error message."
-    )
-    no_eligible_since: float | None = Field(
-        default=None,
-        description="Epoch seconds when no eligible worker was first observed.",
-        exclude=True,
-    )
-    no_dispatch_since: float | None = Field(
-        default=None,
-        description="Epoch seconds when a selected worker was first found "
-        "undeliverable.",
-        exclude=True,
     )
     local_name: str | None = Field(default=None, description="Workflow stage name.")
     graph_node_name: str | None = Field(default=None, description="Graph node name.")
@@ -302,11 +414,6 @@ class TaskRecord(BaseModel):
     merged_parent_id: str | None = Field(
         default=None, description="Merged parent task identifier."
     )
-    merged_dispatch_worker: str | None = Field(
-        default=None,
-        description="Worker the task's last merged dispatch went to.",
-        exclude=True,
-    )
     merge_slice: dict[str, int] | None = Field(
         default=None, description="Merge slice information."
     )
@@ -314,114 +421,26 @@ class TaskRecord(BaseModel):
     latest_update: dict[str, Any] | None = Field(
         default=None, description="Latest mid-task update payload."
     )
-    latest_update_dispatch_id: str | None = Field(
-        default=None,
-        description="Dispatch whose report set the latest update.",
-        exclude=True,
-    )
-    result_reference: ContentReference | None = Field(
-        default=None,
-        description="The stored result envelope this task's success is bound to; "
-        "set once, at success.",
-        exclude=True,
-    )
-    result_skip: dict[str, Any] | None = Field(
-        default=None,
-        description="Why a conditional task settled without running, when it did.",
-        exclude=True,
-    )
-    has_artifacts: bool = Field(
-        default=False,
-        description="Whether the task has published an artifact.",
-        exclude=True,
-    )
-    artifacts: dict[tuple[str, str], ArtifactBinding] = Field(
-        default_factory=dict,
-        description="The task's published artifacts by revision and name.",
-        exclude=True,
-    )
-    dispatched_artifacts: tuple[ArtifactBinding, ...] = Field(
-        default=(),
-        description="Published artifacts the task's current dispatch names by token.",
-        exclude=True,
-    )
-    dispatched_producers: tuple[str, ...] = Field(
-        default=(),
-        description="Upstream tasks whose final sets the task's current dispatch "
-        "carries.",
-        exclude=True,
-    )
-    dispatched_objects: tuple[frozenset[tuple[str, str, str]], ...] = Field(
-        default=(),
-        description="Identities of every object the dispatched artifacts hold.",
-        exclude=True,
-    )
-    avoided_worker: str | None = Field(
-        default=None,
-        description="Worker that could not reach an input; placement passes it over.",
-        exclude=True,
-    )
-    succeeded_monotonic: float | None = Field(
-        default=None,
-        description="The control plane's monotonic time when the task's success "
-        "committed.",
-        exclude=True,
-    )
-    members_pending: bool = Field(
-        default=False,
-        description="Whether a restored dispatch's tree members are still being read.",
-        exclude=True,
-    )
-    artifact_upload: ArtifactUpload | None = Field(
-        default=None,
-        description="The upload of the final artifacts its success accepted.",
-        exclude=True,
-    )
-    early_upload_receipt: EarlyUploadReceipt | None = Field(
-        default=None,
-        description="An upload report that arrived ahead of its success.",
-        exclude=True,
-    )
-    unwritten_artifacts: list[ArtifactBinding] = Field(
-        default_factory=list,
-        description="Accepted artifacts the task's next record write adds to its "
-        "catalog.",
-        exclude=True,
-    )
-    credential_refs: dict[str, str] | None = Field(
-        default=None,
-        description="The vault ref of each inline credential masked in the spec, by "
-        "its pointer; None on a record stored before its credentials were vaulted.",
-        exclude=True,
-    )
     pending_facade_group: FacadeTurnGroup | None = Field(
         default=None,
         description="A turn-scoped facade group the gateway captured for this agent "
         "episode, durable so a restart-replayed completion still routes its whole "
         "ordered membership.",
     )
-
-    @field_validator("dispatched_artifacts", mode="before")
-    @classmethod
-    def _drop_unreadable_dispatched_artifacts(cls, value: Any) -> Any:
-        if not isinstance(value, (list, tuple)):
-            return ()
-        kept = []
-        for item in value:
-            try:
-                kept.append(ArtifactBinding.model_validate(item))
-            except ValidationError:
-                _logger.warning("Dropping a dispatched artifact that no longer reads")
-        return tuple(kept)
+    internal: TaskInternalState = Field(
+        default_factory=TaskInternalState,
+        description="Server-internal bookkeeping.",
+        exclude=True,
+    )
 
     @model_validator(mode="after")
     def _drop_unheld_credential_refs(self) -> Self:
         # A ref into a field the spec does not hold has nowhere to be restored at
         # dispatch.
-        if self.credential_refs:
-            self.credential_refs = {
+        if refs := self.internal.credential_refs:
+            self.internal.credential_refs = {
                 pointer: ref
-                for pointer, ref in self.credential_refs.items()
+                for pointer, ref in refs.items()
                 if holds_pointer(self.task.spec, pointer)
             }
         return self
@@ -430,7 +449,8 @@ class TaskRecord(BaseModel):
     @property
     def last_failed_worker(self) -> str | None:
         """The most recent worker to have failed this task."""
-        return self.failed_workers[-1] if self.failed_workers else None
+        failed = self.internal.failed_workers
+        return failed[-1] if failed else None
 
     def source_digest(self) -> str:
         """Return the digest the record's workflow source is stored under."""
@@ -446,6 +466,8 @@ class TaskRecord(BaseModel):
 
     def __copy__(self) -> Self:
         copied = super().__copy__()
+        # A copy's bookkeeping is its own, as it would be were the fields flat.
+        copied.__dict__["internal"] = self.internal.detached()
         if (cached := getattr(self, "_source_digest", None)) is not None:
             object.__setattr__(copied, "_source_digest", cached)
         return copied

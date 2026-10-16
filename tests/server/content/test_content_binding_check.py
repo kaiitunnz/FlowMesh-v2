@@ -13,7 +13,7 @@ from server.orchestration.state import (
     PublicationOutcome,
     ValueRef,
 )
-from server.task.models import TaskStatus
+from server.task.models import TaskInternalState, TaskStatus
 from server.task.results import ResultUnavailable
 from server.task.runtime import TaskRuntime
 from server.task.runtime.content_bindings import ContentBindings
@@ -98,14 +98,13 @@ def _record(task_id: str, status: str, **fields: Any) -> Any:
     return SimpleNamespace(
         task_id=task_id,
         assigned_worker=fields.pop("assigned", None),
-        dispatch_id=None,
         status=status,
         workflow_id=fields.pop("workflow_id", "wfl-1"),
         org_id="local",
         merged_children=fields.pop("merged_children", None),
-        result_skip=None,
-        dispatched_artifacts=(),
-        dispatched_objects=(),
+        internal=TaskInternalState(
+            result_reference=fields.pop("result_reference", None)
+        ),
         **fields,
     )
 

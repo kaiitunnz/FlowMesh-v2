@@ -122,7 +122,7 @@ async def test_an_ordinary_retryable_failure_still_spends_an_attempt() -> None:
 
     record = runtime._tasks[task_id]
     assert record.attempts == 1
-    assert record.failed_workers == ["wkr-1"]
+    assert record.internal.failed_workers == ["wkr-1"]
 
 
 @pytest.mark.anyio
@@ -134,7 +134,7 @@ async def test_a_report_from_another_dispatch_changes_nothing() -> None:
 
     record = runtime._tasks[task_id]
     assert record.status == TaskStatus.DISPATCHED
-    assert record.dispatch_id == "dsp-1"
+    assert record.internal.dispatch_id == "dsp-1"
 
 
 @pytest.mark.anyio
@@ -330,11 +330,11 @@ async def test_an_unreachable_artifact_member_is_held_like_any_input() -> None:
     record = runtime._tasks[task_id]
     assert record.status == TaskStatus.PENDING
     assert record.attempts == 0
-    assert record.failed_workers == []
+    assert record.internal.failed_workers == []
     fixture.scheduler.run_due()
     assert fixture.probe.reads == []
     assert fixture.stored.reads == [member]
-    assert record.avoided_worker == "wkr-1"
+    assert record.internal.runtime.avoided_worker == "wkr-1"
 
 
 @pytest.mark.anyio
@@ -365,7 +365,7 @@ async def test_input_control_reads_fine_runs_again_blaming_no_worker() -> None:
     record = runtime._tasks[task_id]
     assert record.status == TaskStatus.PENDING
     assert record.attempts == 0
-    assert record.failed_workers == []
+    assert record.internal.failed_workers == []
     assert task_id not in runtime._inputs.input_checks
     assert runtime.held_back(task_id) and fixture.ready() is None
     assert fixture.ready_once_paced() == task_id
@@ -385,7 +385,7 @@ async def test_input_missing_at_control_fails_the_task_as_a_reported_failure() -
     assert record.status == TaskStatus.FAILED
     assert (record.error or "").startswith("input_unreadable:")
     assert record.attempts == 0
-    assert record.failed_workers == []
+    assert record.internal.failed_workers == []
     fixture.scheduler.run_due()
     assert task_id not in runtime._inputs.input_checks
     dependent = next(
@@ -459,7 +459,7 @@ async def test_a_store_control_cannot_reach_either_holds_the_task() -> None:
     fixture.scheduler.run_due()
 
     record = runtime._tasks[task_id]
-    assert record.failed_workers == []
+    assert record.internal.failed_workers == []
     assert record.attempts == 0
     assert fixture.ready_once_paced() == task_id
 
@@ -528,7 +528,7 @@ async def test_a_report_naming_inputs_the_task_does_not_consume_is_charged() -> 
     assert fixture.probe.reads == []
     assert task_id not in runtime._inputs.input_checks
     assert record.attempts == 1
-    assert record.failed_workers == ["wkr-1"]
+    assert record.internal.failed_workers == ["wkr-1"]
 
 
 @pytest.mark.anyio
@@ -791,7 +791,7 @@ async def test_an_input_whose_upload_was_lost_fails_its_reader_as_lost() -> None
     runtime._reconciler.check(producer)
     fixture.scheduler.run_due()
 
-    upload = runtime._tasks[producer].artifact_upload
+    upload = runtime._tasks[producer].internal.artifact_upload
     assert upload is not None and upload.lost
     assert runtime._tasks[producer].status == TaskStatus.DONE
     record = runtime._tasks[task_id]
@@ -807,7 +807,7 @@ async def test_a_reader_of_an_upload_lost_before_it_read_fails_as_lost() -> None
     fixture.stored.error = ResultUnreadable("no content")
     runtime.artifact_owner_lost("wkr-0")
     runtime._reconciler.check(producer)
-    upload = runtime._tasks[producer].artifact_upload
+    upload = runtime._tasks[producer].internal.artifact_upload
     assert upload is not None and upload.lost
 
     fixture.report(_unavailable(task_id, [member]))
@@ -843,7 +843,7 @@ async def test_a_waiting_reader_is_placed_again_when_its_producer_is_heard_again
         runtime.artifact_owner_heard("wkr-0", 30)
 
     assert task_id not in runtime._inputs.input_checks
-    assert runtime._tasks[task_id].avoided_worker is None
+    assert runtime._tasks[task_id].internal.runtime.avoided_worker is None
     assert [call.args[1] for call in writes.call_args_list] == [()]
     paced = later + INPUT_RECHECK_PACE_SEC
     with mock.patch.object(scheduling.time, "monotonic", return_value=paced):

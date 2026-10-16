@@ -252,7 +252,10 @@ def test_a_held_failure_is_torn_down_once_and_never_on_the_next_dispatch() -> No
     assert _consume(monitor, failure) == _ENTRY
     record = runtime.get_record(task_id)
     assert record is not None
-    assert (record.status, record.dispatch_id) == (TaskStatus.DISPATCHED, "dsp-2")
+    assert (record.status, record.internal.dispatch_id) == (
+        TaskStatus.DISPATCHED,
+        "dsp-2",
+    )
     forward.unregister_task.assert_not_called()
 
 

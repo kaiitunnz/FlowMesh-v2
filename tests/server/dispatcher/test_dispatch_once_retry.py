@@ -48,7 +48,7 @@ def _setup(
     task_id = results[0].task_id
     record = runtime.get_record(task_id)
     assert record is not None
-    record.failed_workers = list(failed or [])
+    record.internal.failed_workers = list(failed or [])
 
     disp = make_capturing_dispatcher(
         runtime=runtime, idle_ids=idle_ids, satisfying_ids=satisfying_ids
@@ -74,7 +74,7 @@ def test_exhausted_requeues_within_grace() -> None:
     with mock.patch("server.dispatcher.base.time.time", return_value=1000.0):
         disp.dispatch_once(tid)
     record = disp._runtime.get_record(tid)
-    assert record is not None and record.no_eligible_since == 1000.0
+    assert record is not None and record.internal.runtime.no_eligible_since == 1000.0
     assert disp.failed == []
     assert len(disp.requeued) == 1
     assert disp.requeued[0][1]["reason"] == "eligible_workers_exhausted"
@@ -87,7 +87,7 @@ def test_all_eligible_failed_but_busy_grace_then_fails() -> None:
     with mock.patch("server.dispatcher.base.time.time", return_value=1000.0):
         disp.dispatch_once(tid)
     record = disp._runtime.get_record(tid)
-    assert record is not None and record.no_eligible_since == 1000.0
+    assert record is not None and record.internal.runtime.no_eligible_since == 1000.0
     assert disp.failed == []
     assert len(disp.requeued) == 1
     assert disp.requeued[0][1]["reason"] == "eligible_workers_exhausted"
@@ -98,7 +98,7 @@ def test_exhausted_fails_after_grace() -> None:
     record = disp._runtime.get_record(tid)
     assert record is not None
     record.last_error = "boom"
-    record.no_eligible_since = 1000.0
+    record.internal.runtime.no_eligible_since = 1000.0
     with mock.patch("server.dispatcher.base.time.time", return_value=1100.0):
         disp.dispatch_once(tid)
     assert disp.requeued == []
@@ -114,7 +114,7 @@ def test_zero_eligible_enters_grace_then_waits() -> None:
     with mock.patch("server.dispatcher.base.time.time", return_value=1000.0):
         disp.dispatch_once(tid)
     record = disp._runtime.get_record(tid)
-    assert record is not None and record.no_eligible_since == 1000.0
+    assert record is not None and record.internal.runtime.no_eligible_since == 1000.0
     assert disp.failed == []
     assert len(disp.requeued) == 1
     assert disp.requeued[0][1]["reason"] == "no_eligible_worker"

@@ -868,7 +868,7 @@ def test_a_replayed_step_leaves_the_next_step_on_the_same_holder() -> None:
 
         record = runtime._tasks[writer]
         assert record.status == TaskStatus.DISPATCHED
-        assert record.dispatch_id == "dsp-2"
+        assert record.internal.dispatch_id == "dsp-2"
         assert writer not in runtime._ready.ready_index
         assert len(engine.to_snapshot().work_items) == children
 
@@ -979,7 +979,7 @@ def test_an_agent_suspended_on_a_boundary_resumes_after_a_restart() -> None:
         # A suspended dispatch has started, so it never reads as disowned.
         suspended = restored.get_record(writer)
         assert suspended is not None and suspended.assigned_worker is not None
-        suspended.dispatch_id = "dsp-1"
+        suspended.internal.dispatch_id = "dsp-1"
         assert (
             restored.resolve_disowned_dispatch(
                 writer, "dsp-1", suspended.assigned_worker, 0

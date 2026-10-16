@@ -445,16 +445,16 @@ def test_a_page_is_unaffected_by_appends_after_its_lock_pass(
     runtime = _live_runtime(FakeRegistry())
     _, tasks = asyncio.run(_register(runtime, _workflow(0, stages=1)))
     record = runtime._tasks[tasks[0]]
-    record.failed_workers.append("wkr-before")
+    record.internal.failed_workers.append("wkr-before")
 
     class _AppendingFirst(TaskInfo):
         def __init__(self, **data: Any) -> None:
             # Another thread appends to the live record once the lock is released.
-            record.failed_workers.append("wkr-after")
+            record.internal.failed_workers.append("wkr-after")
             super().__init__(**data)
 
     monkeypatch.setattr(runtime_module, "TaskInfo", _AppendingFirst)
 
     [info] = runtime.task_page(QueryFilter(), 10)
 
-    assert info.failed_workers == ["wkr-before"]
+    assert info.internal.failed_workers == ["wkr-before"]

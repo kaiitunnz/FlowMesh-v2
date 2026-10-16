@@ -51,11 +51,11 @@ class WorkerReservations:
     def seed_held_dispatches_locked(self) -> None:
         """Reserve the worker of each restored dispatch that still holds its task."""
         self.held_dispatches.update(
-            (record.task_id, (record.assigned_worker, record.dispatch_id))
+            (record.task_id, (record.assigned_worker, record.internal.dispatch_id))
             for record in self._tasks.values()
             if membership(record) == TaskStatus.DISPATCHED
             and record.assigned_worker is not None
-            and record.dispatch_id is not None
+            and record.internal.dispatch_id is not None
             and not self._episode_dispatch.dispatch_ended_at_suspension_locked(record)
         )
 
@@ -74,7 +74,7 @@ class WorkerReservations:
             if held is None or (
                 record is not None
                 and membership(record) == TaskStatus.DISPATCHED
-                and record.dispatch_id == held[1]
+                and record.internal.dispatch_id == held[1]
                 and not self._episode_dispatch.dispatch_ended_at_suspension_locked(
                     record
                 )

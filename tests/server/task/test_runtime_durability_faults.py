@@ -136,7 +136,7 @@ class _Observer:
         record = self.registry.record(task_id)
         return record is not None and (
             record.status in (*TERMINAL_TASK_STATUSES, TaskStatus.CANCELLING)
-            or record.dispatch_id != dispatch_id
+            or record.internal.dispatch_id != dispatch_id
         )
 
     def check(self, action: AfterCommit) -> None:
@@ -162,7 +162,10 @@ class _Observer:
                 ok = all(r is not None and r.status in done for r in records)
             case AuthorizeTurn(proposal=proposal):
                 record = self.registry.record(proposal.agent_task_id)
-                ok = record is not None and record.dispatch_id == proposal.dispatch_id
+                ok = (
+                    record is not None
+                    and record.internal.dispatch_id == proposal.dispatch_id
+                )
             case Settled():
                 ok = True
         if not ok:
