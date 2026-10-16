@@ -11,7 +11,12 @@ import pytest
 from shared.content import ContentReference, ContentUnavailable, reference_for
 from shared.tasks.artifact_upload import UploadDisposition, UploadReport, UploadSettled
 from worker.content.custody import ArtifactCustody, UploadJournal
-from worker.content.uploads import EVIDENCE_RESEND_SEC, RESEND_SEC, ArtifactUploader
+from worker.content.uploads import (
+    EVIDENCE_RESEND_SEC,
+    EVIDENCE_SCAN_SEC,
+    RESEND_SEC,
+    ArtifactUploader,
+)
 
 
 class _Clock:
@@ -439,7 +444,7 @@ def test_a_member_that_fails_unexpectedly_holds_up_none_of_its_dispatch(
     assert ports.reports[0][:3] == ("tsk-2", "dsp-1", UploadReport.UPLOADED)
 
 
-def test_another_workers_custody_is_kept_until_its_success_and_tasks_settle(
+def test_another_workers_custody_is_kept_while_a_task_it_names_is_unanswered(
     tmp_path,
 ) -> None:
     root = tmp_path / "content"
@@ -450,15 +455,39 @@ def test_another_workers_custody_is_kept_until_its_success_and_tasks_settle(
     mine.start()
     ports.wait(lambda: ports.reports)
 
-    mine.settle(_settled(UploadDisposition.REJECTED))
-    assert list(ArtifactCustody(root).journals())
     _stage(owner, tmp_path, {"b.bin": b"beta"}, task_id="tsk-2", journal=journal)
     mine.settle(_settled(UploadDisposition.REJECTED))
     assert list(ArtifactCustody(root).journals())
 
-    mine.settle(_settled(UploadDisposition.DURABLE, task_id="tsk-2"))
+    mine.settle(_settled(UploadDisposition.REJECTED, task_id="tsk-2"))
     assert list(ArtifactCustody(root).journals()) == []
     mine.stop(0.5)
+
+
+def test_a_crashed_peers_unreported_custody_is_released_once_control_rejects_it(
+    tmp_path,
+) -> None:
+    root = tmp_path / "content"
+    _stage(
+        _uploader(root, _Ports(), alias="w2", worker_id="wkr-2"),
+        tmp_path,
+        {"a.bin": b"alpha"},
+        submit=False,
+    )
+    ports = _Ports()
+    clock = _Clock()
+    mine = _uploader(root, ports, clock)
+    mine.start()
+    ports.wait(lambda: ports.reports)
+
+    mine.settle(_settled(UploadDisposition.REJECTED))
+    _nudge(mine, clock, EVIDENCE_SCAN_SEC + 1)
+    time.sleep(0.2)
+    mine.stop(0.5)
+
+    assert list(ArtifactCustody(root).journals()) == []
+    assert mine._publications == {}
+    assert len(ports.reports) == 1
 
 
 def test_an_earlier_registrations_custody_is_reported_and_never_uploaded(

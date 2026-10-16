@@ -59,6 +59,8 @@ class _Publication:
     backoff: float = _RETRY_MIN_SEC
     # When each unanswered report is next due, by task; the success under "".
     due: dict[str, float] = field(default_factory=dict)
+    # The tasks control rejected this dispatch's upload of.
+    rejected: set[str] = field(default_factory=set)
 
     @classmethod
     def of(cls, journal: UploadJournal, owned: bool) -> "_Publication":
@@ -217,8 +219,13 @@ class ArtifactUploader:
                 self._cv.notify_all()
                 return
             task.settled = True
+            if settled.disposition is UploadDisposition.REJECTED:
+                publication.rejected.add(task.task_id)
             publication.due.pop(task.task_id, None)
-            if not publication.owned and not self._caught_up(publication):
+            if not publication.owned and not self._releasable(publication):
+                if not journal.owes():
+                    # Its journal is read afresh at the next scan.
+                    del self._publications[settled.dispatch_id]
                 return
             if journal.owes():
                 if publication.owned:
@@ -228,15 +235,26 @@ class ArtifactUploader:
             self._cv.notify_all()
         self._custody.release(journal.scope, journal.dispatch_id)
 
-    def _caught_up(self, publication: _Publication) -> bool:
+    def _releasable(self, publication: _Publication) -> bool:
+        """Return whether a settled answer may end another registration's custody: its
+        success was reported, or it never was and control rejected every task its
+        journal names. Control rejects a task's upload only once the task is settled
+        or queued again, so no success of that dispatch is accepted after."""
+        reported = self._caught_up(publication)
+        if reported is None:
+            return False
+        tasks = publication.journal.tasks
+        return reported or publication.rejected.issuperset(tasks)
+
+    def _caught_up(self, publication: _Publication) -> bool | None:
         """Take up the tasks another registration's journal gained since it was read,
-        and return whether its success was reported, so a settled answer may end its
-        custody."""
+        and return whether its success was reported, or None when the journal cannot
+        be read."""
         journal = publication.journal
         try:
             current = self._custody.journal(journal.scope, journal.dispatch_id)
         except (OSError, ValidationError):
-            return False
+            return None
         if current is None:
             return True
         journal.task_id = current.task_id
