@@ -329,15 +329,15 @@ class TaskInternalState(BaseModel):
         """Return a copy whose containers are its own, sharing their members."""
         return self.model_copy(
             update={
-                **copied_containers(self),
+                **_copied_containers(self),
                 "runtime": self.runtime.model_copy(
-                    update=copied_containers(self.runtime)
+                    update=_copied_containers(self.runtime)
                 ),
             }
         )
 
 
-def copied_containers(model: BaseModel) -> dict[str, Any]:
+def _copied_containers(model: BaseModel) -> dict[str, Any]:
     """Return a copy of each of ``model``'s list and dict fields, by name."""
     return {
         name: value.copy() for name, value in model if isinstance(value, (list, dict))
@@ -471,9 +471,18 @@ class TaskRecord(BaseModel):
         """Take ``digest`` as the digest of the record's workflow source."""
         object.__setattr__(self, "_source_digest", (self.raw_yaml, digest))
 
+    def detached(self) -> Self:
+        """Return a copy whose containers and internal state are its own, sharing
+        their members."""
+        copied = self.model_copy(update=_copied_containers(self))
+        copied.internal = self.internal.detached()
+        return copied
+
     def __copy__(self) -> Self:
         copied = super().__copy__()
-        copied.internal = self.internal.detached()
+        copied.internal = self.internal.model_copy(
+            update={"runtime": self.internal.runtime.model_copy()}
+        )
         if (cached := getattr(self, "_source_digest", None)) is not None:
             object.__setattr__(copied, "_source_digest", cached)
         return copied

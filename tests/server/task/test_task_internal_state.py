@@ -1,9 +1,13 @@
 """A task record's internal state: stored as one unit, served by no API, and owned by
 each copy of the record."""
 
+import copy
 import hashlib
 import json
+from types import SimpleNamespace
 from typing import Any
+
+import pytest
 
 from server.registries.task_states import PersistedTask, load_task_state
 from server.task.models import (
@@ -13,8 +17,10 @@ from server.task.models import (
     TaskRecordRuntimeState,
     TaskStatus,
 )
+from server.task.runtime import TaskRuntime
 from shared.content import ContentReference
 from shared.tasks.artifact_binding import ArtifactBinding, ArtifactKind
+from tests.server.task.test_v2_orchestration import FakeRegistry, _live_runtime
 
 
 def _ref(data: bytes) -> ContentReference:
@@ -34,7 +40,7 @@ def _file() -> ArtifactBinding:
     )
 
 
-def _record(status: str = TaskStatus.DISPATCHED, **internal: object) -> TaskRecord:
+def _record(status: str = TaskStatus.DISPATCHED, **internal: Any) -> TaskRecord:
     return TaskRecord.model_validate(
         {
             "task_id": "tsk-1",
@@ -59,9 +65,9 @@ def _round_trip(record: TaskRecord) -> TaskRecord:
     ).record
 
 
-def _stored_internal(record: TaskRecord) -> dict[str, object]:
+def _stored_internal(record: TaskRecord) -> dict[str, Any]:
     stored = json.loads(PersistedTask(record=record).model_dump_json())
-    internal: dict[str, object] = stored["record"]["internal"]
+    internal: dict[str, Any] = stored["record"]["internal"]
     return internal
 
 
@@ -139,17 +145,114 @@ def test_the_internal_state_is_served_by_no_api() -> None:
     assert info.model_dump()["last_failed_worker"] == "wkr-1"
 
 
-def test_a_copy_of_a_record_owns_its_internal_state() -> None:
-    record = _record(failed_workers=["wkr-1"])
-    record.internal.runtime.unwritten_artifacts.append(_file())
+def test_a_copy_of_a_record_owns_its_internal_state_and_runtime_state() -> None:
+    record = _record(dispatch_id="dsp-1")
+    record.internal.runtime.avoided_worker = "wkr-1"
 
-    copied = record.model_copy(update={"task_id": "tsk-2"})
-    copied.internal.failed_workers.append("wkr-2")
-    copied.internal.runtime.unwritten_artifacts.clear()
+    copied = copy.copy(record)
     copied.internal.dispatch_id = "dsp-2"
-    record.internal.failed_workers.append("wkr-3")
+    copied.internal.runtime.avoided_worker = "wkr-2"
+    record.internal.first_started_ts = 1.0
 
-    assert record.internal.failed_workers == ["wkr-1", "wkr-3"]
-    assert record.internal.runtime.unwritten_artifacts == [_file()]
-    assert record.internal.dispatch_id is None
-    assert copied.internal.failed_workers == ["wkr-1", "wkr-2"]
+    assert (record.internal.dispatch_id, copied.internal.dispatch_id) == (
+        "dsp-1",
+        "dsp-2",
+    )
+    assert record.internal.runtime.avoided_worker == "wkr-1"
+    assert copied.internal.runtime.avoided_worker == "wkr-2"
+    assert copied.internal.first_started_ts is None
+
+
+def _mutate(record: TaskRecord, worker: str) -> None:
+    assert record.selected_worker is not None
+    record.selected_worker.append(worker)
+    record.internal.failed_workers.append(worker)
+    record.internal.runtime.unwritten_artifacts.append(_file())
+    record.internal.dispatch_id = worker
+
+
+def _assert_unmutated(record: TaskRecord) -> None:
+    assert record.selected_worker == ["wkr-0"]
+    assert record.internal.failed_workers == ["wkr-0"]
+    assert record.internal.runtime.unwritten_artifacts == []
+    assert record.internal.dispatch_id == "dsp-1"
+
+
+def _source() -> TaskRecord:
+    source = _record(dispatch_id="dsp-1", failed_workers=["wkr-0"])
+    source.selected_worker = ["wkr-0"]
+    return source
+
+
+def test_a_detached_record_owns_its_containers_both_ways() -> None:
+    record = _source()
+
+    detached = record.detached()
+    _mutate(detached, "wkr-1")
+    _assert_unmutated(record)
+
+    detached = record.detached()
+    _mutate(record, "wkr-2")
+    _assert_unmutated(detached)
+
+
+def _runtime_holding(record: TaskRecord) -> TaskRuntime:
+    runtime = _live_runtime(FakeRegistry())
+    runtime._tasks[record.task_id] = record
+    return runtime
+
+
+def test_a_task_record_snapshot_is_detached_both_ways() -> None:
+    record = _source()
+    runtime = _runtime_holding(record)
+
+    [snapshot] = runtime.task_records()
+    _mutate(snapshot, "wkr-1")
+    _assert_unmutated(record)
+
+    [snapshot] = runtime.task_records()
+    _mutate(record, "wkr-2")
+    _assert_unmutated(snapshot)
+
+
+def test_a_live_task_info_is_detached_both_ways() -> None:
+    record = _source()
+    runtime = _runtime_holding(record)
+
+    info = runtime.describe_task(record.task_id)
+    assert info is not None
+    _mutate(info, "wkr-1")
+    _assert_unmutated(record)
+
+    info = runtime.describe_task(record.task_id)
+    assert info is not None
+    _mutate(record, "wkr-2")
+    _assert_unmutated(info)
+
+
+def test_a_stored_task_info_is_detached_both_ways(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record = _source()
+    runtime = _live_runtime(FakeRegistry())
+    history = SimpleNamespace(
+        info_fields=lambda: {
+            "depends_on": [],
+            "pending_dependencies": [],
+            "dependents": [],
+            "completed": False,
+            "failed": False,
+        }
+    )
+    stored = SimpleNamespace(persisted=PersistedTask(record=record), history=history)
+    monkeypatch.setattr(runtime, "_stored_task", lambda _task_id: stored)
+
+    info = runtime.describe_task(record.task_id)
+    assert info is not None
+    _mutate(info, "wkr-1")
+    _assert_unmutated(record)
+
+    info = runtime.describe_task(record.task_id)
+    assert info is not None
+    _mutate(record, "wkr-2")
+    _assert_unmutated(info)

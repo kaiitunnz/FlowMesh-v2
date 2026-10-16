@@ -166,7 +166,6 @@ from ..models import (
     WorkerRecovery,
     WorkflowSettlement,
     categorize_task_type,
-    copied_containers,
     task_order,
 )
 from ..outputs import (
@@ -444,7 +443,9 @@ def _listing_fields(
 
 def _stored_task_info(stored: StoredTask) -> TaskInfo:
     """A freed task's ``TaskInfo``, from its stored record and history."""
-    return TaskInfo(**dict(stored.persisted.record), **stored.history.info_fields())
+    return TaskInfo(
+        **dict(stored.persisted.record.detached()), **stored.history.info_fields()
+    )
 
 
 # How many tasks or output members one hold of the runtime lock reads into a settled
@@ -6890,10 +6891,7 @@ class TaskRuntime:
     def task_records(self) -> list[TaskRecord]:
         """Copy every task record, detached, at one moment under the lock."""
         with self._lock:
-            return [
-                record.model_copy(update=copied_containers(record))
-                for record in self._tasks.values()
-            ]
+            return [record.detached() for record in self._tasks.values()]
 
     def work_item_id(self, task_id: str) -> str | None:
         """Return the id of the ledger work item a v2 task realizes, if it has one."""
@@ -7139,13 +7137,11 @@ class TaskRuntime:
     ) -> dict[str, Any]:
         """Return a task's ``TaskInfo`` fields to build from after the lock is
         released, duplicating the containers a record appends to in place."""
-        internal = record.internal.detached()
+        detached = record.detached()
         # A time on this process's clock alone, which no restart restores.
-        internal.runtime.succeeded_monotonic = None
+        detached.internal.runtime.succeeded_monotonic = None
         return {
-            **dict(record),
-            **copied_containers(record),
-            "internal": internal,
+            **dict(detached),
             **self._derived_locked(task_id, record).info_fields(),
         }
 
