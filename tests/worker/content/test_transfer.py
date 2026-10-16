@@ -72,13 +72,36 @@ async def _read(
         path.unlink()
 
 
+class _DropSignallingCache(WorkerContentCache):
+    """A cache that tells the test's loop when a drop has finished.
+
+    The requester's cancel reaps the holder's transfer while its drop runs in a thread,
+    so nothing the holder awaits marks when the drop lands.
+    """
+
+    def __init__(self, root: Path, announce: Callable[[HoldingReport], None]) -> None:
+        super().__init__(root, announce=announce)
+        self._loop = asyncio.get_running_loop()
+        self._dropped = asyncio.Event()
+
+    def drop(self, reference: ContentReference) -> None:
+        try:
+            super().drop(reference)
+        finally:
+            self._loop.call_soon_threadsafe(self._dropped.set)
+
+    async def dropped(self) -> None:
+        async with asyncio.timeout(5.0):
+            await self._dropped.wait()
+
+
 class _Pair:
     """A holder and a requester wired to each other over in-process sinks."""
 
     def __init__(self, tmp_path, *, holder_generation: int = 1) -> None:
         self.store_root = tmp_path / "held"
         self.reports: list[HoldingReport] = []
-        self.store = WorkerContentCache(self.store_root, announce=self.reports.append)
+        self.store = _DropSignallingCache(self.store_root, self.reports.append)
         self.to_requester = _ToPeer()
         self.to_holder = _ToPeer()
         self.granted: list[ContentReference] = []
@@ -246,6 +269,7 @@ async def test_an_object_the_holder_lost_is_a_typed_failure(tmp_path) -> None:
 
     with pytest.raises(ContentHydrationError, match="unavailable"):
         await hydration
+    await pair.store.dropped()
     # The holder reports the copy gone, so control stops pointing reads at it.
     pair.store.stop_reporting()
     assert pair.reports[-1].dropped == (
@@ -572,6 +596,7 @@ async def test_a_holder_copy_that_is_not_the_object_is_refused_and_dropped(
 
     with pytest.raises(ContentHydrationError):
         await hydration
+    await pair.store.dropped()
     assert not pair.store.holds(reference)
     assert list((tmp_path / "staging").iterdir()) == []
     pair.store.stop_reporting()
