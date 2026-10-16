@@ -51,6 +51,13 @@ _SCOPE = "local"
 _FILES = {"config.json": b"{}", "weights/model.safetensors": b"w" * 100}
 
 
+def _stage(
+    custody: ArtifactCustody, scope: str, dispatch_id: str, source: Path
+) -> ContentReference:
+    with source.open("rb") as opened:
+        return custody.stage(scope, dispatch_id, opened)
+
+
 def _publish_tree(
     store: SharedFilesystemObjectStore, files: dict[str, bytes] = _FILES
 ) -> ArtifactBinding:
@@ -333,7 +340,7 @@ def test_a_copy_another_upload_holds_is_copied_never_linked(tmp_path: Path) -> N
     custody = ArtifactCustody(tmp_path / "cache", keep=lane.cache.keep_staged)
     source = tmp_path / "staged.json"
     source.write_bytes(data)
-    staged = custody.stage(_SCOPE, "dsp-2", source)
+    staged = _stage(custody, _SCOPE, "dsp-2", source)
     held = custody.publication_dir(_SCOPE, "dsp-2") / staged.content_digest
     plane = WorkerContentPlane(cast(Any, lane), cast(Any, _Access(store)))
 

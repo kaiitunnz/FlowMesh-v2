@@ -8,7 +8,7 @@ import time
 import traceback
 from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from pydantic import BaseModel
 
@@ -210,8 +210,10 @@ class _Staging:
         self._journal = journal
 
     def for_task(self, task_id: str) -> StageFile:
-        def stage(path: Path, cancelled: Callable[[], bool] | None) -> ContentReference:
-            return self._uploads.stage(self._journal, task_id, path, cancelled)
+        def stage(
+            source: BinaryIO, cancelled: Callable[[], bool] | None
+        ) -> ContentReference:
+            return self._uploads.stage(self._journal, task_id, source, cancelled)
 
         return stage
 
@@ -1118,7 +1120,7 @@ class Runner:
         """Publish what a task left under its artifacts directory, returning the
         bindings its success reports.
 
-        With ``staging``, each file is copied and hashed into upload custody and
+        With ``staging``, each file is hashed and linked into upload custody and
         uploaded after the success, and only each tree's manifest is in the shared
         store before this returns. Without it, every file is.
         """

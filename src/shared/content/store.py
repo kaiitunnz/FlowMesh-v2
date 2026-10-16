@@ -19,9 +19,10 @@ import hashlib
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
-from typing import Protocol
+from typing import BinaryIO, Protocol
 
 from shared.utils.atomic import write_replacing
+from shared.utils.nofollow import fd_path
 
 from .reference import (
     CONTENT_ENCODING_IDENTITY,
@@ -258,6 +259,20 @@ class FabricObjectStore(ABC):
         the write's steps, and a write it stops leaves nothing in the store.
         """
         return self.write(scope, path.read_bytes(), media_type=media_type)
+
+    def write_completed(
+        self,
+        scope: str,
+        source: BinaryIO,
+        *,
+        media_type: str = OCTET_STREAM,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> ContentReference:
+        """Store the bytes of an opened file no one modifies again, as ``write_file``
+        does; a store that keeps local copies may keep this file itself as one."""
+        return self.write_file(
+            scope, fd_path(source.fileno()), media_type=media_type, cancelled=cancelled
+        )
 
     def open(
         self, reference: ContentReference, *, chunk_bytes: int = STREAM_CHUNK_BYTES

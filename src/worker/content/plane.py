@@ -26,6 +26,7 @@ mints for a peer's copy rests on that task's own binding.
 import logging
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import BinaryIO
 
 from shared.content import (
     OCTET_STREAM,
@@ -42,6 +43,7 @@ from shared.outcome import (
     FinalizationIndexClient,
     FinalizingContentStore,
 )
+from shared.utils.nofollow import fd_path
 
 from .access import ContentAccessDenied, ContentAccessRegistry
 from .lane_host import ContentLaneHost
@@ -171,6 +173,28 @@ class WorkerContentPlane:
         )
         if (lane := self._lane) is not None:
             self._cache(reference, lambda: lane.keep_file(reference, path))
+        return reference
+
+    def write_completed(
+        self,
+        task_id: str,
+        scope: str,
+        source: BinaryIO,
+        *,
+        media_type: str = OCTET_STREAM,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> ContentReference:
+        """Put an opened completed file's bytes in the shared store, then keep the
+        file itself as the cache's copy.
+
+        The cache links the inode the store read through this descriptor, so the bytes
+        are not copied a second time; the file must not be modified after this.
+        """
+        reference = self._store(task_id, scope).write_file(
+            scope, fd_path(source.fileno()), media_type=media_type, cancelled=cancelled
+        )
+        if (lane := self._lane) is not None:
+            self._cache(reference, lambda: lane.keep_completed(reference, source))
         return reference
 
     def upload_file(
@@ -454,6 +478,18 @@ class TaskContentStore(FabricObjectStore):
     ) -> ContentReference:
         return self._plane.write_file(
             self._task_id, scope, path, media_type=media_type, cancelled=cancelled
+        )
+
+    def write_completed(
+        self,
+        scope: str,
+        source: BinaryIO,
+        *,
+        media_type: str = OCTET_STREAM,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> ContentReference:
+        return self._plane.write_completed(
+            self._task_id, scope, source, media_type=media_type, cancelled=cancelled
         )
 
     def open(

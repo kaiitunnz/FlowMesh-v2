@@ -35,7 +35,8 @@ from shared.content import (
     FilesystemObjectBacking,
     verify_content,
 )
-from shared.utils.atomic import temp_path
+from shared.utils.atomic import temp_name, temp_path
+from shared.utils.nofollow import link_opened, open_dir
 
 from .custody import custody_holds, holds_inode
 from .holding import AnnounceHolding, HoldingReporter
@@ -149,7 +150,10 @@ class WorkerContentCache(FabricObjectStore):
 
     def keep_staged(self, reference: ContentReference, held: Path) -> None:
         """Name a file upload custody holds as this object's copy, leaving it in place;
-        a copy already named stays."""
+        a copy already named stays, and a file not the reference's size is not
+        named."""
+        if held.stat().st_size != reference.size_bytes:
+            return
         target = self._objects.object_path(
             reference.authorization_scope, reference.content_digest
         )
@@ -160,6 +164,36 @@ class WorkerContentCache(FabricObjectStore):
             pass
         self._objects.touch(reference.authorization_scope, reference.content_digest)
         self._kept(reference)
+
+    def link_completed(self, reference: ContentReference, source: BinaryIO) -> bool:
+        """Take the file an opened descriptor holds in as the reference's copy by
+        linking its inode, when the descriptor's bytes were just stored as it; a copy
+        already named stays. Returns False when the filesystem cannot link it here.
+
+        A file that is not the size the reference names, or that the descriptor no
+        longer reaches, is not taken in. Its digest is not read again: every read of
+        a copy verifies it.
+        """
+        opened = os.fstat(source.fileno())
+        if opened.st_size != reference.size_bytes:
+            return True
+        staging = self.staging_dir(reference.authorization_scope)
+        name = temp_name()
+        with open_dir(staging) as dir_fd:
+            if not link_opened(source.fileno(), dir_fd, name):
+                return False
+        candidate = staging / name
+        try:
+            linked = candidate.stat()
+            if (linked.st_dev, linked.st_ino, linked.st_size) == (
+                opened.st_dev,
+                opened.st_ino,
+                reference.size_bytes,
+            ):
+                self.adopt(reference, candidate)
+        finally:
+            candidate.unlink(missing_ok=True)
+        return True
 
     def fetch(self, reference: ContentReference) -> bytes:
         data = self._objects.read(

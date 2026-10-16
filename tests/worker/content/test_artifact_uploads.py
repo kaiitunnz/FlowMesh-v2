@@ -113,6 +113,13 @@ def _write(tmp_path: Path, name: str, data: bytes) -> Path:
     return path
 
 
+def _stage_file(
+    uploader: ArtifactUploader, journal: UploadJournal, task_id: str, source: Path
+) -> ContentReference:
+    with source.open("rb") as opened:
+        return uploader.stage(journal, task_id, opened)
+
+
 def _stage(
     uploader: ArtifactUploader,
     tmp_path: Path,
@@ -123,7 +130,7 @@ def _stage(
 ) -> UploadJournal:
     journal = journal or uploader.begin("dsp-1", "org")
     for name, data in files.items():
-        uploader.stage(journal, task_id, _write(tmp_path, name, data))
+        _stage_file(uploader, journal, task_id, _write(tmp_path, name, data))
     if submit:
         uploader.submit(journal, "tsk-1", {"artifacts_pending": True})
     return journal
@@ -432,8 +439,8 @@ def test_a_member_that_fails_unexpectedly_holds_up_none_of_its_dispatch(
     ports.poisoned.add(b"poison")
     uploader = _uploader(tmp_path / "content", ports)
     journal = uploader.begin("dsp-1", "org")
-    uploader.stage(journal, "tsk-1", _write(tmp_path, "a.bin", b"poison"))
-    uploader.stage(journal, "tsk-2", _write(tmp_path, "b.bin", b"fine"))
+    _stage_file(uploader, journal, "tsk-1", _write(tmp_path, "a.bin", b"poison"))
+    _stage_file(uploader, journal, "tsk-2", _write(tmp_path, "b.bin", b"fine"))
     uploader.submit(journal, "tsk-1", {"artifacts_pending": True})
     uploader.start()
 

@@ -353,7 +353,7 @@ def test_a_starting_worker_clears_the_working_dirs_a_crash_left(
 
 
 def _run_staged(
-    tmp_path: Path, store: FabricObjectStore, executor: Executor
+    tmp_path: Path, store: FabricObjectStore, executor: Executor, **message: Any
 ) -> tuple[MagicMock, ArtifactCustody, list[list[UploadJournal]]]:
     custody = ArtifactCustody(tmp_path / "content")
     uploads = ArtifactUploader(
@@ -383,6 +383,7 @@ def _run_staged(
         task_id="tsk-1",
         content_scope="org-a",
         dispatch_id="dsp-1",
+        **message,
     )
     Runner(
         lifecycle=lifecycle,
@@ -415,6 +416,36 @@ def test_a_staged_success_owes_its_upload_before_it_is_reported(
         store.stored_size(member)
     (binding,) = metadata["artifacts"]
     assert store.hydrate(ContentReference.model_validate(binding["reference"]))
+
+
+class _ProducingMerged(_Returning):
+    """Leaves an artifact in its own output and in a merged child's."""
+
+    def run(self, task: Any, out_dir: Path) -> BaseExecutorResult:
+        for task_dir in (out_dir, out_dir.parent / "tsk-c"):
+            (task_dir / "artifacts").mkdir(parents=True, exist_ok=True)
+            (task_dir / "artifacts" / "model").write_bytes(task_dir.name.encode())
+        return self.result
+
+
+def test_a_staged_success_holds_each_output_file_itself_in_custody(
+    tmp_path: Path,
+) -> None:
+    result = BaseExecutorResult()
+    result.children = {"tsk-c": BaseExecutorResult()}
+
+    _, custody, owed = _run_staged(
+        tmp_path,
+        SharedFilesystemObjectStore(tmp_path / "cas"),
+        _ProducingMerged(result),
+        merged_children=[_child()],
+    )
+
+    (journal,) = owed[0]
+    for task_id in ("tsk-1", "tsk-c"):
+        (member,) = journal.tasks[task_id].members
+        output = tmp_path / "out" / task_id / "artifacts" / "model"
+        assert os.path.samestat(custody.source(journal, member).stat(), output.stat())
 
 
 def test_a_success_with_nothing_staged_owes_no_upload(tmp_path: Path) -> None:

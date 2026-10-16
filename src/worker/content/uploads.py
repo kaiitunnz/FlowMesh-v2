@@ -19,7 +19,7 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from pydantic import ValidationError
 
@@ -143,16 +143,16 @@ class ArtifactUploader:
         self,
         journal: UploadJournal,
         task_id: str,
-        path: Path,
+        source: BinaryIO,
         cancelled: Callable[[], bool] | None = None,
     ) -> ContentReference:
-        """Copy one of a task's artifact files into the dispatch's custody."""
+        """Hold one of a task's opened artifact files in the dispatch's custody."""
         if (staged := journal.tasks.get(task_id)) is None:
             staged = journal.tasks[task_id] = StagedTask(task_id=task_id)
             # Recorded before its first file, so control can be asked about the task.
             self._custody.record(journal)
         reference = self._custody.stage(
-            journal.scope, journal.dispatch_id, path, cancelled=cancelled
+            journal.scope, journal.dispatch_id, source, cancelled=cancelled
         )
         staged.members.append(reference)
         return reference

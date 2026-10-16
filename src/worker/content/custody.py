@@ -1,13 +1,16 @@
 """Custody of artifact bytes a success announced before the shared store had them.
 
-A task reports success once its artifacts are copied and hashed here; their upload to
+A task reports success once its artifacts are hashed and held here; their upload to
 the shared store follows. Until control settles each upload, the bytes are held in a
 directory per dispatch beside the scope's objects, where no eviction, staging cleanup or
-output cleanup reaches: each staged object is the file its bytes were hashed into, so
-custody holds exactly what the success named. Where the worker runs a cache and holds no
-copy of the object yet, the cache names that file as its copy, a second link to it.
-Every process sharing the content directory keeps a cached copy of an object custody
-holds from eviction, and the custody file outlives any removal of the cache's name.
+output cleanup reaches: each staged object is a link to the very file that was hashed,
+or a copy of it where the filesystem cannot link it here, so custody holds exactly what
+the success named while the task's output files are not modified after it completed.
+Cleaning up the output removes its names, never these bytes. Where the worker runs a
+cache and holds no copy of the object yet, the cache names that file as its copy,
+another link to it. Every process sharing the content directory keeps a cached copy of
+an object custody holds from eviction, and the custody file outlives any removal of the
+cache's name.
 
 A dispatch's directory also holds its journal: what the worker staged, under which
 registration, and the success it reported, so the success and its uploads can be
@@ -22,7 +25,7 @@ import os
 import shutil
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -36,6 +39,7 @@ from shared.content import (
 )
 from shared.content.filesystem import safe_segment
 from shared.utils.atomic import temp_path, write_replacing
+from shared.utils.nofollow import link_opened, open_dir
 
 CUSTODY_DIR = "custody"
 _JOURNAL = "journal.json"
@@ -77,6 +81,25 @@ def holds_inode(root: Path, reference: ContentReference, held: os.stat_result) -
             if os.path.samestat(staged, held):
                 return True
     return False
+
+
+def _hash(
+    source: BinaryIO,
+    cancelled: Callable[[], bool] | None,
+    copy: BinaryIO | None = None,
+) -> tuple[int, str]:
+    """Hash what is left to read of ``source``, writing it to ``copy`` when given;
+    returns its size and digest."""
+    hasher = new_hasher()
+    size = 0
+    while chunk := source.read(STREAM_CHUNK_BYTES):
+        if cancelled is not None and cancelled():
+            raise WriteCancelled("staging an artifact file was cancelled")
+        hasher.update(chunk)
+        if copy is not None:
+            copy.write(chunk)
+        size += len(chunk)
+    return size, hasher.hexdigest()
 
 
 class StagedTask(BaseModel):
@@ -150,33 +173,34 @@ class ArtifactCustody:
         self,
         scope: str,
         dispatch_id: str,
-        source: Path,
+        source: BinaryIO,
         *,
         media_type: str = OCTET_STREAM,
         cancelled: Callable[[], bool] | None = None,
     ) -> ContentReference:
-        """Copy a file into a dispatch's custody, named by the digest of exactly the
-        bytes copied, and return its reference.
+        """Hold an opened file in a dispatch's custody, named by the digest of its
+        bytes, and return its reference.
 
-        The bytes are copied rather than linked, so nothing the producer still holds
-        open can change them after they are hashed.
+        The file's own inode is linked in, so its bytes are hashed but not copied; a
+        file the filesystem cannot link here is copied and hashed from the same
+        descriptor instead. Either way custody holds exactly the bytes hashed, as long
+        as the file is not modified after its task completed.
         """
         directory = self.publication_dir(scope, dispatch_id)
         directory.mkdir(parents=True, exist_ok=True)
         tmp = temp_path(directory)
-        hasher = new_hasher()
-        size = 0
         try:
-            with source.open("rb") as src, tmp.open("xb") as dst:
-                while chunk := src.read(STREAM_CHUNK_BYTES):
-                    if cancelled is not None and cancelled():
-                        raise WriteCancelled(f"staging of {source.name} was cancelled")
-                    hasher.update(chunk)
-                    dst.write(chunk)
-                    size += len(chunk)
+            with open_dir(directory) as dir_fd:
+                linked = link_opened(source.fileno(), dir_fd, tmp.name)
+            source.seek(0)
+            if linked:
+                size, digest = _hash(source, cancelled)
+            else:
+                with tmp.open("xb") as copy:
+                    size, digest = _hash(source, cancelled, copy)
             reference = ContentReference(
                 authorization_scope=scope,
-                content_digest=hasher.hexdigest(),
+                content_digest=digest,
                 size_bytes=size,
                 media_type=media_type,
             )
