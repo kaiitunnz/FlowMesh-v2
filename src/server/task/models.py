@@ -298,7 +298,7 @@ class TaskInternalState(BaseModel):
     credential_refs: dict[str, str] | None = Field(
         default=None,
         description="The vault ref of each inline credential masked in the spec, by "
-        "its pointer; None on a record stored before its credentials were vaulted.",
+        "its pointer; None until its credentials are vaulted.",
     )
     runtime: TaskRecordRuntimeState = Field(
         default_factory=TaskRecordRuntimeState,
@@ -323,15 +323,16 @@ class TaskInternalState(BaseModel):
         """Return a copy whose containers are its own, sharing their members."""
         return self.model_copy(
             update={
-                **_copied_containers(self),
+                **copied_containers(self),
                 "runtime": self.runtime.model_copy(
-                    update=_copied_containers(self.runtime)
+                    update=copied_containers(self.runtime)
                 ),
             }
         )
 
 
-def _copied_containers(model: BaseModel) -> dict[str, Any]:
+def copied_containers(model: BaseModel) -> dict[str, Any]:
+    """Return a copy of each of ``model``'s list and dict fields, by name."""
     return {
         name: value.copy() for name, value in model if isinstance(value, (list, dict))
     }
@@ -466,7 +467,6 @@ class TaskRecord(BaseModel):
 
     def __copy__(self) -> Self:
         copied = super().__copy__()
-        # A copy's bookkeeping is its own, as it would be were the fields flat.
         copied.internal = self.internal.detached()
         if (cached := getattr(self, "_source_digest", None)) is not None:
             object.__setattr__(copied, "_source_digest", cached)

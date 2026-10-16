@@ -239,7 +239,9 @@ class WorkerContentCache(FabricObjectStore):
         bytes, so a reader gets the copy without a second one on disk.
 
         A copy upload custody still holds is copied to ``dest`` instead, so a reader
-        writing its input never changes bytes an upload has yet to store.
+        writing its input never changes bytes an upload has yet to store. A linked copy
+        can be a producer's output file on this node, which a reader writing its input
+        changes too.
         """
         for _ in self.open(reference):
             pass

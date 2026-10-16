@@ -166,6 +166,7 @@ from ..models import (
     WorkerRecovery,
     WorkflowSettlement,
     categorize_task_type,
+    copied_containers,
     task_order,
 )
 from ..outputs import (
@@ -6890,13 +6891,7 @@ class TaskRuntime:
         """Copy every task record, detached, at one moment under the lock."""
         with self._lock:
             return [
-                record.model_copy(
-                    update={
-                        name: value.copy()
-                        for name, value in record
-                        if isinstance(value, (list, dict))
-                    }
-                )
+                record.model_copy(update=copied_containers(record))
                 for record in self._tasks.values()
             ]
 
@@ -7148,10 +7143,8 @@ class TaskRuntime:
         # A time on this process's clock alone, which no restart restores.
         internal.runtime.succeeded_monotonic = None
         return {
-            **{
-                name: value.copy() if isinstance(value, (list, dict)) else value
-                for name, value in record
-            },
+            **dict(record),
+            **copied_containers(record),
             "internal": internal,
             **self._derived_locked(task_id, record).info_fields(),
         }

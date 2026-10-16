@@ -47,39 +47,36 @@ _JOURNAL = "journal.json"
 type KeepCopy = Callable[[ContentReference, Path], None]
 
 
+def _staged_names(root: Path, scope: str, digest: str) -> Iterator[Path]:
+    """Yield the name each dispatch's custody under ``root`` would stage ``digest``
+    of ``scope`` at."""
+    name = safe_segment(digest)
+    try:
+        publications = os.scandir(root / safe_segment(scope) / CUSTODY_DIR)
+    except FileNotFoundError:
+        return
+    with publications:
+        for publication in publications:
+            yield Path(publication.path) / name
+
+
 def custody_holds(root: Path, scope: str, digest: str) -> bool:
     """Return whether any dispatch's custody under the content directory ``root``
     holds staged bytes of ``digest`` in ``scope``."""
-    custody = root / safe_segment(scope) / CUSTODY_DIR
-    name = safe_segment(digest)
-    try:
-        publications = os.scandir(custody)
-    except FileNotFoundError:
-        return False
-    with publications:
-        return any(
-            os.path.lexists(Path(publication.path) / name)
-            for publication in publications
-        )
+    return any(os.path.lexists(staged) for staged in _staged_names(root, scope, digest))
 
 
 def holds_inode(root: Path, reference: ContentReference, held: os.stat_result) -> bool:
     """Return whether any dispatch's custody under the content directory ``root``
     holds the file ``held`` describes as the reference's staged bytes."""
-    custody = root / safe_segment(reference.authorization_scope) / CUSTODY_DIR
-    name = safe_segment(reference.content_digest)
-    try:
-        publications = os.scandir(custody)
-    except FileNotFoundError:
-        return False
-    with publications:
-        for publication in publications:
-            try:
-                staged = os.stat(Path(publication.path) / name)
-            except (FileNotFoundError, NotADirectoryError):
-                continue
-            if os.path.samestat(staged, held):
+    for staged in _staged_names(
+        root, reference.authorization_scope, reference.content_digest
+    ):
+        try:
+            if os.path.samestat(os.stat(staged), held):
                 return True
+        except (FileNotFoundError, NotADirectoryError):
+            continue
     return False
 
 
@@ -181,9 +178,9 @@ class ArtifactCustody:
         """Hold an opened file in a dispatch's custody, named by the digest of its
         bytes, and return its reference.
 
-        The file's own inode is linked in, so hashing is the only pass over its bytes;
-        a file the filesystem cannot link here is copied and hashed from the same
-        descriptor instead. Either way custody holds exactly the bytes hashed, as long
+        The file's own inode is linked in, so hashing is the only pass over its bytes,
+        or, where the filesystem cannot link it here, copied and hashed from the same
+        descriptor. Either way custody holds exactly the bytes hashed, as long
         as the file is not modified after its task completed.
         """
         directory = self.publication_dir(scope, dispatch_id)
