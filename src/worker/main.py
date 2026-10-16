@@ -408,9 +408,7 @@ def _build_artifact_uploads(
         ),
         cfg.alias,
         identity=lambda: (client.worker_id, client.incarnation),
-        upload=lambda task_id, scope, path, media_type: plane.upload_file(
-            task_id, scope, path, media_type=media_type
-        ),
+        upload=plane.upload_file,
         resend_success=client.resend_task_succeeded,
         report=client.report_artifact_upload,
         logger=logger,
@@ -546,10 +544,8 @@ def main() -> None:
         listener_sock=content_sock,
         peer_material=peer_material,
     )
-    lifecycle.start_content_plane(
-        content_plane,
-        _build_artifact_uploads(cfg, supervisor_client, content_plane, logger),
-    )
+    uploads = _build_artifact_uploads(cfg, supervisor_client, content_plane, logger)
+    lifecycle.start_content_plane(content_plane, uploads)
     lifecycle.start_ssh_relay(
         SshRelayLane(
             registry=lifecycle.ssh_endpoints,

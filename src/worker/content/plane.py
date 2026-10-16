@@ -174,7 +174,7 @@ class WorkerContentPlane:
         return reference
 
     def upload_file(
-        self, task_id: str, scope: str, path: Path, *, media_type: str = OCTET_STREAM
+        self, task_id: str, scope: str, path: Path, media_type: str = OCTET_STREAM
     ) -> ContentReference:
         """Put a file's bytes in the shared store under a task's access, and return the
         reference naming exactly what was stored; this worker already has its copy."""
