@@ -236,7 +236,8 @@ def test_a_cancel_between_chunks_ends_the_pass_leaving_every_name_whole(
 
 def test_a_cancel_before_a_file_copies_nothing(tmp_path: Path) -> None:
     top = _tree(tmp_path)
-    (top / "model").write_bytes(b"accepted")
+    # An empty file copies no chunk, so only the check before the file sees the cancel.
+    (top / "model").write_bytes(b"")
     os.link(top / "model", tmp_path / "custody")
 
     def cancelled() -> None:
