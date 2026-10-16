@@ -2,11 +2,13 @@
 
 import os
 import time
+from pathlib import Path
 
 import pytest
 
 from shared.content import ContentHydrationError, ContentReference
 from worker.content import WorkerContentCache
+from worker.content.custody import ArtifactCustody
 
 
 def _cache(tmp_path, **bounds) -> WorkerContentCache:
@@ -109,7 +111,7 @@ def test_a_copy_being_transferred_stays_under_either_bound(tmp_path) -> None:
     assert cache.holds(reference)
 
 
-def _object(cache: WorkerContentCache, reference: ContentReference):
+def _object(cache: WorkerContentCache, reference: ContentReference) -> Path:
     return cache._objects.object_path(
         reference.authorization_scope, reference.content_digest
     )
@@ -134,7 +136,8 @@ def test_a_copy_custody_holds_stays_whichever_inode_custody_staged(
     cache = _cache(tmp_path, max_bytes=1)
     reference = cache.write("local", b"oversized")
     staged = (
-        tmp_path / "content" / "local" / "custody" / "dsp-2" / reference.content_digest
+        ArtifactCustody(tmp_path / "content").publication_dir("local", "dsp-2")
+        / reference.content_digest
     )
     staged.parent.mkdir(parents=True)
     staged.write_bytes(b"oversized")
@@ -157,7 +160,7 @@ def test_a_copy_replaced_since_the_walk_is_not_evicted(tmp_path, monkeypatch) ->
     real_stat = cache._objects.stat
     calls = 0
 
-    def stat_then_replace(scope: str, digest: str):
+    def stat_then_replace(scope: str, digest: str) -> os.stat_result | None:
         nonlocal calls
         calls += 1
         if calls == 2:
