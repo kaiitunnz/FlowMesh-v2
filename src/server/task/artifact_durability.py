@@ -38,11 +38,12 @@ class ArtifactUpload(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     state: ArtifactDurability = ArtifactDurability.PENDING
-    # The dispatch whose success announced the artifacts, the task it ran, under whose
-    # store access the upload writes, and the worker registration that holds them in
-    # custody; only they complete the upload.
+    # The dispatch whose success announced the artifacts.
     dispatch_id: str
+    # The task that dispatch ran, whose store access the upload writes under.
     dispatch_task_id: str
+    # The worker registration holding the artifacts in custody; only it, for that
+    # dispatch, completes the upload.
     owner_id: str
     # The accepted artifacts found missing, by revision and name, once settled lost.
     lost: dict[str, ArtifactLoss] = Field(default_factory=dict)
