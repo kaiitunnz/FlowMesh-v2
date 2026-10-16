@@ -210,7 +210,9 @@ class ArtifactUploader:
             if settled.disposition is UploadDisposition.PENDING:
                 if not publication.owned:
                     publication.due[task.task_id] = self._clock() + EVIDENCE_RESEND_SEC
-                elif task.uploaded or task.failed is not None:
+                elif task.task_id not in publication.remaining and (
+                    task.uploaded or task.failed is not None
+                ):
                     publication.due[task.task_id] = self._clock()
                 self._cv.notify_all()
                 return

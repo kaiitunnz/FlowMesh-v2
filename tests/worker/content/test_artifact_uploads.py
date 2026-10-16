@@ -377,6 +377,29 @@ def test_a_failed_task_is_reported_once_its_other_files_are_stored(tmp_path) -> 
     uploader.stop(1.0)
 
 
+def test_a_pending_answer_reports_no_failed_task_still_uploading(tmp_path) -> None:
+    ports = _Ports()
+    ports.poisoned.add(b"beta")
+    root = tmp_path / "content"
+    clock = _Clock()
+    uploader = _uploader(root, ports, clock)
+    journal = _stage(
+        uploader, tmp_path, {"a.bin": b"alpha", "b.bin": b"beta"}, submit=False
+    )
+    ArtifactCustody(root).source(journal, journal.tasks["tsk-1"].members[0]).unlink()
+    uploader.submit(journal, "tsk-1", {"artifacts_pending": True})
+    uploader.start()
+    ports.wait(lambda: ports.attempts >= 2)
+    assert journal.tasks["tsk-1"].failed is not None
+
+    uploader.settle(_settled(UploadDisposition.PENDING))
+    _nudge(uploader, clock, 1)
+    time.sleep(0.3)
+
+    assert ports.reports == []
+    uploader.stop(0.2)
+
+
 def test_an_unexpected_failure_backs_off_only_its_own_dispatch(tmp_path) -> None:
     ports = _Ports()
     ports.poisoned.add(b"poison")
