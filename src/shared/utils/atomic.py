@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 _SHARED_FILE_MODE = 0o0666
-_COPY_CHUNK_BYTES = 1 << 20
+COPY_CHUNK_BYTES = 1 << 20
 _TEMP_PREFIX = ".fm-tmp-"
 
 
@@ -135,7 +135,7 @@ def atomic_write_stream(
     if dir_fd is None:
         target.parent.mkdir(parents=True, exist_ok=True)
     _atomic_replace(
-        target, lambda fh: shutil.copyfileobj(source, fh, _COPY_CHUNK_BYTES), dir_fd
+        target, lambda fh: shutil.copyfileobj(source, fh, COPY_CHUNK_BYTES), dir_fd
     )
 
 

@@ -1,5 +1,6 @@
 """The runner stores a task's result in the shared store before reporting success."""
 
+import errno
 import json
 import os
 from pathlib import Path
@@ -20,6 +21,7 @@ from shared.schemas.result import BaseExecutorResult, ResultEnvelope
 from shared.tasks import MergedChildTaskStrict
 from shared.tasks.artifact_upload import ARTIFACTS_PENDING
 from shared.tasks.task_type import TaskType
+from shared.utils.task_output import detach_shared_files
 from tests.worker.factories import (
     make_worker_hardware,
     make_worker_task_message,
@@ -530,7 +532,8 @@ def test_an_output_that_cannot_be_detached_fails_before_the_executor_runs(
 ) -> None:
     _published(tmp_path, "tsk-1")
     monkeypatch.setattr(
-        "worker.runner.detach_shared_files", MagicMock(side_effect=OSError(28, "full"))
+        "worker.runner.detach_shared_files",
+        MagicMock(side_effect=OSError(errno.ENOSPC, "full")),
     )
     executor = _Rewriting(BaseExecutorResult())
 
@@ -539,3 +542,31 @@ def test_an_output_that_cannot_be_detached_fails_before_the_executor_runs(
     assert not executor.ran
     lifecycle.set_succeeded.assert_not_called()
     assert lifecycle.set_failed.call_args.kwargs["retryable"] is True
+
+
+def test_a_cancel_landing_during_detachment_ends_the_run_cancelled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    held = _published(tmp_path, "tsk-1")
+    cancelled = False
+    ended = Runner._ended_before_execution_locked
+
+    def ended_or_cancelled(runner: Runner, task_id: str) -> str | None:
+        return "cancelled" if cancelled else ended(runner, task_id)
+
+    def detaching(top: Path, raise_if_cancelled: Any) -> int:
+        nonlocal cancelled
+        cancelled = True
+        return detach_shared_files(top, raise_if_cancelled)
+
+    monkeypatch.setattr(Runner, "_ended_before_execution_locked", ended_or_cancelled)
+    monkeypatch.setattr("worker.runner.detach_shared_files", detaching)
+    executor = _Rewriting(BaseExecutorResult())
+
+    lifecycle = _run_with(tmp_path, executor)
+
+    assert not executor.ran
+    lifecycle.set_cancelled.assert_called_once()
+    lifecycle.set_failed.assert_not_called()
+    model = tmp_path / "out" / "tsk-1" / "artifacts" / "model"
+    assert os.path.samestat(model.stat(), held.stat())

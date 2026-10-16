@@ -1,5 +1,6 @@
 """Tests for the shared manifest helpers."""
 
+import errno
 import os
 import stat
 import threading
@@ -196,8 +197,8 @@ def test_a_copy_that_cannot_be_written_leaves_the_shared_file(
 
     with (
         patch(
-            "shared.utils.task_output.shutil.copyfileobj",
-            side_effect=OSError(28, "No space"),
+            "shared.utils.task_output.os.fchmod",
+            side_effect=OSError(errno.ENOSPC, "No space"),
         ),
         pytest.raises(OSError),
     ):
@@ -205,3 +206,43 @@ def test_a_copy_that_cannot_be_written_leaves_the_shared_file(
 
     assert os.path.samestat(model.stat(), (tmp_path / "custody").stat())
     assert sorted(p.name for p in top.iterdir()) == ["checkpoints", "model"]
+
+
+class _Cancelled(Exception):
+    pass
+
+
+def test_a_cancel_between_chunks_ends_the_pass_leaving_every_name_whole(
+    tmp_path: Path,
+) -> None:
+    top = _tree(tmp_path)
+    model = top / "model"
+    model.write_bytes(b"a" * (3 << 20))
+    os.link(model, tmp_path / "custody")
+    chunks = 0
+
+    def cancel_on_the_second_chunk() -> None:
+        nonlocal chunks
+        chunks += 1
+        if chunks == 3:
+            raise _Cancelled
+
+    with pytest.raises(_Cancelled):
+        detach_shared_files(top, cancel_on_the_second_chunk)
+
+    assert os.path.samestat(model.stat(), (tmp_path / "custody").stat())
+    assert sorted(p.name for p in top.iterdir()) == ["checkpoints", "model"]
+
+
+def test_a_cancel_before_a_file_copies_nothing(tmp_path: Path) -> None:
+    top = _tree(tmp_path)
+    (top / "model").write_bytes(b"accepted")
+    os.link(top / "model", tmp_path / "custody")
+
+    def cancelled() -> None:
+        raise _Cancelled
+
+    with pytest.raises(_Cancelled):
+        detach_shared_files(top, cancelled)
+
+    assert (top / "model").stat().st_nlink == 2

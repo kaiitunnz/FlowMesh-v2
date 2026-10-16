@@ -963,9 +963,20 @@ class Runner:
         dirs = [out_dir] + [
             self.results_dir / child.task_id for child in msg.merged_children or ()
         ]
+
+        def raise_if_cancelled() -> None:
+            self._raise_if_cancel_pending(msg.task_id)
+
         try:
             for task_dir in dirs:
-                detach_shared_files(task_dir / ARTIFACTS_DIR)
+                if copied := detach_shared_files(
+                    task_dir / ARTIFACTS_DIR, raise_if_cancelled
+                ):
+                    self.logger.info(
+                        "Detached %d shared output file(s) of task %s",
+                        copied,
+                        task_dir.name,
+                    )
         except OSError as exc:
             raise ExecutionError(
                 f"task {msg.task_id} could not prepare its output: {exc}",

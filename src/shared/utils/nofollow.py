@@ -242,6 +242,11 @@ def join_relative(rel_dir: str, name: str) -> str:
     return f"{rel_dir}/{name}" if rel_dir else name
 
 
+def split_relative(rel_dir: str) -> list[str]:
+    """The segments of the walked directory ``rel_dir``."""
+    return rel_dir.split("/") if rel_dir else []
+
+
 def _list_dir(fd: int) -> tuple[list[str], list[str]]:
     dirs: list[str] = []
     others: list[str] = []
