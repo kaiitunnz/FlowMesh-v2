@@ -512,16 +512,17 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   that store, so a copy may be dropped at any time: a deployment can bound the cache by
   how long a copy goes unused and by disk, least recently used first, and leaves both
   unbounded by default. A copy of an artifact still uploading stays until its upload
-  settles, whichever worker on the node staged it. A worker reports each copy it keeps
-  or drops, and its whole holding when it registers; control keeps a worker's records
-  while it is registered, and grants a read from a holder only while its heartbeat is
-  current. A read tries the local copy, then another worker's copy, then the store
-  itself. For a peer's copy the control plane checks that the requesting worker is
-  running the task and that it is bound to exactly that reference as an input or
-  delivered outcome, resolves a live holder and a route to it, and mints one short-lived
-  `chg-` grant it hands to both ends: the holder serves only a grant it was handed,
-  once, for that exact object, and the requester verifies the digest and size before
-  anything reads the bytes. With trusted peer transports enabled
+  settles, whichever worker on the node staged it; evicting any other copy drops only
+  the cache's name, so a task's output or input linked to it keeps its bytes. A worker
+  reports each copy it keeps or drops, and its whole holding when it registers; control
+  keeps a worker's records while it is registered, and grants a read from a holder only
+  while its heartbeat is current. A read tries the local copy, then another worker's
+  copy, then the store itself. For a peer's copy the control plane checks that the
+  requesting worker is running the task and that it is bound to exactly that reference
+  as an input or delivered outcome, resolves a live holder and a route to it, and mints
+  one short-lived `chg-` grant it hands to both ends: the holder serves only a grant it
+  was handed, once, for that exact object, and the requester verifies the digest and
+  size before anything reads the bytes. With trusted peer transports enabled
   (`NETWORK_PLANE_PEER_ENABLED`, off by default), the requester dials the holder's node
   (`node_relay`), or the holder itself where workers are declared routable
   (`worker_direct`), bypassing the root, and reads such a holder before the store at any
@@ -554,20 +555,25 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   `step-<n>` into the shared content store while it runs. The worker reports success
   once it has hashed the `final` files and stored each tree's manifest, and uploads the
   files afterwards, so the task is `DONE` while its workflow does not finish until every
-  upload settles. An upload its worker has not finished when its registration ends or it
-  goes silent settles from what the store holds: an artifact with a file missing is
-  lost, its task stays `DONE`, and its workflow fails with an `artifact_lost` reason
-  while its other work runs on. Each name is published once per revision and its first
-  publication stands, so a retry never replaces what an earlier attempt published. The
-  catalog is stored with the task's record, so a freed workflow's artifacts list and
-  download too. A consumer's worker hydrates each upstream artifact its task reads
-  before the task runs, as it does any consumed value, from a holder's copy while it is
-  still uploading; a model archive loads as the directory it archives. A read that finds
-  no copy waits, spending no attempt, until the upload settles, and a reader of a lost
-  artifact fails as `input_unreadable`, naming it. A dispatch waits out a store outage
-  for a tree its spec loads, and fails on a missing one. A training run's save waits
-  while two checkpoints are publishing, and a run whose checkpoint cannot be published
-  stops at its next save and fails.
+  upload settles. The worker holds each artifact file and checkpoint for its upload, and
+  its cache keeps each, as a hard link to the file itself, copying only where the
+  filesystem cannot link it, so an executor leaves those files unmodified once it
+  returns (see [`EXECUTORS.md`](EXECUTORS.md)). A later execution of the task starts
+  from private writable copies of the files an earlier one left. An upload its worker
+  has not finished when its registration ends or it goes silent settles from what the
+  store holds: an artifact with a file missing is lost, its task stays `DONE`, and its
+  workflow fails with an `artifact_lost` reason while its other work runs on. Each name
+  is published once per revision and its first publication stands, so a retry never
+  replaces what an earlier attempt published. The catalog is stored with the task's
+  record, so a freed workflow's artifacts list and download too. A consumer's worker
+  hydrates each upstream artifact its task reads before the task runs, as it does any
+  consumed value, from a holder's copy while it is still uploading; a model archive
+  loads as the directory it archives. A read that finds no copy waits, spending no
+  attempt, until the upload settles, and a reader of a lost artifact fails as
+  `input_unreadable`, naming it. A dispatch waits out a store outage for a tree its spec
+  loads, and fails on a missing one. A training run's save waits while two checkpoints
+  are publishing, and a run whose checkpoint cannot be published stops at its next save
+  and fails.
 - **Agent exports.** An agent declares workspace paths to publish as `exports`. When the
   agent completes, its worker copies them out of the quiesced workspace into the task's
   artifacts, which publish like any other. A missing export fails the agent unless it is

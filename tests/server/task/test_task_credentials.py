@@ -159,8 +159,11 @@ def test_a_dispatch_carries_the_task_its_own_credentials(api_version):
     # The record the dispatch rendered from keeps only the refs.
     record = runtime.get_record(ids["call"])
     assert record is not None and _no_secret(record.model_dump_json())
-    assert record.credential_refs
-    assert message.credential_pointers == {ids["call"]: sorted(record.credential_refs)}
+    record_internal = record.internal
+    assert record_internal.credential_refs
+    assert message.credential_pointers == {
+        ids["call"]: sorted(record_internal.credential_refs)
+    }
 
 
 @pytest.mark.parametrize("api_version", ["flowmesh/v1", "flowmesh/v2"])
@@ -328,8 +331,10 @@ def test_a_merged_child_whose_credential_is_gone_leaves_the_merge():
     payload = _inference_workflow({"a": _T1, "b": _T1}, {"a": _K1, "b": _K2})
     workflow_id, ids = _register(runtime, payload)
     child = runtime.get_record(ids["b"])
-    assert child is not None and child.credential_refs is not None
-    gone = child.credential_refs["/data/api_key"]
+    assert child is not None
+    child_internal = child.internal
+    assert child_internal.credential_refs is not None
+    gone = child_internal.credential_refs["/data/api_key"]
     del vault.redis.hashes[workflow_credential_key(workflow_id)][gone]
 
     registry, disp = _dispatch(runtime, ids["a"])
@@ -450,7 +455,7 @@ def test_a_record_that_cannot_be_vaulted_loads_and_runs_as_stored(monkeypatch):
 
     call = _task_named(runtime, stored["live"], "call")
     record = runtime.get_record(call)
-    assert record is not None and record.credential_refs is None
+    assert record is not None and record.internal.credential_refs is None
     publisher, disp = _dispatch(runtime, call)
     assert disp.failed == []
     message = publisher.publish_task.call_args[0][1]
@@ -594,14 +599,14 @@ def test_an_agent_stored_with_plaintext_harness_params_still_loads():
     _, ids = _register(_runtime(registry), _agent("{script: []}"))
     blob = json.loads(registry.task_blobs[ids["solver"]])
     blob["record"]["task"]["spec"]["harness"]["params"]["jwt"] = _JWT
-    blob["record"].pop("credential_refs", None)
+    blob["record"]["internal"].pop("credential_refs", None)
     registry.task_blobs[ids["solver"]] = json.dumps(blob)
 
     runtime = _runtime(registry)
     asyncio.run(runtime.rehydrate())
 
     record = runtime.get_record(ids["solver"])
-    assert record is not None and record.credential_refs
+    assert record is not None and record.internal.credential_refs
     assert _JWT not in registry.task_blobs[ids["solver"]]
 
 

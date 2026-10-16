@@ -50,7 +50,7 @@ def _dispatcher(
     task_id = results[0].task_id
     record = runtime.get_record(task_id)
     assert record is not None
-    record.failed_workers = list(failed or [])
+    record.internal.failed_workers = list(failed or [])
     runtime.private_state_owner = mock.Mock(return_value=_OWNER)  # type: ignore[method-assign]
     registry = mock.Mock()
     registry.idle_satisfying_pool.return_value = [_worker(wid) for wid in idle_ids]

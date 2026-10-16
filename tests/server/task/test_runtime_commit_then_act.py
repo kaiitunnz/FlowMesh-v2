@@ -228,7 +228,10 @@ async def test_a_recorded_input_resolution_survives_a_restart() -> None:
     assert standing is not None and standing.request_digest == "req"
     # A re-drive that resolves to a different request leaves the recorded one.
     restored.record_input_resolution(
-        task_id, "wkr-1", _binding("other", 9), restored._tasks[task_id].dispatch_id
+        task_id,
+        "wkr-1",
+        _binding("other", 9),
+        restored._tasks[task_id].internal.dispatch_id,
     )
     kept = restored.input_resolution_binding(task_id)
     assert kept is not None and kept.request_digest == "req"

@@ -80,8 +80,10 @@ def _start_then_requeue(
         task_id, "wkr-1", {}, "2026-06-01T00:00:00Z", dispatch_id=message.dispatch_id
     )
     record = runtime.get_record(task_id)
-    assert record is not None and record.first_started_ts is not None
-    record.first_started_ts -= served_sec
+    assert record is not None
+    record_internal = record.internal
+    assert record_internal.first_started_ts is not None
+    record_internal.first_started_ts -= served_sec
     runtime.return_dispatch(task_id, "wkr-1", increment_retry=False, front=True)
     assert record.status == TaskStatus.PENDING
     assert record.started_ts is None
@@ -108,14 +110,15 @@ def test_a_second_start_keeps_the_first() -> None:
     _start_then_requeue(runtime, task_id, first, served_sec=100.0)
     record = runtime.get_record(task_id)
     assert record is not None
-    first_started = record.first_started_ts
+    record_internal = record.internal
+    first_started = record_internal.first_started_ts
 
     rerun = _dispatch(runtime, task_id)
     runtime.mark_started(
         task_id, "wkr-1", {}, "2026-06-01T00:01:00Z", dispatch_id=rerun.dispatch_id
     )
 
-    assert record.first_started_ts == first_started
+    assert record_internal.first_started_ts == first_started
 
 
 def test_a_non_serve_task_carries_no_served_time() -> None:
@@ -139,7 +142,7 @@ def test_a_dispatch_refused_before_it_ran_starts_no_ttl() -> None:
         dispatch_id=first.dispatch_id,
     )
     record = runtime.get_record(task_id)
-    assert record is not None and record.first_started_ts is None
+    assert record is not None and record.internal.first_started_ts is None
     runtime.return_dispatch(task_id, "wkr-1", increment_retry=False, front=True)
 
     assert _dispatch(runtime, task_id).serve_elapsed_sec is None

@@ -116,7 +116,7 @@ def test_a_restart_loads_and_runs_tasks_stored_with_an_output_block(
         record = restored.get_record(task_id)
         assert record is not None
         assert "output" not in record.task.spec.model_dump()
-        assert not record.credential_refs
+        assert not record.internal.credential_refs
     envelope = restored.read_result(first)
     assert envelope is not None and envelope.result.artifacts_ == ArtifactContext()
     record = restored.get_record(second)

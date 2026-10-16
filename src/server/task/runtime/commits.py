@@ -514,11 +514,12 @@ class TransitionCommitter:
         self._observe_resident_locked(records)
         for persisted in records:
             record = persisted.record
-            record.unwritten_artifacts.clear()
+            record_runtime = record.internal.runtime
+            record_runtime.unwritten_artifacts.clear()
             if record.status in TERMINAL_TASK_STATUSES:
                 clear_dispatched_inputs(record)
-                if record.artifacts:
-                    record.artifacts = final_set(record.artifacts)
+                if record_runtime.artifacts:
+                    record_runtime.artifacts = final_set(record_runtime.artifacts)
         if any(by_status[status] for status in TERMINAL_TASK_STATUSES):
             self._actions.file_locked(workflow_id, Settled(workflow_id))
         self._reservations.release_ended_dispatches_locked(

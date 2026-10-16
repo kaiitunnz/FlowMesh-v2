@@ -337,7 +337,9 @@ def _queue_task_states(pipe: _AnyPipeline, items: Sequence[PersistedTask]) -> No
     for item in items:
         record = item.record
         pipe.set(task_state_key(record.task_id), item.model_dump_json())
-        queue_artifact_bindings(pipe, record.task_id, record.unwritten_artifacts)
+        queue_artifact_bindings(
+            pipe, record.task_id, record.internal.runtime.unwritten_artifacts
+        )
         _queue_upload_state(pipe, record)
 
 
@@ -345,7 +347,7 @@ def _queue_upload_state(pipe: _AnyPipeline, record: TaskRecord) -> None:
     """Queue what a task's artifact upload makes of its workflow, from the upload as
     the record now holds it: whether it holds the workflow open, and the failure its
     loss gives the workflow."""
-    if (upload := record.artifact_upload) is None:
+    if (upload := record.internal.artifact_upload) is None:
         return
     uploads = workflow_uploads_key(record.workflow_id)
     if upload.pending:

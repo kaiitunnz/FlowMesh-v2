@@ -22,7 +22,7 @@ import threading
 import time
 from collections.abc import Callable, Coroutine, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from shared.content import (
     HOLDING_RESYNC_FRAME_KIND,
@@ -45,6 +45,7 @@ from shared.network.mtls_listener import (
 from shared.network.relay_frame import CONTENT_FRAME_KIND, RelayDirection, RelayFrame
 from shared.schemas.network import RouteObservationOutcome
 from shared.utils.atomic import write_replacing
+from shared.utils.nofollow import fd_path
 
 from .client import ContentHydrationClient, RequestGrant
 from .holder import ContentHolder
@@ -320,6 +321,16 @@ class ContentLaneHost:
         if copied != reference:
             self._store.drop(copied)
             return None
+        return self.held(reference)
+
+    def keep_completed(
+        self, reference: ContentReference, source: BinaryIO
+    ) -> ContentReference | None:
+        """Cache an opened completed file holding the reference's bytes, as ``keep``
+        does, by linking the file itself, or a copy of it where the filesystem cannot
+        link it into the cache."""
+        if not self._store.link_completed(reference, source):
+            return self.keep_file(reference, fd_path(source.fileno()))
         return self.held(reference)
 
     def held(self, reference: ContentReference) -> ContentReference | None:

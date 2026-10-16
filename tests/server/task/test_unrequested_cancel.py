@@ -124,7 +124,7 @@ async def test_a_workflow_whose_task_its_worker_gave_up_reruns_it_and_settles() 
 
     record = runtime.get_record(ids["a"])
     assert record is not None and record.status == TaskStatus.PENDING
-    assert record.attempts == 0 and record.failed_workers == []
+    assert record.attempts == 0 and record.internal.failed_workers == []
     engine = runtime.orchestration_engine(workflow_id)
     assert engine is not None
     work_item = engine.work_item(ids["a"])

@@ -2,11 +2,13 @@
 
 import os
 import time
+from pathlib import Path
 
 import pytest
 
 from shared.content import ContentHydrationError, ContentReference
 from worker.content import WorkerContentCache
+from worker.content.custody import ArtifactCustody
 
 
 def _cache(tmp_path, **bounds) -> WorkerContentCache:
@@ -106,4 +108,66 @@ def test_a_copy_being_transferred_stays_under_either_bound(tmp_path) -> None:
     reference = cache.write("local", b"body")
     _used(cache, reference, ago=120)
     assert cache.evict(in_transfer=frozenset({reference.content_digest})) == 0
+    assert cache.holds(reference)
+
+
+def _object(cache: WorkerContentCache, reference: ContentReference) -> Path:
+    return cache._objects.object_path(
+        reference.authorization_scope, reference.content_digest
+    )
+
+
+def test_a_copy_a_task_output_also_links_is_evicted_past_the_disk_budget(
+    tmp_path,
+) -> None:
+    cache = _cache(tmp_path, max_bytes=1)
+    reference = cache.write("local", b"oversized")
+    output = tmp_path / "task-output"
+    os.link(_object(cache, reference), output)
+
+    assert cache.evict() == 1
+    assert not cache.holds(reference)
+    assert output.read_bytes() == b"oversized"
+
+
+def test_a_copy_custody_holds_stays_whichever_inode_custody_staged(
+    tmp_path,
+) -> None:
+    cache = _cache(tmp_path, max_bytes=1)
+    reference = cache.write("local", b"oversized")
+    staged = (
+        ArtifactCustody(tmp_path / "content").publication_dir("local", "dsp-2")
+        / reference.content_digest
+    )
+    staged.parent.mkdir(parents=True)
+    staged.write_bytes(b"oversized")
+
+    assert cache.evict() == 0
+    assert cache.holds(reference)
+
+    staged.unlink()
+    assert cache.evict() == 1
+
+
+def test_a_copy_replaced_since_the_walk_is_not_evicted(tmp_path, monkeypatch) -> None:
+    cache = _cache(tmp_path, max_bytes=1)
+    reference = cache.write("local", b"oversized")
+    path = _object(cache, reference)
+    walked = path.stat()
+    replacement = tmp_path / "replacement"
+    replacement.write_bytes(b"oversized")
+    os.utime(replacement, ns=(walked.st_atime_ns, walked.st_mtime_ns))
+    real_stat = cache._objects.stat
+    calls = 0
+
+    def stat_then_replace(scope: str, digest: str) -> os.stat_result | None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            os.replace(replacement, path)
+        return real_stat(scope, digest)
+
+    monkeypatch.setattr(cache._objects, "stat", stat_then_replace)
+
+    assert cache.evict() == 0
     assert cache.holds(reference)

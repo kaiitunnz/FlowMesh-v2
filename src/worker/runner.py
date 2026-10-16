@@ -8,7 +8,7 @@ import time
 import traceback
 from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from pydantic import BaseModel
 
@@ -71,7 +71,12 @@ from shared.utils.hardware import available_devices, gpus_fit_dispatch
 from shared.utils.nofollow import PathRefused, open_dir, open_regular, remove_below
 from shared.utils.recent import RecentSet
 from shared.utils.redact import credential_scrubber
-from shared.utils.task_output import ARTIFACTS_DIR, clear_directory, prepare_output_dir
+from shared.utils.task_output import (
+    ARTIFACTS_DIR,
+    clear_directory,
+    detach_shared_files,
+    prepare_output_dir,
+)
 from shared.utils.time import now_iso
 
 from .content.artifact_inputs import artifact_inputs_dir, ssh_inputs_dir
@@ -205,8 +210,10 @@ class _Staging:
         self._journal = journal
 
     def for_task(self, task_id: str) -> StageFile:
-        def stage(path: Path, cancelled: Callable[[], bool] | None) -> ContentReference:
-            return self._uploads.stage(self._journal, task_id, path, cancelled)
+        def stage(
+            source: BinaryIO, cancelled: Callable[[], bool] | None
+        ) -> ContentReference:
+            return self._uploads.stage(self._journal, task_id, source, cancelled)
 
         return stage
 
@@ -946,6 +953,36 @@ class Runner:
                 )
         return out_dir
 
+    def _detach_outputs(self, msg: WorkerTaskMessage, out_dir: Path) -> None:
+        """Give this execution private copies of the output files an earlier one
+        published, before anything can write them, for the task and each merged child.
+
+        A published file's inode is shared with upload custody and the cache, so
+        writing it in place would change bytes an earlier attempt already named.
+        """
+        dirs = [out_dir] + [
+            self.results_dir / child.task_id for child in msg.merged_children or ()
+        ]
+
+        def raise_if_cancelled() -> None:
+            self._raise_if_cancel_pending(msg.task_id)
+
+        try:
+            for task_dir in dirs:
+                if copied := detach_shared_files(
+                    task_dir / ARTIFACTS_DIR, raise_if_cancelled
+                ):
+                    self.logger.info(
+                        "Detached %d shared output file(s) of task %s",
+                        copied,
+                        task_dir.name,
+                    )
+        except OSError as exc:
+            raise ExecutionError(
+                f"task {msg.task_id} could not prepare its output: {exc}",
+                retryable=True,
+            ) from exc
+
     def _checkpoint_uploader(
         self, msg: WorkerTaskMessage, out_dir: Path
     ) -> CheckpointUploader | None:
@@ -1094,7 +1131,7 @@ class Runner:
         """Publish what a task left under its artifacts directory, returning the
         bindings its success reports.
 
-        With ``staging``, each file is copied and hashed into upload custody and
+        With ``staging``, each file is hashed and linked into upload custody and
         uploaded after the success, and only each tree's manifest is in the shared
         store before this returns. Without it, every file is.
         """
@@ -1511,6 +1548,7 @@ class Runner:
                     self._raise_if_cancel_pending(task_id)
                     self._current_task_id = task_id
                     self._refuse_if_gpu_is_held(msg)
+                    self._detach_outputs(msg, out_dir)
                     self._input_hydrator.hydrate(msg)
                     self._input_hydrator.install_artifacts(
                         msg, artifact_inputs_dir(out_dir)

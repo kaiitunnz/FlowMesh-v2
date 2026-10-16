@@ -40,6 +40,7 @@ from shared.utils.atomic import is_atomic_temp
 from shared.utils.nofollow import (
     PathRefused,
     fd_path,
+    link_opened,
     open_dir,
     open_dir_at,
     open_regular,
@@ -74,9 +75,10 @@ def spool_checkpoint(checkpoint_dir: Path, spool_dir: Path, step: int) -> Path |
 
     The snapshot appears whole, under ``step-<n>``, once every file is linked, so the
     uploader never sees half of it. Each file is linked from the descriptor that
-    opened it without following a link. A trainer rotating its checkpoints only
-    unlinks them, which leaves the snapshot's links in place. Returns the snapshot, or
-    None when the step already has one.
+    opened it without following a link, and copied from it where the filesystem cannot
+    link it. A trainer rotating its checkpoints only unlinks them, which leaves the
+    snapshot's links in place. Returns the snapshot, or None when the step already has
+    one.
     """
     ready = spool_dir / f"step-{step}"
     if ready.exists():
@@ -89,10 +91,8 @@ def spool_checkpoint(checkpoint_dir: Path, spool_dir: Path, step: int) -> Path |
             raise opened
         dest = target / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
-        with opened:
-            try:
-                os.link(fd_path(opened.fileno()), dest, follow_symlinks=True)
-            except OSError:
+        with opened, open_dir(dest.parent) as dir_fd:
+            if not link_opened(opened.fileno(), dir_fd, dest.name):
                 with dest.open("xb") as copy:
                     shutil.copyfileobj(opened, copy)
     target.mkdir(parents=True, exist_ok=True)
@@ -164,15 +164,16 @@ def checkpoint_step(name: str) -> int | None:
     return int(match.group(1)) if (match := _CHECKPOINT.fullmatch(name)) else None
 
 
-type StageFile = Callable[[Path, Callable[[], bool] | None], ContentReference]
+type StageFile = Callable[[BinaryIO, Callable[[], bool] | None], ContentReference]
 
 
 class ArtifactPublisher:
     """Writes a task's artifacts under its scope and names each by a binding.
 
-    With ``stage``, every artifact file is staged for an upload that follows instead of
-    being written to the store, while each tree's manifest is still written to the
-    store, so the tree it names resolves before its files are uploaded.
+    Each artifact file is written from the descriptor that opened it, as a completed
+    file no one modifies again. With ``stage``, every one is staged for an upload that
+    follows instead of being written to the store, while each tree's manifest is still
+    written to the store, so the tree it names resolves before its files are uploaded.
     """
 
     def __init__(
@@ -187,10 +188,12 @@ class ArtifactPublisher:
         self._cancelled = cancelled
         self._stage = stage
 
-    def _write_file(self, path: Path) -> ContentReference:
+    def _write_file(self, opened: BinaryIO) -> ContentReference:
         if self._stage is not None:
-            return self._stage(path, self._cancelled)
-        return self._store.write_file(self._scope, path, cancelled=self._cancelled)
+            return self._stage(opened, self._cancelled)
+        return self._store.write_completed(
+            self._scope, opened, cancelled=self._cancelled
+        )
 
     def publish_final(
         self,
@@ -254,7 +257,7 @@ class ArtifactPublisher:
         if opened is None:
             return None
         with opened:
-            reference = self._write_file(fd_path(opened.fileno()))
+            reference = self._write_file(opened)
         return ArtifactBinding(
             name=name,
             revision=FINAL_REVISION,
@@ -281,7 +284,7 @@ class ArtifactPublisher:
             if isinstance(opened, OSError):
                 raise opened
             with opened:
-                reference = self._write_file(fd_path(opened.fileno()))
+                reference = self._write_file(opened)
             members.append(
                 TreeMember(rel, reference.content_digest, reference.size_bytes)
             )

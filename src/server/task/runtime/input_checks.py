@@ -246,7 +246,7 @@ class InputChecks:
             if record is None or record.status != TaskStatus.PENDING:
                 continue
             del self.input_checks[task_id]
-            record.avoided_worker = None
+            record.internal.runtime.avoided_worker = None
             if self._ready.enqueue_ready_locked(
                 task_id,
                 front=False,

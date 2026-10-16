@@ -23,7 +23,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, NamedTuple, Self
 
 from shared.content import (
     OCTET_STREAM,
@@ -35,12 +35,29 @@ from shared.content import (
     FilesystemObjectBacking,
     verify_content,
 )
-from shared.utils.atomic import temp_path
+from shared.utils.atomic import temp_name, temp_path
+from shared.utils.nofollow import link_opened, open_dir
 
-from .custody import holds_inode
+from .custody import custody_holds, holds_inode
 from .holding import AnnounceHolding, HoldingReporter
 
 _STALE_STAGING_SEC = 3600.0
+
+
+class _Walked(NamedTuple):
+    """A copy as an eviction walk found it, oldest use first."""
+
+    used_at: float
+    size: int
+    scope: str
+    digest: str
+    inode: tuple[int, int]
+
+    @classmethod
+    def of(cls, scope: str, digest: str, stat: os.stat_result) -> Self:
+        return cls(
+            stat.st_mtime, stat.st_size, scope, digest, (stat.st_dev, stat.st_ino)
+        )
 
 
 class WorkerContentCache(FabricObjectStore):
@@ -132,8 +149,10 @@ class WorkerContentCache(FabricObjectStore):
         self._kept(reference)
 
     def keep_staged(self, reference: ContentReference, held: Path) -> None:
-        """Name a file upload custody holds as this object's copy, leaving it in place;
-        a copy already named stays."""
+        """Name a file upload custody holds, when it is the reference's size, as this
+        object's copy, leaving it in place; a copy already named stays."""
+        if held.stat().st_size != reference.size_bytes:
+            return
         target = self._objects.object_path(
             reference.authorization_scope, reference.content_digest
         )
@@ -144,6 +163,36 @@ class WorkerContentCache(FabricObjectStore):
             pass
         self._objects.touch(reference.authorization_scope, reference.content_digest)
         self._kept(reference)
+
+    def link_completed(self, reference: ContentReference, source: BinaryIO) -> bool:
+        """Adopt the file an opened descriptor holds as the reference's copy by
+        linking its inode, keeping a copy already named; the descriptor's bytes must be
+        the ones just stored as the reference.
+
+        Adopts nothing unless the link is the descriptor's inode at the reference's
+        size, since every read of a copy verifies its digest. Returns False when the
+        filesystem cannot link it here.
+        """
+        opened = os.fstat(source.fileno())
+        if opened.st_size != reference.size_bytes:
+            return True
+        staging = self.staging_dir(reference.authorization_scope)
+        name = temp_name()
+        with open_dir(staging) as dir_fd:
+            if not link_opened(source.fileno(), dir_fd, name):
+                return False
+        candidate = staging / name
+        try:
+            linked = candidate.stat()
+            if (linked.st_dev, linked.st_ino, linked.st_size) == (
+                opened.st_dev,
+                opened.st_ino,
+                reference.size_bytes,
+            ):
+                self.adopt(reference, candidate)
+        finally:
+            candidate.unlink(missing_ok=True)
+        return True
 
     def fetch(self, reference: ContentReference) -> bytes:
         data = self._objects.read(
@@ -190,8 +239,10 @@ class WorkerContentCache(FabricObjectStore):
         """Link this worker's copy at ``dest`` once it verifies as the reference's
         bytes, so a reader gets the copy without a second one on disk.
 
-        A copy upload custody still holds is copied to ``dest`` instead, so a reader
-        writing its input never changes bytes an upload has yet to store.
+        A copy upload custody still holds is copied to ``dest``, so a reader writing its
+        input never changes bytes an upload has yet to store. A linked copy can be a
+        producer's output file on this node, which a reader writing its input in place
+        changes too; every read of the cached copy verifies its digest.
         """
         for _ in self.open(reference):
             pass
@@ -226,29 +277,28 @@ class WorkerContentCache(FabricObjectStore):
 
         Copies unused past the retention window go first, then the least recently used
         until what is left fits the disk budget. A copy being served right now stays
-        until its transfer is done, and one with another link — held in upload custody,
-        or linked into a running task's inputs — stays while that link does, whichever
-        process on the node made it; everything else is free to go, because the object
-        itself is in the shared store either way.
+        until its transfer is done, and one upload custody holds stays until its upload
+        settles, whichever process on the node staged it; everything else is free to
+        go, because the object itself is in the shared store either way. A copy other
+        names link, such as a task's output or input, loses only its cache name.
         """
         if self._retain_sec <= 0 and self._max_bytes <= 0:
             return 0
         # The walk runs outside the lock, so a keep waits only on each removal; a copy
-        # used since the walk read it is left for the next pass.
-        held: list[tuple[float, int, str, str]] = []
+        # used or replaced since the walk read it is left for the next pass.
+        held: list[_Walked] = []
         for scope, digest in list(self._objects.iter_objects()):
             if (stat := self._objects.stat(scope, digest)) is not None:
-                held.append((stat.st_mtime, stat.st_size, scope, digest))
+                held.append(_Walked.of(scope, digest, stat))
         held.sort()
         evicted = 0
-        kept: list[tuple[float, int, str, str]] = []
+        kept: list[_Walked] = []
         deadline = time.time() - self._retain_sec
         for entry in held:
-            used_at, _, _, digest = entry
             if (
                 self._retain_sec > 0
-                and used_at <= deadline
-                and digest not in in_transfer
+                and entry.used_at <= deadline
+                and entry.digest not in in_transfer
             ):
                 if self._remove_unused(entry):
                     evicted += 1
@@ -257,36 +307,35 @@ class WorkerContentCache(FabricObjectStore):
                     continue
             kept.append(entry)
         if self._max_bytes > 0:
-            total = sum(size for _, size, _, _ in kept)
+            total = sum(entry.size for entry in kept)
             for entry in kept:
                 if total <= self._max_bytes:
                     break
-                if entry[3] in in_transfer:
+                if entry.digest in in_transfer:
                     continue
                 if self._remove_unused(entry):
                     evicted += 1
-                    total -= entry[1]
+                    total -= entry.size
                 elif self._gone(entry):
                     # Another eviction, or a drop, freed it since the walk.
-                    total -= entry[1]
+                    total -= entry.size
         return evicted
 
-    def _gone(self, entry: tuple[float, int, str, str]) -> bool:
-        return self._objects.stat(entry[2], entry[3]) is None
+    def _gone(self, entry: _Walked) -> bool:
+        return self._objects.stat(entry.scope, entry.digest) is None
 
-    def _remove_unused(self, entry: tuple[float, int, str, str]) -> bool:
-        """Remove a copy the walk found, unless it was used or replaced since, or has
-        another link."""
-        used_at, size, scope, digest = entry
+    def _remove_unused(self, entry: _Walked) -> bool:
+        """Remove a copy the walk found, unless it was used or replaced since, or
+        upload custody holds it."""
         with self._lock:
-            stat = self._objects.stat(scope, digest)
+            stat = self._objects.stat(entry.scope, entry.digest)
             if (
                 stat is None
-                or (stat.st_mtime, stat.st_size) != (used_at, size)
-                or stat.st_nlink > 1
+                or _Walked.of(entry.scope, entry.digest, stat) != entry
+                or custody_holds(self._root, entry.scope, entry.digest)
             ):
                 return False
-            self._remove(scope, digest)
+            self._remove(entry.scope, entry.digest)
         return True
 
     def _kept(self, reference: ContentReference) -> None:

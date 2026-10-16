@@ -94,7 +94,7 @@ def test_the_worker_is_reserved_for_the_dispatch_before_it_is_published() -> Non
     record = runtime.get_record(task_id)
     assert record is not None
     registry.reserve_worker.assert_called_once_with(
-        _WORKER.id, task_id, record.dispatch_id
+        _WORKER.id, task_id, record.internal.dispatch_id
     )
 
 

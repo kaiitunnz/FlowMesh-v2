@@ -76,13 +76,14 @@ class DispatchFence:
         spending no attempt. Returns whether the report was for a merged dispatch to
         ``worker_id``.
         """
+        record_internal = record.internal
         if (
-            record.merged_dispatch_worker != worker_id
+            record_internal.merged_dispatch_worker != worker_id
             or record.status != TaskStatus.DISPATCHED
         ):
             return False
         task_id = record.task_id
-        dispatch_id = record.dispatch_id
+        dispatch_id = record_internal.dispatch_id
         moved = self._merges.return_merged_children_locked(
             [task_id, *self._merges.take_children(task_id)], unmerge=True
         )
@@ -102,7 +103,7 @@ class DispatchFence:
         """
         if worker_id is None:
             return True
-        held = [(record.assigned_worker, record.dispatch_id)]
+        held = [(record.assigned_worker, record.internal.dispatch_id)]
         if (publish := self.publishing.get(record.task_id)) and not publish.recorded:
             held.append((publish.worker_id, publish.dispatch_id))
         return any(
@@ -155,7 +156,7 @@ class DispatchFence:
         if publish.recorded:
             return (
                 record is not None
-                and record.dispatch_id == publish.dispatch_id
+                and record.internal.dispatch_id == publish.dispatch_id
                 and record.status in (TaskStatus.DISPATCHED, TaskStatus.CANCELLING)
             )
         if not record or record.status in SETTLING_TASK_STATUSES:
@@ -172,6 +173,7 @@ class DispatchFence:
     def take_dispatch_locked(self, record: TaskRecord, publish: Publish) -> None:
         """Record a published dispatch as the one holding its task, in memory."""
         task_id = record.task_id
+        record_internal = record.internal
         publish.recorded = True
         self.returned_dispatches.pop(task_id, None)
         if (
@@ -182,12 +184,12 @@ class DispatchFence:
             self._committer.drop_unacknowledged(task_id)
         record.status = TaskStatus.DISPATCHED
         record.assigned_worker = publish.worker_id
-        record.dispatch_id = publish.dispatch_id
-        record.avoided_worker = None
+        record_internal.dispatch_id = publish.dispatch_id
+        record_internal.runtime.avoided_worker = None
         if publish.dispatch_id is not None:
             held = (publish.worker_id, publish.dispatch_id)
             self._reservations.hold_dispatch_locked(task_id, held)
-        record.merged_dispatch_worker = (
+        record_internal.merged_dispatch_worker = (
             publish.worker_id if self._merges.merge_children_map.get(task_id) else None
         )
         record.topic = "tasks"

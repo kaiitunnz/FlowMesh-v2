@@ -36,6 +36,11 @@ _LOGGER = logging.getLogger(__name__)
 _REFUSED_DIR_ERRNOS = frozenset({errno.ELOOP, errno.ENOTDIR})
 _REFUSED_FILE_ERRNOS = frozenset({errno.ELOOP, errno.ENXIO, errno.EISDIR})
 _SKIPPED_READ_ERRNOS = frozenset({errno.ELOOP, errno.ENXIO, errno.ENOENT})
+UNLINKABLE_ERRNOS = frozenset(
+    {errno.EXDEV, errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EMLINK}
+)
+"""The errors of a link the filesystem cannot make: across filesystems, unsupported,
+refused for a file this user may not link, or past the file's link limit."""
 
 
 class PathRefused(OSError):
@@ -143,6 +148,25 @@ def fd_path(fd: int) -> Path:
     return Path(f"/proc/self/fd/{fd}")
 
 
+def link_opened(fd: int, dir_fd: int, name: str) -> bool:
+    """Name the file the descriptor ``fd`` holds open as ``name`` in the directory
+    ``dir_fd``, another link to the same inode, whatever its path names by now.
+
+    Returns False when the filesystem cannot link it there; raises
+    ``FileExistsError`` when ``name`` exists, and any other ``OSError`` as is.
+    """
+    try:
+        # A destination directory descriptor makes this linkat(AT_SYMLINK_FOLLOW),
+        # which resolves the /proc link to the inode; plain link(2) would try to link
+        # the /proc link itself, which fails across filesystems.
+        os.link(fd_path(fd), name, dst_dir_fd=dir_fd, follow_symlinks=True)
+    except OSError as exc:
+        if exc.errno in UNLINKABLE_ERRNOS:
+            return False
+        raise
+    return True
+
+
 def remove_below(base_dir: Path) -> None:
     """Remove ``base_dir`` and everything under it without following a link; a link
     in its place is removed itself. ``base_dir``'s parent is trusted."""
@@ -216,6 +240,11 @@ def walk(
 def join_relative(rel_dir: str, name: str) -> str:
     """The relative path of ``name`` in the walked directory ``rel_dir``."""
     return f"{rel_dir}/{name}" if rel_dir else name
+
+
+def split_relative(rel_dir: str) -> list[str]:
+    """The segments of the walked directory ``rel_dir``."""
+    return rel_dir.split("/") if rel_dir else []
 
 
 def _list_dir(fd: int) -> tuple[list[str], list[str]]:

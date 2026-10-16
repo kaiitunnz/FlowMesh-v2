@@ -96,7 +96,7 @@ def _dispatched(
     watchdog = cast(Any, monitor._watchdog)
     watchdog.death_bound_sec.side_effect = lambda ttl: ttl + _GRACE_SEC
     dispatcher.dispatch_once(task_id)
-    dispatch_id = runtime._tasks[task_id].dispatch_id
+    dispatch_id = runtime._tasks[task_id].internal.dispatch_id
     assert dispatch_id is not None
     return runtime, monitor, dispatcher, workflow_id, task_id
 
@@ -129,7 +129,7 @@ def test_a_disowned_dispatch_returns_after_the_bound_and_frees_its_worker(
     client: redis.Redis,
 ) -> None:
     runtime, monitor, _, _, task_id = _dispatched(client)
-    dispatch_id = runtime._tasks[task_id].dispatch_id
+    dispatch_id = runtime._tasks[task_id].internal.dispatch_id
 
     _age(runtime, task_id, _TTL_SEC)
     monitor._handle_worker_event(_heartbeat(WorkerStatus.IDLE))
@@ -142,7 +142,7 @@ def test_a_disowned_dispatch_returns_after_the_bound_and_frees_its_worker(
     record = runtime._tasks[task_id]
     assert record.status == TaskStatus.PENDING
     assert record.attempts == 0
-    assert record.failed_workers == [_WORKER]
+    assert record.internal.failed_workers == [_WORKER]
     assert _state(client) == {"status": "IDLE"}
 
 
@@ -176,7 +176,9 @@ def test_a_report_that_is_no_disowning_heartbeat_never_resolves(
     runtime, monitor, _, _, task_id = _dispatched(client)
     _age(runtime, task_id, _PAST_BOUND_SEC)
     if report == "busy":
-        report = _heartbeat(WorkerStatus.BUSY, runtime._tasks[task_id].dispatch_id)
+        report = _heartbeat(
+            WorkerStatus.BUSY, runtime._tasks[task_id].internal.dispatch_id
+        )
 
     monitor._handle_worker_event(report)
 
@@ -186,7 +188,7 @@ def test_a_report_that_is_no_disowning_heartbeat_never_resolves(
 @_live
 def test_a_late_start_of_a_resolved_dispatch_is_fenced(client: redis.Redis) -> None:
     runtime, monitor, _, _, task_id = _dispatched(client)
-    dispatch_id = runtime._tasks[task_id].dispatch_id
+    dispatch_id = runtime._tasks[task_id].internal.dispatch_id
     _age(runtime, task_id, _PAST_BOUND_SEC)
     monitor._handle_worker_event(_heartbeat(WorkerStatus.IDLE))
 
@@ -270,7 +272,7 @@ def test_a_disowned_replayable_v2_task_reruns_under_its_invocation() -> None:
     assert outcome is not None and outcome.effect is EventEffect.RETURNED
     record = runtime.get_record(ids["a"])
     assert record is not None and record.status == TaskStatus.PENDING
-    assert record.failed_workers == ["wkr-1"]
+    assert record.internal.failed_workers == ["wkr-1"]
     assert work_item.invocation_id == invocation
     assert _drain(runtime) == [ids["a"], ids["b"], ids["c"]]
     assert runtime.workflow_settlement(workflow_id).settled

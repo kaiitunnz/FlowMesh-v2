@@ -22,6 +22,7 @@ from ..task.models import TERMINAL_TASK_STATUSES, TaskRecord
 
 # The validation-context key holding a workflow's stored sources by digest.
 _SOURCES = "workflow_sources"
+_SETTLED_EXCLUDES = {"dispatched_artifacts", "dispatched_producers"}
 
 
 class PersistedTask(BaseModel):
@@ -65,52 +66,11 @@ class PersistedTask(BaseModel):
         data = handler(self)
         del data["record"]["raw_yaml"]
         data["source_digest"] = self.record.source_digest()
-        # ``failed_workers`` is excluded from TaskRecord's dump but routes retries, so
-        # it must survive a restart.
-        data["record"]["failed_workers"] = self.record.failed_workers.copy()
-        # Likewise the result binding and skip detail: internal to the task's result
-        # read, and what that read resolves from after a restart.
-        reference = self.record.result_reference
-        data["record"]["result_reference"] = (
-            reference.model_dump(mode="json") if reference is not None else None
+        # A settled task has no dispatch left to name artifacts or producers for.
+        settled = self.record.status in TERMINAL_TASK_STATUSES
+        data["record"]["internal"] = self.record.internal.model_dump(
+            mode="json", exclude=_SETTLED_EXCLUDES if settled else None
         )
-        data["record"]["result_skip"] = self.record.result_skip
-        # And whether its artifact catalog has anything a restart must load.
-        data["record"]["has_artifacts"] = self.record.has_artifacts
-        # And which worker a merged dispatch went to, which tells a later report of
-        # that worker's failure apart from the task's own.
-        data["record"]["merged_dispatch_worker"] = self.record.merged_dispatch_worker
-        # And the dispatch holding the task, which fences its worker's events.
-        data["record"]["dispatch_id"] = self.record.dispatch_id
-        # And the dispatch that reported its latest update, which fences an endpoint
-        # the update carries to the dispatch that served it.
-        data["record"][
-            "latest_update_dispatch_id"
-        ] = self.record.latest_update_dispatch_id
-        # And what its live dispatch names by token and which upstream final sets it
-        # carries, which its worker may read from a peer; the final sets themselves
-        # are read again from the catalog.
-        live = self.record.status not in TERMINAL_TASK_STATUSES
-        data["record"]["dispatched_artifacts"] = [
-            binding.model_dump(mode="json")
-            for binding in (self.record.dispatched_artifacts if live else ())
-        ]
-        data["record"]["dispatched_producers"] = list(
-            self.record.dispatched_producers if live else ()
-        )
-        # And where its vaulted credentials go back into its spec at dispatch.
-        data["record"]["credential_refs"] = self.record.credential_refs
-        # And the upload its success left owed, and a receipt that beat the success.
-        upload = self.record.artifact_upload
-        data["record"]["artifact_upload"] = (
-            upload.model_dump(mode="json") if upload is not None else None
-        )
-        receipt = self.record.early_upload_receipt
-        data["record"]["early_upload_receipt"] = (
-            receipt.model_dump(mode="json") if receipt is not None else None
-        )
-        # And when its first run started, which a serve task's TTL counts from.
-        data["record"]["first_started_ts"] = self.record.first_started_ts
         return data
 
 

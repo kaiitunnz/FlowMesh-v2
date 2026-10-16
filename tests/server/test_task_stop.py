@@ -11,6 +11,7 @@ from fastapi import HTTPException
 from lumid_hooks import PrincipalContext
 
 from server.routers.v1.tasks import stop_task
+from server.task.models import TaskInternalState
 from server.task.runtime import TaskRuntime
 from shared.tasks import TaskType
 
@@ -24,7 +25,7 @@ def _stop(task_type: TaskType) -> MagicMock:
         task=SimpleNamespace(spec=SimpleNamespace(taskType=task_type)),
         status="DISPATCHED",
         assigned_worker="wkr-1",
-        dispatch_id="dsp-1",
+        internal=TaskInternalState(dispatch_id="dsp-1"),
     )
     runtime = MagicMock()
     runtime.task_record.return_value = record

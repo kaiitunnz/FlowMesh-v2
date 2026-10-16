@@ -299,7 +299,7 @@ def _failed(
 
 def _assert_run_alone(runtime: TaskRuntime, registry: _Registry, task_id: str) -> None:
     _assert_returned(runtime, registry, task_id)
-    assert "wkr-1" not in runtime._tasks[task_id].failed_workers
+    assert "wkr-1" not in runtime._tasks[task_id].internal.failed_workers
 
 
 @pytest.mark.anyio
@@ -347,7 +347,7 @@ async def test_a_task_that_fails_alone_after_its_merge_failed_is_charged() -> No
 
     record = runtime._tasks[a]
     assert record.status == TaskStatus.FAILED
-    assert "wkr-2" in record.failed_workers
+    assert "wkr-2" in record.internal.failed_workers
 
 
 @pytest.mark.anyio

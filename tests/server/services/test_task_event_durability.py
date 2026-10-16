@@ -156,7 +156,7 @@ def test_a_held_event_is_acknowledged_only_once_its_transition_commits() -> None
 def test_a_crash_while_an_event_is_held_replays_it_from_its_cursor() -> None:
     store, runtime, task_id, event = _succeeding()
     _held_past_the_budget(store, runtime, event)
-    reference = runtime._tasks[task_id].result_reference
+    reference = runtime._tasks[task_id].internal.result_reference
     runtime.shutdown()
     store.error = None
 
@@ -172,8 +172,8 @@ def test_a_crash_while_an_event_is_held_replays_it_from_its_cursor() -> None:
     _assert_counted_once(monitor)
     durable = store.record(task_id)
     assert durable.status == TaskStatus.DONE
-    assert durable.dispatch_id == "dsp-1"
-    assert durable.result_reference == reference
+    assert durable.internal.dispatch_id == "dsp-1"
+    assert durable.internal.result_reference == reference
 
 
 @pytest.mark.parametrize(

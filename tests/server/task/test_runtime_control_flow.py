@@ -199,7 +199,7 @@ async def test_a_branch_routes_by_its_stored_selector_and_skips_the_dead_arm(
     # The dead arm settles done without running, an empty result saying why, and
     # never as a reported success that would make its routes live.
     assert record is not None and record.status is TaskStatus.DONE
-    assert record.result_skip == {"skipped": True, "reason": "route_not_taken"}
+    assert record.internal.result_skip == {"skipped": True, "reason": "route_not_taken"}
     assert right not in reported
     assert right not in run.registry.remaining_of(run.workflow_id)
     assert [run.name(t) for t in run.ready] == ["left_work"]
@@ -375,7 +375,7 @@ async def test_an_unselected_spawn_makes_no_children_and_the_workflow_closes() -
     run.run("classify", {"label": "stop", "items": ["a", "b"]})
     assert run.ready == []
     record = run.runtime.get_record(run.ids["after"])
-    assert record is not None and record.result_skip is not None
+    assert record is not None and record.internal.result_skip is not None
     assert run.settled()
 
 

@@ -122,11 +122,11 @@ async def test_a_snapshot_keeps_its_rows_after_the_runtime_changes_them() -> Non
 
     await asyncio.sleep(0)
     live = runtime._tasks[planner]
-    live.failed_workers.append("wkr-9")
+    live.internal.failed_workers.append("wkr-9")
     live.latest_update = {"progress": 1}
     live.status = TaskStatus.DISPATCHED
 
-    assert snapshot.failed_workers == []
+    assert snapshot.internal.failed_workers == []
     assert snapshot.latest_update is None
     assert snapshot.status is TaskStatus.PENDING
     assert snapshot is not live

@@ -16,7 +16,7 @@ from server.content.directory import ContentHolderRecord
 from server.dispatcher import base as dispatcher_base
 from server.dispatcher.base import HOLDER_GRACE_SEC, Dispatcher
 from server.registries.worker import Worker
-from server.task.models import TaskStatus
+from server.task.models import TaskInternalState, TaskRecordRuntimeState, TaskStatus
 from server.task.runtime.content_bindings import UnreadableInput
 from shared.content import TREE_MEDIA_TYPE, ContentReference, TreeManifest, TreeMember
 from shared.private_state import OwnerFence
@@ -214,8 +214,10 @@ class _SettleRuntime(_Runtime):
             "tsk-train": SimpleNamespace(
                 status=TaskStatus.DONE,
                 assigned_worker="wkr-2",
-                succeeded_monotonic=100.0,
-                dispatch_id="dsp-1",
+                internal=TaskInternalState(
+                    dispatch_id="dsp-1",
+                    runtime=TaskRecordRuntimeState(succeeded_monotonic=100.0),
+                ),
             ),
             "tsk-1": SimpleNamespace(status=TaskStatus.PENDING),
         }
@@ -304,7 +306,9 @@ def _ran_elsewhere(d: Any) -> None:
 
 
 def _finished_long_ago(d: Any) -> None:
-    d._runtime.records["tsk-train"].succeeded_monotonic = 100.0 - HOLDER_GRACE_SEC
+    d._runtime.records["tsk-train"].internal.runtime.succeeded_monotonic = (
+        100.0 - HOLDER_GRACE_SEC
+    )
 
 
 def _not_done(d: Any) -> None:
@@ -606,11 +610,11 @@ def test_a_producer_whose_worker_clock_lags_still_graces_its_consumer() -> None:
 
 
 def _exclude_failed(record: Any, registry: mock.Mock) -> None:
-    record.failed_workers = ["wkr-1"]
+    record.internal.failed_workers = ["wkr-1"]
 
 
 def _exclude_avoided(record: Any, registry: mock.Mock) -> None:
-    record.avoided_worker = "wkr-1"
+    record.internal.runtime.avoided_worker = "wkr-1"
 
 
 def _exclude_unfit(record: Any, registry: mock.Mock) -> None:
@@ -639,7 +643,7 @@ def test_a_holder_the_consumer_cannot_be_placed_on_is_not_waited_for(
 
 def test_an_owner_bound_consumer_waits_only_for_its_owner() -> None:
     dispatcher = _settling()
-    record: Any = SimpleNamespace(avoided_worker=None)
+    record: Any = SimpleNamespace(internal=TaskInternalState())
     owner = OwnerFence(worker_id="wkr-3", incarnation=1)
 
     assert dispatcher._waitable_workers(record, owner, set(), False) == {"wkr-3"}

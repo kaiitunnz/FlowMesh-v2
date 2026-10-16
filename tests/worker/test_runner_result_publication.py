@@ -1,6 +1,8 @@
 """The runner stores a task's result in the shared store before reporting success."""
 
+import errno
 import json
+import os
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -19,6 +21,7 @@ from shared.schemas.result import BaseExecutorResult, ResultEnvelope
 from shared.tasks import MergedChildTaskStrict
 from shared.tasks.artifact_upload import ARTIFACTS_PENDING
 from shared.tasks.task_type import TaskType
+from shared.utils.task_output import detach_shared_files
 from tests.worker.factories import (
     make_worker_hardware,
     make_worker_task_message,
@@ -66,6 +69,20 @@ def _run(
     store: FabricObjectStore,
     **message: Any,
 ) -> tuple[MagicMock, _Plane]:
+    return _run_executor(tmp_path, _Returning(result), store, **message)
+
+
+def _run_with(tmp_path: Path, executor: Executor, **message: Any) -> MagicMock:
+    store = SharedFilesystemObjectStore(tmp_path / "cas")
+    return _run_executor(tmp_path, executor, store, **message)[0]
+
+
+def _run_executor(
+    tmp_path: Path,
+    executor: Executor,
+    store: FabricObjectStore,
+    **message: Any,
+) -> tuple[MagicMock, _Plane]:
     lifecycle = MagicMock()
     lifecycle.worker_id = "wrk-test"
     lifecycle.cost_per_hour = 1.0
@@ -82,7 +99,6 @@ def _run(
         content_scope="org-a",
         **message,
     )
-    executor = _Returning(result)
     Runner(
         lifecycle=lifecycle,
         task_stream=[msg],
@@ -339,7 +355,7 @@ def test_a_starting_worker_clears_the_working_dirs_a_crash_left(
 
 
 def _run_staged(
-    tmp_path: Path, store: FabricObjectStore, executor: Executor
+    tmp_path: Path, store: FabricObjectStore, executor: Executor, **message: Any
 ) -> tuple[MagicMock, ArtifactCustody, list[list[UploadJournal]]]:
     custody = ArtifactCustody(tmp_path / "content")
     uploads = ArtifactUploader(
@@ -369,6 +385,7 @@ def _run_staged(
         task_id="tsk-1",
         content_scope="org-a",
         dispatch_id="dsp-1",
+        **message,
     )
     Runner(
         lifecycle=lifecycle,
@@ -403,6 +420,36 @@ def test_a_staged_success_owes_its_upload_before_it_is_reported(
     assert store.hydrate(ContentReference.model_validate(binding["reference"]))
 
 
+class _ProducingMerged(_Returning):
+    """Leaves an artifact in its own output and in a merged child's."""
+
+    def run(self, task: Any, out_dir: Path) -> BaseExecutorResult:
+        for task_dir in (out_dir, out_dir.parent / "tsk-c"):
+            (task_dir / "artifacts").mkdir(parents=True, exist_ok=True)
+            (task_dir / "artifacts" / "model").write_bytes(task_dir.name.encode())
+        return self.result
+
+
+def test_a_staged_success_holds_each_output_file_itself_in_custody(
+    tmp_path: Path,
+) -> None:
+    result = BaseExecutorResult()
+    result.children = {"tsk-c": BaseExecutorResult()}
+
+    _, custody, owed = _run_staged(
+        tmp_path,
+        SharedFilesystemObjectStore(tmp_path / "cas"),
+        _ProducingMerged(result),
+        merged_children=[_child()],
+    )
+
+    (journal,) = owed[0]
+    for task_id in ("tsk-1", "tsk-c"):
+        (member,) = journal.tasks[task_id].members
+        output = tmp_path / "out" / task_id / "artifacts" / "model"
+        assert os.path.samestat(custody.source(journal, member).stat(), output.stat())
+
+
 def test_a_success_with_nothing_staged_owes_no_upload(tmp_path: Path) -> None:
     lifecycle, custody, owed = _run_staged(
         tmp_path,
@@ -430,3 +477,96 @@ def test_a_task_failing_after_staging_ends_its_custody(tmp_path: Path) -> None:
     assert lifecycle.set_failed.call_args.kwargs["retryable"] is True
     assert list(custody.journals()) == []
     assert not custody.publication_dir("org-a", "dsp-1").exists()
+
+
+class _Rewriting(_Returning):
+    """Rewrites in place the outputs an earlier attempt left, its own and a merged
+    child's."""
+
+    ran = False
+
+    def run(self, task: Any, out_dir: Path) -> BaseExecutorResult:
+        self.ran = True
+        for task_dir in (out_dir, out_dir.parent / "tsk-c"):
+            with open(task_dir / "artifacts" / "model", "r+b") as model:
+                model.write(b"rewritten")
+        return self.result
+
+
+def _published(tmp_path: Path, task_id: str) -> Path:
+    model = tmp_path / "out" / task_id / "artifacts" / "model"
+    model.parent.mkdir(parents=True)
+    model.write_bytes(b"accepted")
+    held = tmp_path / f"custody-{task_id}"
+    os.link(model, held)
+    return held
+
+
+def _child() -> MergedChildTaskStrict:
+    return MergedChildTaskStrict(
+        task_id="tsk-c",
+        owner_id="usr-test",
+        workflow_id="wfl-test",
+        spec=make_worker_task_message(
+            {"taskType": "echo"}, task_type=TaskType.ECHO
+        ).spec,
+    )
+
+
+def test_a_rerun_writing_its_outputs_never_changes_what_was_published(
+    tmp_path: Path,
+) -> None:
+    held = [_published(tmp_path, task_id) for task_id in ("tsk-1", "tsk-c")]
+    result = BaseExecutorResult()
+    result.children = {"tsk-c": BaseExecutorResult()}
+    executor = _Rewriting(result)
+
+    _run_with(tmp_path, executor, merged_children=[_child()])
+
+    assert executor.ran
+    assert [path.read_bytes() for path in held] == [b"accepted", b"accepted"]
+
+
+def test_an_output_that_cannot_be_detached_fails_before_the_executor_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _published(tmp_path, "tsk-1")
+    monkeypatch.setattr(
+        "worker.runner.detach_shared_files",
+        MagicMock(side_effect=OSError(errno.ENOSPC, "full")),
+    )
+    executor = _Rewriting(BaseExecutorResult())
+
+    lifecycle = _run_with(tmp_path, executor)
+
+    assert not executor.ran
+    lifecycle.set_succeeded.assert_not_called()
+    assert lifecycle.set_failed.call_args.kwargs["retryable"] is True
+
+
+def test_a_cancel_landing_during_detachment_ends_the_run_cancelled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    held = _published(tmp_path, "tsk-1")
+    cancelled = False
+    ended = Runner._ended_before_execution_locked
+
+    def ended_or_cancelled(runner: Runner, task_id: str) -> str | None:
+        return "cancelled" if cancelled else ended(runner, task_id)
+
+    def detaching(top: Path, raise_if_cancelled: Any) -> int:
+        nonlocal cancelled
+        cancelled = True
+        return detach_shared_files(top, raise_if_cancelled)
+
+    monkeypatch.setattr(Runner, "_ended_before_execution_locked", ended_or_cancelled)
+    monkeypatch.setattr("worker.runner.detach_shared_files", detaching)
+    executor = _Rewriting(BaseExecutorResult())
+
+    lifecycle = _run_with(tmp_path, executor)
+
+    assert not executor.ran
+    lifecycle.set_cancelled.assert_called_once()
+    lifecycle.set_failed.assert_not_called()
+    model = tmp_path / "out" / "tsk-1" / "artifacts" / "model"
+    assert os.path.samestat(model.stat(), held.stat())

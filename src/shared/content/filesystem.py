@@ -9,7 +9,6 @@ it.
 """
 
 import contextlib
-import errno
 import os
 import time
 from collections.abc import Callable, Iterator
@@ -17,6 +16,7 @@ from pathlib import Path
 from typing import BinaryIO
 
 from shared.utils.atomic import is_atomic_temp, link_no_replace, temp_path
+from shared.utils.nofollow import UNLINKABLE_ERRNOS
 
 from .reference import OCTET_STREAM, ContentReference
 from .store import (
@@ -142,7 +142,7 @@ class FilesystemObjectBacking:
             if link_no_replace(tmp, target, durable=self._durable):
                 return
         except OSError as exc:
-            if exc.errno in (errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP):
+            if exc.errno in UNLINKABLE_ERRNOS:
                 raise ContentStoreError(
                     f"content write of {reference.content_digest} failed: the "
                     "content filesystem must support hard links, which commit an "

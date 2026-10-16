@@ -302,13 +302,17 @@ class ContentBindings:
         record = self._tasks.get(task_id)
         if record is None:
             return None
+        record_internal = record.internal
         if (engine := self._engines.get(record.workflow_id)) is None:
-            if record.result_reference is None and record.result_skip is None:
+            if (
+                record_internal.result_reference is None
+                and record_internal.result_skip is None
+            ):
                 return None
             return ResultBinding(
                 task_id=task_id,
-                reference=record.result_reference,
-                skip=record.result_skip,
+                reference=record_internal.result_reference,
+                skip=record_internal.result_skip,
                 settled_at=_settled_at(record),
             )
         settled = engine.legacy_task_value(task_id)
@@ -316,10 +320,12 @@ class ContentBindings:
             return None
         outcome, value_ref = settled
         if outcome is PublicationOutcome.EXPLICIT_EMPTY:
-            if record.result_skip is None:
+            if record_internal.result_skip is None:
                 return None
             return ResultBinding(
-                task_id=task_id, skip=record.result_skip, settled_at=_settled_at(record)
+                task_id=task_id,
+                skip=record_internal.result_skip,
+                settled_at=_settled_at(record),
             )
         if (
             outcome is not PublicationOutcome.SUCCESS
@@ -334,11 +340,12 @@ class ContentBindings:
         record = self._tasks.get(task_id)
         if record is None or record.status != TaskStatus.DONE:
             return False
-        if record.result_skip is not None:
+        record_internal = record.internal
+        if record_internal.result_skip is not None:
             return False
         engine = self._engines.get(record.workflow_id)
         if engine is None:
-            return record.result_reference is None
+            return record_internal.result_reference is None
         settled = engine.legacy_task_value(task_id)
         return settled is not None and settled[0] is PublicationOutcome.SUCCESS
 
@@ -349,12 +356,16 @@ class ContentBindings:
         skip: dict[str, Any] | None,
     ) -> None:
         """Bind a settling task's result once; a later success never re-points it."""
-        if record.result_reference is not None or record.result_skip is not None:
+        record_internal = record.internal
+        if (
+            record_internal.result_reference is not None
+            or record_internal.result_skip is not None
+        ):
             return
         if skip is not None:
-            record.result_skip = skip
+            record_internal.result_skip = skip
             return
-        record.result_reference = self.accepted_reference(record, reference)
+        record_internal.result_reference = self.accepted_reference(record, reference)
 
     def bind_artifacts_locked(
         self,
@@ -371,10 +382,12 @@ class ContentBindings:
         published_at = ts_to_iso(time.time())
         accepted: list[ArtifactBinding] = []
         ordered = sorted(bindings, key=lambda b: b.kind is ArtifactKind.ARCHIVE)
+        record_internal = record.internal
+        record_runtime = record_internal.runtime
         for binding in ordered:
             if not self._publishable(record, binding):
                 continue
-            if (existing := record.artifacts.get(binding.key)) is not None:
+            if (existing := record_runtime.artifacts.get(binding.key)) is not None:
                 if not existing.same_publication(binding):
                     self._publication_conflicts.add(1)
                     self._logger.warning(
@@ -388,9 +401,9 @@ class ContentBindings:
                     )
                 continue
             stamped = binding.accepted(dispatch_id, published_at)
-            record.artifacts[binding.key] = stamped
-            record.unwritten_artifacts.append(stamped)
-            record.has_artifacts = True
+            record_runtime.artifacts[binding.key] = stamped
+            record_runtime.unwritten_artifacts.append(stamped)
+            record_internal.has_artifacts = True
             accepted.append(stamped)
         return accepted
 
@@ -431,7 +444,7 @@ class ContentBindings:
             )
         if binding.kind is ArtifactKind.ARCHIVE:
             key = (binding.revision, binding.of or "")
-            tree = record.artifacts.get(key) or reported_trees.get(key)
+            tree = record.internal.runtime.artifacts.get(key) or reported_trees.get(key)
             if (
                 tree is None
                 or tree.kind is not ArtifactKind.TREE
@@ -486,12 +499,14 @@ class ContentBindings:
         """Return the named objects the task consumes, each once: a bound input, or an
         object its dispatch's artifact inputs name or hold. Every named object counts
         while a restored dispatch's tree members are still being read."""
+        record_runtime = record.internal.runtime
         return tuple(
             reference
             for reference in dict.fromkeys(references)
-            if record.members_pending
+            if record_runtime.members_pending
             or self.consumes_locked(record, reference)
             or any(
-                reference.identity in objects for objects in record.dispatched_objects
+                reference.identity in objects
+                for objects in record_runtime.dispatched_objects
             )
         )

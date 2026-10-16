@@ -155,6 +155,7 @@ from ..models import (
     SettleOutcome,
     TaskInfo,
     TaskInputElement,
+    TaskInternalState,
     TaskLoopTime,
     TaskOccurrence,
     TaskOrder,
@@ -442,7 +443,9 @@ def _listing_fields(
 
 def _stored_task_info(stored: StoredTask) -> TaskInfo:
     """A freed task's ``TaskInfo``, from its stored record and history."""
-    return TaskInfo(**dict(stored.persisted.record), **stored.history.info_fields())
+    return TaskInfo(
+        **dict(stored.persisted.record.detached()), **stored.history.info_fields()
+    )
 
 
 # How many tasks or output members one hold of the runtime lock reads into a settled
@@ -907,7 +910,7 @@ class TaskRuntime:
                 task_type=task_type,
                 category=category,
                 resident=resident,
-                credential_refs=task_credentials.refs,
+                internal=TaskInternalState(credential_refs=task_credentials.refs),
             )
             if task_id in blueprint_ops:
                 blueprints.append(record.model_copy(deep=True))
@@ -1219,7 +1222,7 @@ class TaskRuntime:
         with self._lock:
             for workflow_id in workflow_ids:
                 for task in self._tasks.of_workflow(workflow_id):
-                    if not task.has_artifacts:
+                    if not task.internal.has_artifacts:
                         continue
                     group = settled if task.status in TERMINAL_TASK_STATUSES else live
                     group.append(task.task_id)
@@ -1233,7 +1236,7 @@ class TaskRuntime:
         with self._lock:
             for task_id, bindings in catalogs.items():
                 if (record := self._tasks.get(task_id)) is not None:
-                    record.artifacts = bindings
+                    record.internal.runtime.artifacts = bindings
 
     async def _restore_dispatched_objects(self, workflow_ids: Sequence[str]) -> None:
         """Lend each restored dispatch the objects its artifact inputs name at once,
@@ -1245,11 +1248,18 @@ class TaskRuntime:
         """
         with self._lock:
             restored = [
-                (record, record.dispatched_artifacts, record.dispatched_producers)
+                (
+                    record,
+                    record.internal.dispatched_artifacts,
+                    record.internal.dispatched_producers,
+                )
                 for workflow_id in workflow_ids
                 for record in self._tasks.of_workflow(workflow_id)
                 if record.status not in TERMINAL_TASK_STATUSES
-                and (record.dispatched_artifacts or record.dispatched_producers)
+                and (
+                    record.internal.dispatched_artifacts
+                    or record.internal.dispatched_producers
+                )
             ]
         widened: list[tuple[TaskRecord, list[ArtifactBinding]]] = []
         for record, named, producers in restored:
@@ -1262,10 +1272,11 @@ class TaskRuntime:
                 ),
             ]
             with self._lock:
-                record.dispatched_objects = (
+                record_runtime = record.internal.runtime
+                record_runtime.dispatched_objects = (
                     frozenset(binding.reference.identity for binding in artifacts),
                 )
-                record.members_pending = True
+                record_runtime.members_pending = True
             widened.append((record, artifacts))
         if widened:
             threading.Thread(
@@ -1283,16 +1294,22 @@ class TaskRuntime:
         dispatch ends."""
 
         def widen(record: TaskRecord, artifacts: list[ArtifactBinding]) -> None:
-            dispatch_id = record.dispatch_id
+            record_internal = record.internal
+            record_runtime = record_internal.runtime
+            dispatch_id = record_internal.dispatch_id
             objects = self.artifact_input_objects((), artifacts)
             whole = len(objects) - 1 == len(_trees(artifacts))
             with self._lock:
-                if record.dispatch_id == dispatch_id and record.members_pending:
-                    record.dispatched_objects = objects
-                    record.members_pending = not whole
+                if (
+                    record_internal.dispatch_id == dispatch_id
+                    and record_runtime.members_pending
+                ):
+                    record_runtime.dispatched_objects = objects
+                    record_runtime.members_pending = not whole
 
         pending = [
-            (record, record.dispatch_id, artifacts) for record, artifacts in widened
+            (record, record.internal.dispatch_id, artifacts)
+            for record, artifacts in widened
         ]
         while True:
             with ThreadPoolExecutor(
@@ -1312,7 +1329,8 @@ class TaskRuntime:
                 pending = [
                     (record, dispatch_id, artifacts)
                     for record, dispatch_id, artifacts in pending
-                    if record.members_pending and record.dispatch_id == dispatch_id
+                    if record.internal.runtime.members_pending
+                    and record.internal.dispatch_id == dispatch_id
                 ]
             if not pending:
                 return
@@ -1387,7 +1405,10 @@ class TaskRuntime:
                 continue
             if record.assigned_worker is not None and (
                 revoke := self._actions.revoke_for(
-                    record.task_id, record.assigned_worker, record.dispatch_id, None
+                    record.task_id,
+                    record.assigned_worker,
+                    record.internal.dispatch_id,
+                    None,
                 )
             ):
                 revokes.append(revoke)
@@ -1458,7 +1479,8 @@ class TaskRuntime:
         taken: list[PersistedTask] = []
         for persisted in tasks:
             record = persisted.record
-            if record.credential_refs is not None:
+            record_internal = record.internal
+            if record_internal.credential_refs is not None:
                 continue
             task = record.task.model_copy(deep=True)
             try:
@@ -1475,7 +1497,7 @@ class TaskRuntime:
                 continue
             record.task = task
             record.raw_yaml = source
-            record.credential_refs = credentials.refs if live else {}
+            record_internal.credential_refs = credentials.refs if live else {}
             if record.merge_key is not None:
                 record.merge_key = credentials.merge_key(task.spec, scope=record.org_id)
             taken.append(persisted)
@@ -1510,7 +1532,9 @@ class TaskRuntime:
                 # A key persisted under an earlier rule may omit what now keeps two
                 # tasks apart, so a restored task's key comes from the task itself.
                 record.merge_key = credential_merge_key(
-                    record.task.spec, record.credential_refs or {}, scope=record.org_id
+                    record.task.spec,
+                    record.internal.credential_refs or {},
+                    scope=record.org_id,
                 )
             self._ready.merge_key_by_task[task_id] = (
                 record.merge_key,
@@ -1635,14 +1659,15 @@ class TaskRuntime:
         for persisted in tasks:
             record = persisted.record
             if record.status == TaskStatus.DONE:
+                record_internal = record.internal
                 # A dead route's record settles from its branch decision, restored or
                 # made again, and never as a success.
-                if record.result_skip == ROUTE_NOT_TAKEN:
+                if record_internal.result_skip == ROUTE_NOT_TAKEN:
                     continue
                 engine.on_succeeded(
                     record.task_id,
-                    empty=record.result_skip is not None,
-                    content=record.result_reference,
+                    empty=record_internal.result_skip is not None,
+                    content=record_internal.result_reference,
                 )
             elif record.status == TaskStatus.FAILED:
                 engine.on_failed(
@@ -3622,7 +3647,7 @@ class TaskRuntime:
                 task_id: sorted(refs)
                 for task_id in task_ids
                 if (record := self._tasks.get(task_id)) is not None
-                and (refs := record.credential_refs)
+                and (refs := record.internal.credential_refs)
             }
 
     def credentialed_task(
@@ -3634,7 +3659,7 @@ class TaskRuntime:
         The copy is what a dispatch renders and sends. Nothing writes it back, so the
         record keeps only the refs.
         """
-        refs = record.credential_refs
+        refs = record.internal.credential_refs
         if not refs:
             return record.task, _unscrubbed
         values = self._credential_vault.resolve_values(
@@ -3788,10 +3813,14 @@ class TaskRuntime:
         # can settle.
         departed = self._uploads.departed_locked(worker_id)
         for record in records:
-            receipt, record.early_upload_receipt = record.early_upload_receipt, None
+            record_internal = record.internal
+            receipt, record_internal.early_upload_receipt = (
+                record_internal.early_upload_receipt,
+                None,
+            )
             if not any(
                 binding.revision == FINAL_REVISION
-                for binding in record.artifacts.values()
+                for binding in record_internal.runtime.artifacts.values()
             ):
                 continue
             upload = ArtifactUpload(
@@ -3805,7 +3834,7 @@ class TaskRuntime:
                         upload = upload.settle({}, now)
                     case UploadReport.UNUPLOADABLE:
                         self._unuploadable_locked(record.task_id, worker_id, receipt)
-            record.artifact_upload = upload
+            record_internal.artifact_upload = upload
             self._uploads.track_locked(record)
             if departed and upload.pending:
                 self._uploads.fence_locked(record.task_id)
@@ -3838,8 +3867,8 @@ class TaskRuntime:
             owed = self._tasks.get(task_id)
             if (
                 owed is not None
-                and owed.artifact_upload is not None
-                and owed.artifact_upload.dispatch_id == dispatch_id
+                and (upload := owed.internal.artifact_upload) is not None
+                and upload.dispatch_id == dispatch_id
             ):
                 self._ack_upload_locked(owed, worker_id)
             else:
@@ -3865,7 +3894,7 @@ class TaskRuntime:
 
     def _ack_upload_locked(self, record: TaskRecord, worker_id: str) -> None:
         """Tell a worker where a task's upload stands, once that is durable."""
-        if (upload := record.artifact_upload) is None:
+        if (upload := record.internal.artifact_upload) is None:
             return
         self._file_locked(
             record.task_id,
@@ -3924,7 +3953,7 @@ class TaskRuntime:
         if report is UploadReport.ABANDONED:
             with self._lock:
                 record = self._tasks.get(task_id)
-                upload = record.artifact_upload if record is not None else None
+                upload = record.internal.artifact_upload if record is not None else None
             if upload is not None and upload.pending:
                 owner_gone = self._worker_registry.get_worker(upload.owner_id) is None
         with self._transition():
@@ -3957,7 +3986,7 @@ class TaskRuntime:
             record = stored.persisted.record if stored is not None else None
         if record is not None and record.status not in TERMINAL_TASK_STATUSES:
             return
-        upload = record.artifact_upload if record is not None else None
+        upload = record.internal.artifact_upload if record is not None else None
         disposition = (
             UploadDisposition(upload.state.value)
             if upload is not None and upload.dispatch_id == dispatch_id
@@ -3981,7 +4010,7 @@ class TaskRuntime:
     ) -> None:
         """Apply an upload report about a task this runtime holds."""
         task_id = record.task_id
-        upload = record.artifact_upload
+        upload = record.internal.artifact_upload
         if upload is None or upload.dispatch_id != dispatch_id:
             if not self._keep_early_report_locked(
                 record, worker_id, dispatch_id, report, error
@@ -4036,11 +4065,11 @@ class TaskRuntime:
         )
         if (
             dispatched is None
-            or dispatched.dispatch_id != dispatch_id
+            or dispatched.internal.dispatch_id != dispatch_id
             or dispatched.assigned_worker != worker_id
         ):
             return False
-        record.early_upload_receipt = EarlyUploadReceipt(
+        record.internal.early_upload_receipt = EarlyUploadReceipt(
             dispatch_id=dispatch_id, report=report, error=error
         )
         self._committer.commit_locked(record.task_id, sched=False)
@@ -4050,9 +4079,10 @@ class TaskRuntime:
         self, record: TaskRecord, lost: dict[str, ArtifactLoss]
     ) -> None:
         """Settle a task's owed upload, durable or with what it lost, and act on it."""
-        upload = record.artifact_upload
+        record_internal = record.internal
+        upload = record_internal.artifact_upload
         assert upload is not None and upload.pending
-        record.artifact_upload = settled = upload.settle(lost, time.time())
+        record_internal.artifact_upload = settled = upload.settle(lost, time.time())
         self._uploads.track_locked(record)
         self._committer.commit_locked(record.task_id, sched=False)
         self._ack_upload_locked(record, upload.owner_id)
@@ -4119,7 +4149,10 @@ class TaskRuntime:
     def _upload_check(self, task_id: str) -> UploadCheck | None:
         with self._lock:
             record = self._tasks.get(task_id)
-            if record is None or (upload := record.artifact_upload) is None:
+            if record is None:
+                return None
+            record_internal = record.internal
+            if (upload := record_internal.artifact_upload) is None:
                 return None
             if not upload.pending:
                 return None
@@ -4128,7 +4161,7 @@ class TaskRuntime:
                 upload,
                 tuple(
                     binding
-                    for binding in record.artifacts.values()
+                    for binding in record_internal.runtime.artifacts.values()
                     if binding.revision == FINAL_REVISION
                 ),
             )
@@ -4138,7 +4171,7 @@ class TaskRuntime:
     ) -> None:
         with self._transition():
             record = self._reported_record_locked(check.task_id)
-            if record is None or record.artifact_upload != check.upload:
+            if record is None or record.internal.artifact_upload != check.upload:
                 return
             self._settle_upload_locked(record, lost)
 
@@ -4146,28 +4179,30 @@ class TaskRuntime:
         record = self._tasks.get(task_id)
         if record is None:
             return frozenset()
+        record_internal = record.internal
         pending = {
             producer
-            for producer in record.dispatched_producers
+            for producer in record_internal.dispatched_producers
             if (upstream := self._tasks.get(producer)) is not None
-            and upstream.artifact_upload is not None
-            and upstream.artifact_upload.pending
+            and (upload := upstream.internal.artifact_upload) is not None
+            and upload.pending
         }
-        for binding in record.dispatched_artifacts:
+        for binding in record_internal.dispatched_artifacts:
             pending.update(self._pending_publisher_locked(binding))
         return frozenset(pending)
 
     def _artifact_reads_locked(self, record: TaskRecord) -> tuple[ArtifactBinding, ...]:
         """Return the accepted artifacts a dispatched task reads: those named to it,
         and its upstream tasks' final ones."""
+        record_internal = record.internal
         return (
-            *record.dispatched_artifacts,
+            *record_internal.dispatched_artifacts,
             *(
                 binding
-                for producer in record.dispatched_producers
+                for producer in record_internal.dispatched_producers
                 if (upstream := self._tasks.get(producer)) is not None
-                and upstream.artifact_upload is not None
-                for binding in upstream.artifacts.values()
+                and upstream.internal.artifact_upload is not None
+                for binding in upstream.internal.runtime.artifacts.values()
                 if binding.revision == FINAL_REVISION
             ),
         )
@@ -4197,8 +4232,12 @@ class TaskRuntime:
             for binding in bindings
             for task_id in self._uploads.lost_for_dispatch_locked(binding.dispatch_id)
             if (record := self._tasks.get(task_id)) is not None
-            and (upload := record.artifact_upload) is not None
-            and (owned := record.artifacts.get((binding.revision, binding.name)))
+            and (upload := record.internal.artifact_upload) is not None
+            and (
+                owned := record.internal.runtime.artifacts.get(
+                    (binding.revision, binding.name)
+                )
+            )
             is not None
             and owned.reference.identity == binding.reference.identity
             and upload.durability(binding)[0] is ArtifactDurability.LOST
@@ -4212,7 +4251,11 @@ class TaskRuntime:
             task_id
             for task_id in self._uploads.owed_for_dispatch_locked(binding.dispatch_id)
             if (record := self._tasks.get(task_id)) is not None
-            and (owned := record.artifacts.get((binding.revision, binding.name)))
+            and (
+                owned := record.internal.runtime.artifacts.get(
+                    (binding.revision, binding.name)
+                )
+            )
             is not None
             and owned.reference.identity == binding.reference.identity
         }
@@ -4226,14 +4269,18 @@ class TaskRuntime:
         """
         with self._lock:
             if (record := self._tasks.get(task_id)) is not None:
-                return record.artifact_upload
+                return record.internal.artifact_upload
         try:
             stored = self._stored_task(task_id)
         except Exception as exc:
             raise UploadStateUnavailable(
                 f"could not read the stored record of task {task_id}: {exc}"
             ) from exc
-        return stored.persisted.record.artifact_upload if stored is not None else None
+        return (
+            stored.persisted.record.internal.artifact_upload
+            if stored is not None
+            else None
+        )
 
     def artifact_bindings(
         self, task_id: str, revision: str | None = None
@@ -4245,14 +4292,15 @@ class TaskRuntime:
         held: ArtifactBindings | None = None
         with self._lock:
             if (record := self._tasks.get(task_id)) is not None:
+                record_internal = record.internal
                 held = {
                     key: binding
-                    for key, binding in record.artifacts.items()
+                    for key, binding in record_internal.runtime.artifacts.items()
                     if revision is None or key[0] == revision
                 }
                 if (
                     record.status not in TERMINAL_TASK_STATUSES
-                    or not record.has_artifacts
+                    or not record_internal.has_artifacts
                     or revision == FINAL_REVISION
                 ):
                     return held
@@ -4261,7 +4309,7 @@ class TaskRuntime:
             return {**stored, **held}
         if (persisted := self._stored_task(task_id)) is None:
             return None
-        if not persisted.persisted.record.has_artifacts:
+        if not persisted.persisted.record.internal.has_artifacts:
             return {}
         return self._workflow_registry.artifact_bindings(task_id, revision)
 
@@ -4273,18 +4321,21 @@ class TaskRuntime:
         """
         with self._lock:
             if (record := self._tasks.get(task_id)) is not None:
-                if (binding := record.artifacts.get((revision, name))) is not None:
+                record_internal = record.internal
+                if (
+                    binding := record_internal.runtime.artifacts.get((revision, name))
+                ) is not None:
                     return binding
                 if (
                     record.status not in TERMINAL_TASK_STATUSES
-                    or not record.has_artifacts
+                    or not record_internal.has_artifacts
                     or revision == FINAL_REVISION
                 ):
                     return None
         if record is None:
             if (persisted := self._stored_task(task_id)) is None:
                 return None
-            if not persisted.persisted.record.has_artifacts:
+            if not persisted.persisted.record.internal.has_artifacts:
                 return None
         return self._workflow_registry.artifact_binding(task_id, revision, name)
 
@@ -4292,7 +4343,7 @@ class TaskRuntime:
         """Return a task's final set by revision and name, empty when it has none."""
         with self._lock:
             if (record := self._tasks.get(task_id)) is not None:
-                return final_set(record.artifacts)
+                return final_set(record.internal.runtime.artifacts)
         return final_set(self.artifact_bindings(task_id) or {})
 
     def input_resolution_binding(self, task_id: str) -> InputResolutionBinding | None:
@@ -4333,7 +4384,7 @@ class TaskRuntime:
                 owing = self._tasks.get(owing_id)
                 if (
                     owing is not None
-                    and (upload := owing.artifact_upload) is not None
+                    and (upload := owing.internal.artifact_upload) is not None
                     and upload.owner_id == worker_id
                     and upload.dispatch_task_id == task_id
                     and not self._uploads.fenced_locked(owing_id)
@@ -4365,7 +4416,10 @@ class TaskRuntime:
             if self._content_bindings.consumes_locked(record, reference):
                 return True
             identity = reference.identity
-            return any(identity in objects for objects in record.dispatched_objects)
+            return any(
+                identity in objects
+                for objects in record.internal.runtime.dispatched_objects
+            )
 
     def artifact_input_objects(
         self,
@@ -4409,15 +4463,17 @@ class TaskRuntime:
         the objects they hold, which its worker may then read from a peer."""
         with self._lock:
             if (record := self._tasks.get(task_id)) is not None:
-                record.dispatched_artifacts = tuple(
+                record_internal = record.internal
+                record_internal.dispatched_artifacts = tuple(
                     {
                         (*binding.reference.identity, binding.name): binding
                         for binding in artifacts
                     }.values()
                 )
-                record.dispatched_producers = tuple(sorted(set(producers)))
-                record.dispatched_objects = objects
-                record.members_pending = False
+                record_internal.dispatched_producers = tuple(sorted(set(producers)))
+                record_runtime = record_internal.runtime
+                record_runtime.dispatched_objects = objects
+                record_runtime.members_pending = False
 
     def upstream_task_ids(self, task_id: str) -> set[str]:
         """Every task of its workflow a task depends on, directly or transitively."""
@@ -4752,7 +4808,7 @@ class TaskRuntime:
             record.status = TaskStatus.DONE
             record.assigned_worker = None
             record.finished_ts = time.time()
-            record.result_skip = dict(ROUTE_NOT_TAKEN)
+            record.internal.result_skip = dict(ROUTE_NOT_TAKEN)
             self._completed.add(task_id)
             self._dag.forget_pending(task_id)
             self._ready.remove_from_ready_locked(task_id)
@@ -5296,7 +5352,7 @@ class TaskRuntime:
                 not publish.reported
                 and record is not None
                 and record.status == TaskStatus.CANCELLING
-                and record.dispatch_id == publish.dispatch_id
+                and record.internal.dispatch_id == publish.dispatch_id
             ):
                 self._settle_cancelled_locked(record, time.time())
             return False
@@ -5331,8 +5387,11 @@ class TaskRuntime:
                 return EventEffect.SETTLED
             record.status = TaskStatus.DISPATCHED
             record.started_ts = started_ts
-            if record.first_started_ts is None and payload.get("executing", True):
-                record.first_started_ts = time.time()
+            record_internal = record.internal
+            if record_internal.first_started_ts is None and payload.get(
+                "executing", True
+            ):
+                record_internal.first_started_ts = time.time()
             self._committer.commit_records_locked(record.workflow_id, [task_id])
             if engine := self._engines.get(record.workflow_id):
                 engine.on_started(task_id)
@@ -5357,7 +5416,8 @@ class TaskRuntime:
                 # A replayed or late progress update must not touch a terminal task.
                 return EventEffect.SETTLED
             record.latest_update = payload
-            record.latest_update_dispatch_id = record.dispatch_id
+            record_internal = record.internal
+            record_internal.latest_update_dispatch_id = record_internal.dispatch_id
             self._committer.persist_locked(task_id)
             return EventEffect.APPLIED
 
@@ -5608,11 +5668,12 @@ class TaskRuntime:
             record.status = TaskStatus.DONE
             record.error = None
             record.finished_ts = finished_ts
-            record.succeeded_monotonic = time.monotonic()
+            record_internal = record.internal
+            record_internal.runtime.succeeded_monotonic = time.monotonic()
             if started_ts:
                 record.started_ts = started_ts
             record.merged_children = None
-            record.merged_dispatch_worker = None
+            record_internal.merged_dispatch_worker = None
             self._content_bindings.bind_result_locked(record, reference, skip)
             self._bind_reported_artifacts_locked(record, artifacts, dispatch_id)
             if usage is not None:
@@ -5703,10 +5764,11 @@ class TaskRuntime:
         """
         readied = False
         if engine := self._engines.get(record.workflow_id):
+            record_internal = record.internal
             advance = engine.on_succeeded(
                 record.task_id,
-                empty=record.result_skip is not None,
-                content=record.result_reference,
+                empty=record_internal.result_skip is not None,
+                content=record_internal.result_reference,
             )
             advance.extend(
                 self._fan_out_children_locked(
@@ -5813,6 +5875,7 @@ class TaskRuntime:
             ):
                 self._fence.heal_returned_locked(task_id, worker_id, dispatch_id)
                 return FailureOutcome(DispatchEnd.STALE, 0, [], [])
+            record_internal = record.internal
             if record.status in TERMINAL_TASK_STATUSES:
                 self._committer.recommit_terminal_locked(record)
                 return FailureOutcome(DispatchEnd.SETTLED, record.attempts, [], [])
@@ -5830,7 +5893,7 @@ class TaskRuntime:
                     record,
                     unavailable_inputs or (),
                 ):
-                    held_dispatch = record.dispatch_id
+                    held_dispatch = record_internal.dispatch_id
                     awaiting = self._pending_producers_locked(task_id)
                     reads = self._artifact_reads_locked(record)
                     members = frozenset(
@@ -5841,7 +5904,7 @@ class TaskRuntime:
                     end = self._return_dispatch_locked(
                         record, increment_retry=False, front=False
                     )
-                    record.avoided_worker = worker_id
+                    record_internal.runtime.avoided_worker = worker_id
                     self._inputs.hold_for_input_check_locked(
                         record,
                         worker_id,
@@ -5858,8 +5921,8 @@ class TaskRuntime:
                     task_id,
                     worker_id,
                 )
-            if worker_id not in record.failed_workers:
-                record.failed_workers.append(worker_id)
+            if worker_id not in record_internal.failed_workers:
+                record_internal.failed_workers.append(worker_id)
             if (
                 ambiguous
                 and retryable is not False
@@ -6006,7 +6069,7 @@ class TaskRuntime:
         task_id = record.task_id
         if record.assigned_worker is not None:
             self._fence.remember_return(
-                task_id, (record.assigned_worker, record.dispatch_id, moved)
+                task_id, (record.assigned_worker, record.internal.dispatch_id, moved)
             )
         reset_to_pending(record)
         if self._ready.enqueue_ready_locked(
@@ -6127,7 +6190,7 @@ class TaskRuntime:
             if worker_id:
                 record.assigned_worker = worker_id
             record.merged_children = None
-            record.merged_dispatch_worker = None
+            record.internal.merged_dispatch_worker = None
             if usage is not None:
                 record.usages.append(usage)
 
@@ -6369,7 +6432,7 @@ class TaskRuntime:
         record.status = TaskStatus.CANCELLED
         record.finished_ts = finished_ts
         record.merged_children = None
-        record.merged_dispatch_worker = None
+        record.internal.merged_dispatch_worker = None
         record.merged_parent_id = None
         # TODO(kaiitunnz): Handle usages for cancelled tasks
         self._completed.discard(task_id)
@@ -6651,7 +6714,7 @@ class TaskRuntime:
                 record is None
                 or not record.resident
                 or record.status != TaskStatus.DISPATCHED
-                or record.dispatch_id != dispatch_id
+                or record.internal.dispatch_id != dispatch_id
             ):
                 return False
         return self._resident_tasks.request_yield(task_id)
@@ -6849,16 +6912,7 @@ class TaskRuntime:
     def task_records(self) -> list[TaskRecord]:
         """Copy every task record, detached, at one moment under the lock."""
         with self._lock:
-            return [
-                record.model_copy(
-                    update={
-                        name: value.copy()
-                        for name, value in record
-                        if isinstance(value, (list, dict))
-                    }
-                )
-                for record in self._tasks.values()
-            ]
+            return [record.detached() for record in self._tasks.values()]
 
     def work_item_id(self, task_id: str) -> str | None:
         """Return the id of the ledger work item a v2 task realizes, if it has one."""
@@ -6928,7 +6982,7 @@ class TaskRuntime:
                     self._file_locked(
                         task_id,
                         self._actions.revoke_for(
-                            task_id, worker_id, record.dispatch_id, node_id
+                            task_id, worker_id, record.internal.dispatch_id, node_id
                         ),
                     )
                 if (
@@ -6964,11 +7018,13 @@ class TaskRuntime:
         """
         with self._transition():
             record = self._tasks.get(task_id)
+            if record is None:
+                return None
+            record_internal = record.internal
             if (
-                record is None
-                or record.status not in (TaskStatus.DISPATCHED, TaskStatus.CANCELLING)
+                record.status not in (TaskStatus.DISPATCHED, TaskStatus.CANCELLING)
                 or record.assigned_worker != worker_id
-                or record.dispatch_id != dispatch_id
+                or record_internal.dispatch_id != dispatch_id
                 or record.started_ts is not None
                 or not self._episode_dispatch.awaits_its_dispatch_locked(record)
             ):
@@ -6982,8 +7038,8 @@ class TaskRuntime:
             self._file_locked(
                 task_id, self._actions.revoke_for(task_id, worker_id, dispatch_id, None)
             )
-            if worker_id not in record.failed_workers:
-                record.failed_workers.append(worker_id)
+            if worker_id not in record_internal.failed_workers:
+                record_internal.failed_workers.append(worker_id)
             record.last_error = (
                 f"Worker {worker_id} kept reporting it does not hold dispatch "
                 f"{dispatch_id}"
@@ -7104,13 +7160,11 @@ class TaskRuntime:
     ) -> dict[str, Any]:
         """Return a task's ``TaskInfo`` fields to build from after the lock is
         released, duplicating the containers a record appends to in place."""
+        detached = record.detached()
+        # A time on this process's clock alone, which no restart restores.
+        detached.internal.runtime.succeeded_monotonic = None
         return {
-            **{
-                name: value.copy() if isinstance(value, (list, dict)) else value
-                for name, value in record
-                # A time on this process's clock alone, which no restart restores.
-                if name != "succeeded_monotonic"
-            },
+            **dict(detached),
             **self._derived_locked(task_id, record).info_fields(),
         }
 

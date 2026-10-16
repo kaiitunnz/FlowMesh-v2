@@ -57,6 +57,32 @@ def test_a_snapshot_survives_the_trainer_rotating_its_checkpoint(
     assert spool_checkpoint(checkpoint, spool, 10) is None
 
 
+def test_a_snapshot_links_the_checkpoint_s_files(tmp_path: Path) -> None:
+    checkpoint = _checkpoint(tmp_path / "checkpoints", 10)
+
+    snapshot = spool_checkpoint(checkpoint, tmp_path / "spool", 10)
+
+    assert snapshot is not None
+    for rel in ("model.bin", "sub/optimizer.pt"):
+        assert os.path.samestat(
+            (snapshot / "checkpoint-10" / rel).stat(), (checkpoint / rel).stat()
+        )
+
+
+def test_a_checkpoint_that_cannot_be_linked_is_copied_into_the_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(artifacts, "link_opened", lambda *args: False)
+    checkpoint = _checkpoint(tmp_path / "checkpoints", 10)
+
+    snapshot = spool_checkpoint(checkpoint, tmp_path / "spool", 10)
+
+    assert snapshot is not None
+    copied = snapshot / "checkpoint-10" / "model.bin"
+    assert copied.read_bytes() == b"model-10"
+    assert not os.path.samestat(copied.stat(), (checkpoint / "model.bin").stat())
+
+
 def test_a_half_written_snapshot_is_not_spooled(tmp_path: Path) -> None:
     spool = tmp_path / "spool"
     (spool / ".step-3.partial" / "checkpoint-3").mkdir(parents=True)

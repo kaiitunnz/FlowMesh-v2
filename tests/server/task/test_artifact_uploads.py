@@ -262,7 +262,7 @@ def test_the_owners_receipt_settles_it_durable_and_closes_the_workflow(
 
     setup.report(UploadReport.UPLOADED)
 
-    upload = setup.record(setup.train).artifact_upload
+    upload = setup.record(setup.train).internal.artifact_upload
     assert upload is not None and upload.state is ArtifactDurability.DURABLE
     assert setup.workers.answers(setup.train)[-1] is UploadDisposition.DURABLE
     assert setup.status() == (WorkflowStatus.DONE, 0, None)
@@ -279,7 +279,7 @@ def test_a_report_from_another_registration_or_dispatch_settles_nothing() -> Non
     setup.report(UploadReport.UPLOADED, worker_id="wkr-2")
     setup.report(UploadReport.UPLOADED, dispatch_id="dsp-0")
 
-    upload = setup.record(setup.train).artifact_upload
+    upload = setup.record(setup.train).internal.artifact_upload
     assert upload is not None and upload.pending
     assert setup.workers.answers(setup.train)[-1] is UploadDisposition.REJECTED
 
@@ -291,7 +291,7 @@ def test_a_receipt_ahead_of_its_success_settles_it_at_acceptance() -> None:
     assert setup.record(setup.train).status == TaskStatus.DISPATCHED
     setup.succeed([setup.tree(stored=False)])
 
-    upload = setup.record(setup.train).artifact_upload
+    upload = setup.record(setup.train).internal.artifact_upload
     assert upload is not None and upload.state is ArtifactDurability.DURABLE
     assert setup.workers.answers(setup.train) == [UploadDisposition.DURABLE]
 
@@ -311,7 +311,7 @@ def test_a_success_settling_a_cancel_owes_nothing_and_says_so() -> None:
 
     setup.succeed([setup.tree(stored=False)])
 
-    assert setup.record(setup.train).artifact_upload is None
+    assert setup.record(setup.train).internal.artifact_upload is None
     assert setup.workers.answers(setup.train) == [UploadDisposition.REJECTED]
 
 
@@ -324,7 +324,7 @@ def test_an_owner_that_left_after_storing_everything_settles_durable() -> None:
     setup.runtime.artifact_owner_lost("wkr-1")
     setup.runtime._reconciler.check(setup.train)
 
-    upload = setup.record(setup.train).artifact_upload
+    upload = setup.record(setup.train).internal.artifact_upload
     assert upload is not None and upload.state is ArtifactDurability.DURABLE
     assert setup.status() == (WorkflowStatus.DONE, 0, None)
 
@@ -341,10 +341,10 @@ def test_an_owner_that_left_before_storing_loses_only_what_is_missing(
     setup.runtime.artifact_owner_lost("wkr-1")
     setup.runtime._reconciler.check(setup.train)
 
-    upload = setup.record(setup.train).artifact_upload
+    upload = setup.record(setup.train).internal.artifact_upload
     assert upload is not None and upload.state is ArtifactDurability.LOST
     tree, metrics = (
-        setup.record(setup.train).artifacts[("final", name)]
+        setup.record(setup.train).internal.runtime.artifacts[("final", name)]
         for name in ("final_model", "metrics.json")
     )
     assert upload.durability(tree)[0] is ArtifactDurability.LOST
@@ -362,7 +362,7 @@ def test_a_store_that_cannot_be_asked_leaves_the_upload_owed() -> None:
 
     setup.runtime._reconciler.check(setup.train)
 
-    upload = setup.record(setup.train).artifact_upload
+    upload = setup.record(setup.train).internal.artifact_upload
     assert upload is not None and upload.pending
     assert not setup.settled()
 
@@ -392,7 +392,7 @@ def test_the_owed_upload_is_stored_with_the_task_and_survives_a_restart() -> Non
     control = raw_control(setup.registry)
     blob = control.get(task_state_key(setup.train))
     sources = control.hgetall(workflow_sources_key(setup.workflow_id))
-    assert load_task_state(blob, sources).record.artifact_upload is not None
+    assert load_task_state(blob, sources).record.internal.artifact_upload is not None
 
     restarted = _runtime(setup.registry, setup.workers, setup.reader)
     asyncio.run(restarted.rehydrate([setup.workflow_id]))
@@ -462,7 +462,7 @@ def test_a_merged_dispatch_owes_each_settled_childs_upload_and_disowns_the_rest(
     runtime.mark_succeeded(a, "wkr-1", payload, _TS, dispatch_id="dsp-m")
 
     for owed in (a, b):
-        upload = setup.record(owed).artifact_upload
+        upload = setup.record(owed).internal.artifact_upload
         assert upload is not None and upload.dispatch_id == "dsp-m"
         assert setup.workers.answers(owed) == [UploadDisposition.PENDING]
     assert setup.record(c).status == TaskStatus.PENDING
@@ -504,14 +504,14 @@ def test_an_owner_lost_in_service_has_its_upload_settled_without_being_asked() -
     setup.runtime.artifact_owner_lost("wkr-1")
 
     def owed() -> bool:
-        upload = setup.record(setup.train).artifact_upload
+        upload = setup.record(setup.train).internal.artifact_upload
         return upload is not None and upload.pending
 
     deadline = time.monotonic() + 5
     while owed():
         assert time.monotonic() < deadline, "the owner's loss was never reconciled"
         time.sleep(0.02)
-    upload = setup.record(setup.train).artifact_upload
+    upload = setup.record(setup.train).internal.artifact_upload
     assert upload is not None and upload.state is ArtifactDurability.LOST
     setup.runtime.shutdown()
 
@@ -520,7 +520,7 @@ def test_a_task_loading_a_lost_artifact_is_refused_at_dispatch() -> None:
     setup = _dispatched()
     stored = setup.file(b"metrics", "metrics.json", stored=True)
     setup.succeed([setup.tree(stored=False), stored])
-    bindings = setup.record(setup.train).artifacts
+    bindings = setup.record(setup.train).internal.runtime.artifacts
     tree, metrics = (
         bindings[("final", "final_model")],
         bindings[("final", "metrics.json")],
@@ -538,13 +538,13 @@ def test_a_task_loading_a_lost_artifact_is_refused_at_dispatch() -> None:
 def test_an_unuploadable_report_ahead_of_its_success_is_settled_at_acceptance() -> None:
     setup = _dispatched()
     setup.report(UploadReport.UNUPLOADABLE)
-    assert setup.record(setup.train).early_upload_receipt is not None
+    assert setup.record(setup.train).internal.early_upload_receipt is not None
 
     setup.succeed([setup.tree(stored=False)])
     assert setup.train in setup.runtime._reconciler._queued
     setup.runtime._reconciler.check(setup.train)
 
-    upload = setup.record(setup.train).artifact_upload
+    upload = setup.record(setup.train).internal.artifact_upload
     assert upload is not None and upload.state is ArtifactDurability.LOST
 
 
@@ -594,7 +594,7 @@ def test_a_merged_childs_upload_renews_under_the_dispatchs_task(
         setup.runtime.record_artifact_upload(a, "wkr-1", "dsp-m", UploadReport.UPLOADED)
     assert setup.record(a).merged_parent_id is None
 
-    child = setup.record(b).artifact_upload
+    child = setup.record(b).internal.artifact_upload
     assert child is not None and child.pending
     assert renew(a, "wkr-1", "dsp-m") == "org"
     assert renew(a, "wkr-2", "dsp-m") is None
@@ -618,9 +618,9 @@ def test_an_early_receipt_of_a_merged_child_is_kept_for_its_success() -> None:
     runtime.record_artifact_upload(b, "wkr-1", "dsp-m", UploadReport.UPLOADED)
     runtime.record_artifact_upload(c, "wkr-2", "dsp-m", UploadReport.UPLOADED)
 
-    receipt = setup.record(b).early_upload_receipt
+    receipt = setup.record(b).internal.early_upload_receipt
     assert receipt is not None and receipt.dispatch_id == "dsp-m"
-    assert setup.record(c).early_upload_receipt is None
+    assert setup.record(c).internal.early_upload_receipt is None
 
 
 def test_a_staged_copy_left_by_another_registration_is_asked_about_safely() -> None:
@@ -655,7 +655,7 @@ def test_a_staged_copy_whose_owner_is_gone_has_its_upload_settled_from_the_store
     setup.report(UploadReport.ABANDONED, worker_id="wkr-2")
     setup.runtime._reconciler.check(setup.train)
 
-    upload = setup.record(setup.train).artifact_upload
+    upload = setup.record(setup.train).internal.artifact_upload
     assert upload is not None and upload.state is ArtifactDurability.DURABLE
 
 
@@ -667,10 +667,10 @@ def test_an_owner_declared_lost_renews_nothing_and_settles_nothing() -> None:
 
     assert setup.runtime.renewable_content_scope(setup.train, "wkr-1", "dsp-1") is None
     setup.report(UploadReport.UPLOADED)
-    upload = setup.record(setup.train).artifact_upload
+    upload = setup.record(setup.train).internal.artifact_upload
     assert upload is not None and upload.pending
     setup.runtime._reconciler.check(setup.train)
-    upload = setup.record(setup.train).artifact_upload
+    upload = setup.record(setup.train).internal.artifact_upload
     assert upload is not None and upload.state is ArtifactDurability.LOST
     assert not setup.runtime._uploads.fenced_locked(setup.train)
 
@@ -694,10 +694,10 @@ def test_an_owner_heard_again_after_its_loss_settles_its_later_uploads() -> None
     setup.runtime.record_artifact_upload(
         setup.use, "wkr-1", "dsp-2", UploadReport.UPLOADED
     )
-    later = setup.record(setup.use).artifact_upload
+    later = setup.record(setup.use).internal.artifact_upload
     assert later is not None and later.state is ArtifactDurability.DURABLE
     setup.report(UploadReport.UPLOADED)
-    upload = setup.record(setup.train).artifact_upload
+    upload = setup.record(setup.train).internal.artifact_upload
     assert upload is not None and upload.pending
 
 
@@ -761,7 +761,7 @@ def test_a_replayed_success_of_a_departed_owner_is_settled_from_the_store() -> N
     restarted.mark_succeeded(setup.train, "wkr-1", payload, _TS, "dsp-1")
 
     upload = restarted.get_record(setup.train)
-    assert upload is not None and upload.artifact_upload is not None
+    assert upload is not None and upload.internal.artifact_upload is not None
     assert setup.train in restarted._reconciler._queued
 
 
@@ -780,11 +780,11 @@ def test_a_store_check_remembers_the_objects_it_found_across_retries() -> None:
 
     store.stored_size = flaky  # type: ignore[method-assign]
     setup.runtime._reconciler.check(setup.train)
-    upload = setup.record(setup.train).artifact_upload
+    upload = setup.record(setup.train).internal.artifact_upload
     assert upload is not None and upload.pending
     setup.runtime._reconciler.check(setup.train)
 
-    upload = setup.record(setup.train).artifact_upload
+    upload = setup.record(setup.train).internal.artifact_upload
     assert upload is not None and upload.state is ArtifactDurability.DURABLE
     first, second, third = asked
     assert third == second != first
@@ -795,7 +795,7 @@ def test_a_reader_is_told_only_of_the_lost_artifacts_it_reads() -> None:
     stored = setup.file(b"metrics", "metrics.json", stored=True)
     missing = setup.file(b"notes", "notes.txt", stored=False)
     setup.succeed([setup.tree(stored=False), stored, missing])
-    bindings = setup.record(setup.train).artifacts
+    bindings = setup.record(setup.train).internal.runtime.artifacts
     tree, metrics = (
         bindings[("final", "final_model")],
         bindings[("final", "metrics.json")],

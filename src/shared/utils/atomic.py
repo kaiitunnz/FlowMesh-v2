@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 _SHARED_FILE_MODE = 0o0666
-_COPY_CHUNK_BYTES = 1 << 20
+COPY_CHUNK_BYTES = 1 << 20
 _TEMP_PREFIX = ".fm-tmp-"
 
 
@@ -34,13 +34,14 @@ def atomic_write_text(
     _atomic_replace(target, lambda fh: fh.write(content.encode(encoding)), dir_fd)
 
 
-def _temp_name() -> str:
+def temp_name() -> str:
+    """A fresh in-flight temp file name."""
     return f"{_TEMP_PREFIX}{os.urandom(6).hex()}"
 
 
 def temp_path(directory: Path) -> Path:
     """A fresh in-flight temp file name in ``directory``."""
-    return directory / _temp_name()
+    return directory / temp_name()
 
 
 def write_replacing(
@@ -134,7 +135,7 @@ def atomic_write_stream(
     if dir_fd is None:
         target.parent.mkdir(parents=True, exist_ok=True)
     _atomic_replace(
-        target, lambda fh: shutil.copyfileobj(source, fh, _COPY_CHUNK_BYTES), dir_fd
+        target, lambda fh: shutil.copyfileobj(source, fh, COPY_CHUNK_BYTES), dir_fd
     )
 
 
@@ -156,7 +157,7 @@ def _replace_at(dir_fd: int, name: str, write: Callable[[BinaryIO], Any]) -> Non
     ``name`` is replaced, never written through."""
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
     while True:
-        tmp_name = _temp_name()
+        tmp_name = temp_name()
         try:
             fd = os.open(tmp_name, flags, 0o600, dir_fd=dir_fd)
             break

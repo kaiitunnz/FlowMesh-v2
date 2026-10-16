@@ -22,7 +22,7 @@ class ResidentServeTasks:
     def seed_dispatched_resident_locked(self) -> None:
         """Record the dispatch each restored resident serve task runs under."""
         self.dispatched_resident.update(
-            (task_id, record.dispatch_id)
+            (task_id, record.internal.dispatch_id)
             for task_id, record in self._tasks.items()
             if record.resident and record.status == TaskStatus.DISPATCHED
         )
@@ -44,10 +44,14 @@ class ResidentServeTasks:
 
     def observe_resident_locked(self, record: TaskRecord) -> None:
         task_id = record.task_id
+        record_internal = record.internal
         ended = task_id in self.dispatched_resident
         if record.status == TaskStatus.DISPATCHED:
-            ended = ended and self.dispatched_resident[task_id] != record.dispatch_id
-            self.dispatched_resident[task_id] = record.dispatch_id
+            ended = (
+                ended
+                and self.dispatched_resident[task_id] != record_internal.dispatch_id
+            )
+            self.dispatched_resident[task_id] = record_internal.dispatch_id
         else:
             self.dispatched_resident.pop(task_id, None)
             ended = ended or record.status in SETTLING_TASK_STATUSES
@@ -55,7 +59,7 @@ class ResidentServeTasks:
             self.resident_task_ended(task_id)
         elif (
             record.status == TaskStatus.DISPATCHED
-            and record.latest_update_dispatch_id == record.dispatch_id
+            and record_internal.latest_update_dispatch_id == record_internal.dispatch_id
             and self.resident_task_updated is not None
         ):
             self.resident_task_updated(task_id)

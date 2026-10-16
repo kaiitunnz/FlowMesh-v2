@@ -46,8 +46,10 @@ def test_a_restart_reattaches_a_warm_replica_and_keeps_its_serve_task() -> None:
     assert replica.endpoint is not None and replica.endpoint.api_key is None
     assert node.status(warm.serve_task_id) == TaskStatus.DISPATCHED
     record = node.runtime.get_record(warm.serve_task_id)
-    assert record is not None and record.dispatch_id is not None
-    assert record.latest_update_dispatch_id == record.dispatch_id
+    assert record is not None
+    record_internal = record.internal
+    assert record_internal.dispatch_id is not None
+    assert record_internal.latest_update_dispatch_id == record_internal.dispatch_id
     assert node.control.stores.pools.feasible_candidates(
         FAMILY.family, AdmissionProfile(engine_batch_key=FAMILY.engine_batch_key)
     )
@@ -349,7 +351,7 @@ def test_a_restart_never_reattaches_an_endpoint_no_dispatch_reported() -> None:
     assert serve_task_id is not None
     record = node.runtime.get_record(serve_task_id)
     assert record is not None
-    record.latest_update_dispatch_id = None
+    record.internal.latest_update_dispatch_id = None
     with node.runtime._lock:
         node.runtime._committer.persist_locked(serve_task_id)
 

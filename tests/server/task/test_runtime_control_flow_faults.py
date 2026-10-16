@@ -87,7 +87,7 @@ async def test_a_skip_whose_ledger_was_lost_never_replays_as_a_success() -> None
     run.drive()
     right = run.ids["right_work"]
     stored = run.registry.stored_task(right)
-    assert stored is not None and stored.record.result_skip is not None
+    assert stored is not None and stored.record.internal.result_skip is not None
     # The skipped record landed; the ledger save holding the decision did not.
     run.registry.ledgers[run.workflow_id] = before
 

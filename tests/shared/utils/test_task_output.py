@@ -1,5 +1,7 @@
 """Tests for the shared manifest helpers."""
 
+import errno
+import os
 import stat
 import threading
 from pathlib import Path
@@ -12,6 +14,7 @@ from shared.utils.task_output import (
     ARTIFACTS_DIR,
     LOGS_DIR,
     SCRATCH_DIR,
+    detach_shared_files,
     prepare_output_dir,
     scratch_dir,
 )
@@ -104,3 +107,143 @@ class TestScratchDir:
             path = scratch_dir(tmp_path)
         assert stat.S_IMODE(path.stat().st_mode) == 0o0777
         assert stat.S_IMODE((tmp_path / SCRATCH_DIR).stat().st_mode) == 0o0777
+
+
+def _tree(tmp_path: Path) -> Path:
+    top = tmp_path / ARTIFACTS_DIR
+    (top / "checkpoints" / "checkpoint-5").mkdir(parents=True)
+    return top
+
+
+def test_a_file_shared_outside_the_tree_gets_a_private_copy(tmp_path: Path) -> None:
+    top = _tree(tmp_path)
+    weights = top / "checkpoints" / "checkpoint-5" / "weights"
+    weights.write_bytes(b"accepted")
+    held = tmp_path / "custody"
+    os.link(weights, held)
+
+    assert detach_shared_files(top) == 1
+    weights.write_bytes(b"rewritten by the next attempt")
+
+    assert held.read_bytes() == b"accepted"
+    assert weights.stat().st_nlink == 1
+
+
+def test_a_detached_copy_keeps_the_mode_and_times(tmp_path: Path) -> None:
+    top = _tree(tmp_path)
+    model = top / "model"
+    model.write_bytes(b"accepted")
+    model.chmod(0o640)
+    os.utime(model, ns=(1_000_000_000, 2_000_000_000))
+    os.link(model, tmp_path / "cache")
+
+    detach_shared_files(top)
+
+    detached = model.stat()
+    assert stat.S_IMODE(detached.st_mode) == 0o640
+    assert detached.st_mtime_ns == 2_000_000_000
+    assert model.read_bytes() == b"accepted"
+
+
+def test_names_in_the_tree_linking_one_shared_file_keep_linking_one_copy(
+    tmp_path: Path,
+) -> None:
+    top = _tree(tmp_path)
+    (top / "a").write_bytes(b"shared")
+    os.link(top / "a", top / "checkpoints" / "b")
+    os.link(top / "a", tmp_path / "custody")
+
+    assert detach_shared_files(top) == 1
+
+    assert os.path.samestat((top / "a").stat(), (top / "checkpoints" / "b").stat())
+    assert not os.path.samestat((top / "a").stat(), (tmp_path / "custody").stat())
+
+
+def test_files_linked_only_inside_the_tree_are_left_as_they_are(
+    tmp_path: Path,
+) -> None:
+    top = _tree(tmp_path)
+    (top / "a").write_bytes(b"own")
+    (top / "lone").write_bytes(b"lone")
+    os.link(top / "a", top / "b")
+    before = {name: (top / name).stat().st_ino for name in ("a", "b", "lone")}
+
+    assert detach_shared_files(top) == 0
+    assert {name: (top / name).stat().st_ino for name in before} == before
+
+
+def test_a_link_in_the_tree_is_not_followed(tmp_path: Path) -> None:
+    top = _tree(tmp_path)
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"outside")
+    os.link(outside, tmp_path / "another")
+    (top / "pointer").symlink_to(outside)
+
+    assert detach_shared_files(top) == 0
+    assert outside.stat().st_nlink == 2
+
+
+def test_a_missing_tree_has_nothing_to_detach(tmp_path: Path) -> None:
+    assert detach_shared_files(tmp_path / ARTIFACTS_DIR) == 0
+
+
+def test_a_copy_that_cannot_be_written_leaves_the_shared_file(
+    tmp_path: Path,
+) -> None:
+    top = _tree(tmp_path)
+    model = top / "model"
+    model.write_bytes(b"accepted")
+    os.link(model, tmp_path / "custody")
+
+    with (
+        patch(
+            "shared.utils.task_output.os.fchmod",
+            side_effect=OSError(errno.ENOSPC, "No space"),
+        ),
+        pytest.raises(OSError),
+    ):
+        detach_shared_files(top)
+
+    assert os.path.samestat(model.stat(), (tmp_path / "custody").stat())
+    assert sorted(p.name for p in top.iterdir()) == ["checkpoints", "model"]
+
+
+class _Cancelled(Exception):
+    pass
+
+
+def test_a_cancel_between_chunks_ends_the_pass_leaving_every_name_whole(
+    tmp_path: Path,
+) -> None:
+    top = _tree(tmp_path)
+    model = top / "model"
+    model.write_bytes(b"a" * (3 << 20))
+    os.link(model, tmp_path / "custody")
+    chunks = 0
+
+    def cancel_on_the_second_chunk() -> None:
+        nonlocal chunks
+        chunks += 1
+        if chunks == 3:
+            raise _Cancelled
+
+    with pytest.raises(_Cancelled):
+        detach_shared_files(top, cancel_on_the_second_chunk)
+
+    assert os.path.samestat(model.stat(), (tmp_path / "custody").stat())
+    assert sorted(p.name for p in top.iterdir()) == ["checkpoints", "model"]
+
+
+def test_a_cancel_before_a_file_copies_nothing(tmp_path: Path) -> None:
+    top = _tree(tmp_path)
+    # An empty file copies no chunk, so only the check before the file sees the cancel.
+    (top / "model").write_bytes(b"")
+    os.link(top / "model", tmp_path / "custody")
+
+    def cancelled() -> None:
+        raise _Cancelled
+
+    with pytest.raises(_Cancelled):
+        detach_shared_files(top, cancelled)
+
+    assert (top / "model").stat().st_nlink == 2

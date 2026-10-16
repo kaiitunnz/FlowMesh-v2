@@ -26,7 +26,7 @@ from server.orchestration.state import (
     AuthorityDecisionKind,
     ValueRef,
 )
-from server.task.models import TaskStatus
+from server.task.models import TaskInternalState, TaskStatus
 from server.task.redrive import StoreRedriveScheduler
 from server.task.runtime import TaskRuntime
 from server.task.v2.compiler.bindings import leaf_profile
@@ -589,8 +589,7 @@ def test_a_producer_that_settled_with_nothing_bound_fails_the_agent(
         SimpleNamespace(
             workflow_id="wfl-test",
             status=TaskStatus.DONE,
-            result_skip=None,
-            result_reference=None,
+            internal=TaskInternalState(),
         ),
     )
 

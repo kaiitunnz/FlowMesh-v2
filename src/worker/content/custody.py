@@ -1,14 +1,15 @@
 """Custody of artifact bytes a success announced before the shared store had them.
 
-A task reports success once its artifacts are copied and hashed here; their upload to
+A task reports success once its artifacts are hashed and held here; their upload to
 the shared store follows. Until control settles each upload, the bytes are held in a
 directory per dispatch beside the scope's objects, where no eviction, staging cleanup or
-output cleanup reaches: each staged object is the file its bytes were hashed into, so
-custody holds exactly what the success named. Where the worker runs a cache and holds no
-copy of the object yet, the cache names that file as its copy, a second link to it. The
-kernel's link count is what every process sharing the content directory sees, so a
-cached copy also held in custody is kept from eviction by any of them, and the custody
-file outlives any removal of the cache's name.
+output cleanup reaches: each staged object is a link to the file that was hashed, or a
+copy of it where the filesystem cannot link it here, so custody holds exactly what the
+success named, provided the task's output files are not modified after it completes.
+Where the worker runs a cache and holds no copy of the object yet, the cache names that
+file as its copy, another link to it. A cached copy of an object custody holds is kept
+from eviction by every process sharing the content directory, and the custody file
+outlives any removal of the cache's name.
 
 A dispatch's directory also holds its journal: what the worker staged, under which
 registration, and the success it reported, so the success and its uploads can be
@@ -23,7 +24,7 @@ import os
 import shutil
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -37,6 +38,7 @@ from shared.content import (
 )
 from shared.content.filesystem import safe_segment
 from shared.utils.atomic import temp_path, write_replacing
+from shared.utils.nofollow import UNLINKABLE_ERRNOS, link_opened, open_dir
 
 CUSTODY_DIR = "custody"
 _JOURNAL = "journal.json"
@@ -44,24 +46,56 @@ _JOURNAL = "journal.json"
 type KeepCopy = Callable[[ContentReference, Path], None]
 
 
+def _staged_names(root: Path, scope: str, digest: str) -> Iterator[Path]:
+    """Yield the name each dispatch's custody under ``root`` would stage ``digest``
+    of ``scope`` at."""
+    name = safe_segment(digest)
+    try:
+        publications = os.scandir(root / safe_segment(scope) / CUSTODY_DIR)
+    except FileNotFoundError:
+        return
+    with publications:
+        for publication in publications:
+            yield Path(publication.path) / name
+
+
+def custody_holds(root: Path, scope: str, digest: str) -> bool:
+    """Return whether any dispatch's custody under the content directory ``root``
+    holds staged bytes of ``digest`` in ``scope``."""
+    return any(os.path.lexists(staged) for staged in _staged_names(root, scope, digest))
+
+
 def holds_inode(root: Path, reference: ContentReference, held: os.stat_result) -> bool:
     """Return whether any dispatch's custody under the content directory ``root``
     holds the file ``held`` describes as the reference's staged bytes."""
-    custody = root / safe_segment(reference.authorization_scope) / CUSTODY_DIR
-    name = safe_segment(reference.content_digest)
-    try:
-        publications = os.scandir(custody)
-    except FileNotFoundError:
-        return False
-    with publications:
-        for publication in publications:
-            try:
-                staged = os.stat(Path(publication.path) / name)
-            except (FileNotFoundError, NotADirectoryError):
-                continue
-            if os.path.samestat(staged, held):
+    for staged in _staged_names(
+        root, reference.authorization_scope, reference.content_digest
+    ):
+        try:
+            if os.path.samestat(os.stat(staged), held):
                 return True
+        except (FileNotFoundError, NotADirectoryError):
+            continue
     return False
+
+
+def _hash(
+    source: BinaryIO,
+    cancelled: Callable[[], bool] | None,
+    copy: BinaryIO | None = None,
+) -> tuple[int, str]:
+    """Hash what is left to read of ``source``, writing it to ``copy`` when given;
+    returns its size and digest."""
+    hasher = new_hasher()
+    size = 0
+    while chunk := source.read(STREAM_CHUNK_BYTES):
+        if cancelled is not None and cancelled():
+            raise WriteCancelled("staging an artifact file was cancelled")
+        hasher.update(chunk)
+        if copy is not None:
+            copy.write(chunk)
+        size += len(chunk)
+    return size, hasher.hexdigest()
 
 
 class StagedTask(BaseModel):
@@ -135,33 +169,58 @@ class ArtifactCustody:
         self,
         scope: str,
         dispatch_id: str,
-        source: Path,
+        source: BinaryIO,
         *,
         media_type: str = OCTET_STREAM,
         cancelled: Callable[[], bool] | None = None,
     ) -> ContentReference:
-        """Copy a file into a dispatch's custody, named by the digest of exactly the
-        bytes copied, and return its reference.
+        """Hold an opened file in a dispatch's custody, named by the digest of its
+        bytes, and return its reference.
 
-        The bytes are copied rather than linked, so nothing the producer still holds
-        open can change them after they are hashed.
+        Links the file's own inode in and hashes it, or, where the filesystem cannot
+        link it here, copies it from the same descriptor while hashing. Custody holds
+        exactly the bytes hashed as long as the file is not modified after its task
+        completes.
         """
         directory = self.publication_dir(scope, dispatch_id)
         directory.mkdir(parents=True, exist_ok=True)
+        held = self._hold(scope, directory, source, media_type, cancelled, link=True)
+        if held is None:
+            held = self._hold(
+                scope, directory, source, media_type, cancelled, link=False
+            )
+            assert held is not None
+        reference, path = held
+        if self._keep is not None:
+            self._keep(reference, path)
+        return reference
+
+    def _hold(
+        self,
+        scope: str,
+        directory: Path,
+        source: BinaryIO,
+        media_type: str,
+        cancelled: Callable[[], bool] | None,
+        *,
+        link: bool,
+    ) -> tuple[ContentReference, Path] | None:
+        """Stage ``source`` under its digest in ``directory``, linking its inode when
+        ``link`` is set; None when that inode can take no further link."""
         tmp = temp_path(directory)
-        hasher = new_hasher()
-        size = 0
         try:
-            with source.open("rb") as src, tmp.open("xb") as dst:
-                while chunk := src.read(STREAM_CHUNK_BYTES):
-                    if cancelled is not None and cancelled():
-                        raise WriteCancelled(f"staging of {source.name} was cancelled")
-                    hasher.update(chunk)
-                    dst.write(chunk)
-                    size += len(chunk)
+            if link:
+                with open_dir(directory) as dir_fd:
+                    link = link_opened(source.fileno(), dir_fd, tmp.name)
+            source.seek(0)
+            if link:
+                size, digest = _hash(source, cancelled)
+            else:
+                with tmp.open("xb") as copy:
+                    size, digest = _hash(source, cancelled, copy)
             reference = ContentReference(
                 authorization_scope=scope,
-                content_digest=hasher.hexdigest(),
+                content_digest=digest,
                 size_bytes=size,
                 media_type=media_type,
             )
@@ -172,7 +231,9 @@ class ArtifactCustody:
                 # The dispatch staged the same bytes under another name already.
                 pass
             except OSError as exc:
-                if exc.errno in (errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP):
+                if link and exc.errno == errno.EMLINK:
+                    return None
+                if exc.errno in UNLINKABLE_ERRNOS:
                     raise ContentStoreError(
                         "the content filesystem must support hard links to hold "
                         f"staged artifacts: {exc}"
@@ -180,9 +241,7 @@ class ArtifactCustody:
                 raise
         finally:
             tmp.unlink(missing_ok=True)
-        if self._keep is not None:
-            self._keep(reference, held)
-        return reference
+        return reference, held
 
     def record(self, journal: UploadJournal) -> None:
         """Write a dispatch's journal durably, replacing the one there."""
