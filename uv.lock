@@ -1508,6 +1508,7 @@ ci = [
     { name = "httpx" },
     { name = "isort" },
     { name = "lumid-hooks" },
+    { name = "mcp" },
     { name = "mypy" },
     { name = "nvidia-ml-py" },
     { name = "openai" },
@@ -1607,6 +1608,7 @@ runtime-inference = [
 runtime-inference-gpu = [
     { name = "bitsandbytes" },
     { name = "flashinfer-python" },
+    { name = "mcp" },
     { name = "openai" },
     { name = "vllm", version = "0.28.0", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine != 'x86_64' or sys_platform != 'linux'" },
     { name = "vllm", version = "0.28.0+cu129", source = { url = "https://github.com/vllm-project/vllm/releases/download/v0.28.0/vllm-0.28.0+cu129-cp38-abi3-manylinux_2_28_x86_64.whl" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
@@ -1703,6 +1705,7 @@ runtime-worker-gpu = [
     { name = "bitsandbytes" },
     { name = "deepspeed" },
     { name = "flashinfer-python" },
+    { name = "mcp" },
     { name = "openai" },
     { name = "vllm", version = "0.28.0", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine != 'x86_64' or sys_platform != 'linux'" },
     { name = "vllm", version = "0.28.0+cu129", source = { url = "https://github.com/vllm-project/vllm/releases/download/v0.28.0/vllm-0.28.0+cu129-cp38-abi3-manylinux_2_28_x86_64.whl" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
@@ -1746,6 +1749,7 @@ ci = [
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "isort", specifier = ">=7.0.0" },
     { name = "lumid-hooks", specifier = ">=0.2.0" },
+    { name = "mcp", specifier = ">=1.30.0,<2" },
     { name = "mypy", specifier = ">=1.19.1" },
     { name = "nvidia-ml-py", specifier = ">=13.580.82" },
     { name = "openai", specifier = ">=2.25.0,<3" },
@@ -1841,6 +1845,7 @@ runtime-inference = [
 runtime-inference-gpu = [
     { name = "bitsandbytes", specifier = ">=0.49.2" },
     { name = "flashinfer-python", specifier = "==0.6.16.post3" },
+    { name = "mcp", specifier = ">=1.30.0,<2" },
     { name = "openai", specifier = ">=2.25.0,<3" },
     { name = "vllm", marker = "platform_machine != 'x86_64' or sys_platform != 'linux'", specifier = "==0.28.0" },
     { name = "vllm", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'", url = "https://github.com/vllm-project/vllm/releases/download/v0.28.0/vllm-0.28.0+cu129-cp38-abi3-manylinux_2_28_x86_64.whl" },
@@ -1935,6 +1940,7 @@ runtime-worker-gpu = [
     { name = "bitsandbytes", specifier = ">=0.49.2" },
     { name = "deepspeed", specifier = ">=0.19.1" },
     { name = "flashinfer-python", specifier = "==0.6.16.post3" },
+    { name = "mcp", specifier = ">=1.30.0,<2" },
     { name = "openai", specifier = ">=2.25.0,<3" },
     { name = "vllm", marker = "platform_machine != 'x86_64' or sys_platform != 'linux'", specifier = "==0.28.0" },
     { name = "vllm", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'", url = "https://github.com/vllm-project/vllm/releases/download/v0.28.0/vllm-0.28.0+cu129-cp38-abi3-manylinux_2_28_x86_64.whl" },
@@ -3324,7 +3330,7 @@ wheels = [
 
 [[package]]
 name = "mcp"
-version = "1.28.1"
+version = "1.30.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -3342,9 +3348,9 @@ dependencies = [
     { name = "typing-inspection" },
     { name = "uvicorn", marker = "sys_platform != 'emscripten'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/6e/77/9450b8f251a13affb6281997d0523c4615f8a8b35d0b21ff30db3a5aac9d/mcp-1.28.1.tar.gz", hash = "sha256:d51e36a5f5644faea4f85ea649bfffa6bc6c26770d42798ad6a3de3d2ba69683", size = 638501, upload-time = "2026-06-26T12:57:29.093Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ba/93/0142dc84a666daf8ad51a34268f34c12fd6fda4f3810c4be2504eecc8212/mcp-1.30.0.tar.gz", hash = "sha256:445414625fce5c295faa505bb11bacece661ab6f4028d57c935db57820b7a3e4", size = 680511, upload-time = "2026-09-07T14:34:15.845Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e2/5e/d118fce19f87a2e7d8101c35c8ae0ec289098a4df0ff244cec23e415aca0/mcp-1.28.1-py3-none-any.whl", hash = "sha256:2726bca5e7193f61c5dde8b12500a6de2d9acf6d1a1c0be9e8c2e706437991df", size = 222620, upload-time = "2026-06-26T12:57:27.218Z" },
+    { url = "https://files.pythonhosted.org/packages/f5/f4/e58bc33317c92a0203664daaf00bf6f41166cc0149e5d6870a03f7cd004a/mcp-1.30.0-py3-none-any.whl", hash = "sha256:666edb5009503e1047c9d60346a756f94b261f05cc2625f23d41c728ffc484d0", size = 234581, upload-time = "2026-09-07T14:34:14.266Z" },
 ]
 
 [[package]]
