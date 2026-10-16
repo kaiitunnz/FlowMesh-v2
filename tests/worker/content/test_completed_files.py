@@ -139,3 +139,14 @@ def test_a_writable_input_hydrated_from_the_store_keeps_its_own_copy(
     dest.write_bytes(b"edited by its task")
 
     assert _cached(cache, reference).read_bytes() == b"input"
+
+
+def test_a_file_not_the_size_stored_is_not_cached(tmp_path: Path) -> None:
+    _, cache = _plane(tmp_path)
+    reference = reference_for(_SCOPE, b"weights")
+    output = _output(tmp_path, b"weights and more")
+
+    with output.open("rb") as opened:
+        assert cache.link_completed(reference, opened)
+
+    assert not cache.holds(reference)
