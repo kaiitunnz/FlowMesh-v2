@@ -512,7 +512,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   that store, so a copy may be dropped at any time: a deployment can bound the cache by
   how long a copy goes unused and by disk, least recently used first, and leaves both
   unbounded by default. A copy of an artifact still uploading stays until its upload
-  settles, whichever worker on the node staged it. A worker reports each copy it keeps
+  settles, whichever worker on the node staged it; any other link to a copy, such as a
+  task's output or input, leaves it free to go. A worker reports each copy it keeps
   or drops, and its whole holding when it registers; control keeps a worker's records
   while it is registered, and grants a read from a holder only while its heartbeat is
   current. A read tries the local copy, then another worker's copy, then the store
@@ -554,8 +555,13 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   `step-<n>` into the shared content store while it runs. The worker reports success
   once it has hashed the `final` files and stored each tree's manifest, and uploads the
   files afterwards, so the task is `DONE` while its workflow does not finish until every
-  upload settles. An upload its worker has not finished when its registration ends or it
-  goes silent settles from what the store holds: an artifact with a file missing is
+  upload settles. A task's artifact files are not modified once it completes, nor a
+  checkpoint's once its save completes: the worker holds each for its upload, and its
+  cache keeps each, as a hard link to the file itself, copying only where the file
+  cannot be linked there. A later execution of the task starts from private writable
+  copies of the files an earlier one left, and removing an output file never removes an
+  accepted artifact. An upload its worker has not finished when its registration ends
+  or it goes silent settles from what the store holds: an artifact with a file missing is
   lost, its task stays `DONE`, and its workflow fails with an `artifact_lost` reason
   while its other work runs on. Each name is published once per revision and its first
   publication stands, so a retry never replaces what an earlier attempt published. The

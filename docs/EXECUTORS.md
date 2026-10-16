@@ -75,6 +75,12 @@ in `_archive` whose ref names a directory with `.tar.gz` appended
 tree. An artifact named `results.json` fails the task, since that name downloads its
 result.
 
+An executor finishes every write to its artifacts, by any process or thread it started,
+before it returns, and a trainer finishes each checkpoint before its save returns. The
+worker publishes and caches these files by hard link, so none may be modified
+afterwards. Each execution of a task starts from private writable copies of the output
+files an earlier execution left.
+
 A training executor publishes each checkpoint its trainer saves as the `checkpoints`
 artifact at revision `step-<n>` while it runs, and leaves its
 `checkpoints/checkpoint-<n>` directories out of the `final` set; another task's
