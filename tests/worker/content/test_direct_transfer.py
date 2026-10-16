@@ -6,6 +6,7 @@ mutual TLS; the root relay both ends fall back to is an in-process pair of sinks
 
 import asyncio
 import contextlib
+import gc
 import socket
 import threading
 import time
@@ -210,6 +211,9 @@ async def _fabric(tmp_path: Path, ca: _TestCa, **kwargs: Any) -> AsyncIterator[_
         requester=kwargs.pop("requester", None) or _requester(ca),
         **kwargs,
     )
+    # A full collection of what earlier tests left can take seconds in a long run;
+    # running it here keeps it out of the dial's connect budget.
+    gc.collect()
     await fabric.start()
     try:
         yield fabric
