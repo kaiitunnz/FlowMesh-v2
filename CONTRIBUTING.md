@@ -111,7 +111,7 @@ The suite runs in parallel under [pytest-xdist](https://pytest-xdist.readthedocs
 
 ```bash
 uv run pytest tests/ -n auto --dist loadgroup  # One worker per CPU; or pass a count, such as -n 32
-uv run pytest tests/path/to/test_file.py::test_name -n 0  # Serially, for debugging; so does omitting -n
+uv run pytest tests/path/to/test_file.py::test_name -n 0  # Serially, for debugging, as is any run without -n
 ```
 
 `--dist loadgroup` keeps the tests that share the live Redis named by `FLOWMESH_TEST_REDIS_URL` on one worker and spreads every other test.
