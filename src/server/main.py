@@ -100,6 +100,7 @@ from .task.v2.policy import build_policy_surface
 from .telemetry import build_telemetry_store
 from .tools.fabric_tool_broker import FabricToolBroker
 from .utils.logging import get_logger
+from .utils.openapi import FlowMeshAPI
 
 # --------------------------------------------------------------------------- #
 # Configuration
@@ -620,7 +621,7 @@ openapi_tags = [
     {"name": "Stack", "description": "Local worker lifecycle management."},
 ]
 
-app = FastAPI(
+app = FlowMeshAPI(
     title="FlowMesh Server",
     version=FLOWMESH_RELEASE_VERSION,
     openapi_tags=openapi_tags,

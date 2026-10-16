@@ -6,6 +6,7 @@ from typing import Any, NamedTuple, Self
 
 from pydantic import (
     BaseModel,
+    ConfigDict,
     Field,
     ValidationError,
     computed_field,
@@ -20,6 +21,7 @@ from shared.tasks.credentials import holds_pointer
 from shared.tasks.worker_message import HardwareUsage
 
 from ..orchestration.tool_dispatch import FacadeTurnGroup
+from ..utils.openapi import INTERNAL_SCHEMA
 from ..utils.time import now_iso
 from .artifact_durability import ArtifactUpload, EarlyUploadReceipt
 
@@ -204,6 +206,8 @@ def source_digest(source: str) -> str:
 class TaskRecordRuntimeState(BaseModel):
     """A task's bookkeeping held only in this process's memory."""
 
+    model_config = ConfigDict(json_schema_extra=INTERNAL_SCHEMA)
+
     no_eligible_since: float | None = Field(
         default=None,
         description="Epoch seconds when no eligible worker was first observed.",
@@ -245,6 +249,8 @@ class TaskRecordRuntimeState(BaseModel):
 class TaskInternalState(BaseModel):
     """A task's server-internal bookkeeping, stored with its record and hidden from
     clients."""
+
+    model_config = ConfigDict(json_schema_extra=INTERNAL_SCHEMA)
 
     dispatch_id: str | None = Field(
         default=None, description="Dispatch holding the task."
