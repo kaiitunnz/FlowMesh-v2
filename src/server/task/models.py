@@ -467,7 +467,7 @@ class TaskRecord(BaseModel):
     def __copy__(self) -> Self:
         copied = super().__copy__()
         # A copy's bookkeeping is its own, as it would be were the fields flat.
-        copied.__dict__["internal"] = self.internal.detached()
+        copied.internal = self.internal.detached()
         if (cached := getattr(self, "_source_digest", None)) is not None:
             object.__setattr__(copied, "_source_digest", cached)
         return copied
