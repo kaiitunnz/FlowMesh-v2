@@ -196,6 +196,30 @@ def _working_owner(out_dir: Path) -> str | None:
         return None
 
 
+class _Staging:
+    """A dispatch's final artifacts in upload custody, until its success reports
+    them."""
+
+    def __init__(self, uploads: ArtifactUploader, journal: UploadJournal) -> None:
+        self._uploads = uploads
+        self._journal = journal
+
+    def for_task(self, task_id: str) -> StageFile:
+        def stage(path: Path, cancelled: Callable[[], bool] | None) -> ContentReference:
+            return self._uploads.stage(self._journal, task_id, path, cancelled)
+
+        return stage
+
+    def staged(self) -> bool:
+        return bool(self._journal.tasks)
+
+    def submit(self, task_id: str, success: dict[str, Any]) -> None:
+        self._uploads.submit(self._journal, task_id, success)
+
+    def abandon(self) -> None:
+        self._uploads.abandon(self._journal)
+
+
 class Runner:
     def __init__(
         self,
@@ -988,7 +1012,7 @@ class Runner:
             msg, out_dir, result, checkpoints, self._staging(msg)
         )
 
-    def _staging(self, msg: WorkerTaskMessage) -> "_Staging | None":
+    def _staging(self, msg: WorkerTaskMessage) -> _Staging | None:
         """Open custody for a dispatch's final artifacts, when this worker uploads them
         after its success."""
         uploads = self.lifecycle.artifact_uploads
@@ -1015,7 +1039,7 @@ class Runner:
         out_dir: Path,
         result: BaseExecutorResult,
         checkpoints: list[ArtifactBinding] | None,
-        staging: "_Staging | None",
+        staging: _Staging | None,
     ) -> dict[str, Any]:
         own = result.model_copy(update={"children": {}})
         declared = _declared_result(own, msg.resolved_contract) or own
@@ -1065,7 +1089,7 @@ class Runner:
         task_id: str,
         out_dir: Path,
         result: BaseExecutorResult,
-        staging: "_Staging | None" = None,
+        staging: _Staging | None = None,
     ) -> list[dict[str, Any]]:
         """Publish what a task left under its artifacts directory, returning the
         bindings its success reports.
@@ -1881,27 +1905,3 @@ def _task_scrubber(msg: WorkerTaskMessage) -> Callable[[str], str]:
         if (spec := specs.get(task_id)) is not None
         for value in dispatched_credentials(spec, pointers)
     )
-
-
-class _Staging:
-    """A dispatch's final artifacts in upload custody, until its success reports
-    them."""
-
-    def __init__(self, uploads: ArtifactUploader, journal: UploadJournal) -> None:
-        self._uploads = uploads
-        self._journal = journal
-
-    def for_task(self, task_id: str) -> StageFile:
-        def stage(path: Path, cancelled: Callable[[], bool] | None) -> ContentReference:
-            return self._uploads.stage(self._journal, task_id, path, cancelled)
-
-        return stage
-
-    def staged(self) -> bool:
-        return bool(self._journal.tasks)
-
-    def submit(self, task_id: str, success: dict[str, Any]) -> None:
-        self._uploads.submit(self._journal, task_id, success)
-
-    def abandon(self) -> None:
-        self._uploads.abandon(self._journal)
