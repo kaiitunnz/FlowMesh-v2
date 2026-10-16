@@ -181,8 +181,8 @@ class ArtifactCustody:
         """Hold an opened file in a dispatch's custody, named by the digest of its
         bytes, and return its reference.
 
-        The file's own inode is linked in, so its bytes are hashed but not copied; a
-        file the filesystem cannot link here is copied and hashed from the same
+        The file's own inode is linked in, so hashing is the only pass over its bytes;
+        a file the filesystem cannot link here is copied and hashed from the same
         descriptor instead. Either way custody holds exactly the bytes hashed, as long
         as the file is not modified after its task completed.
         """

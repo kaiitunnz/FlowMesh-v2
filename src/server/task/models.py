@@ -202,7 +202,7 @@ def source_digest(source: str) -> str:
 
 
 class TaskRecordRuntimeState(BaseModel):
-    """A task's bookkeeping this process alone holds, rebuilt rather than stored."""
+    """A task's bookkeeping held only in this process's memory."""
 
     no_eligible_since: float | None = Field(
         default=None,
@@ -243,8 +243,8 @@ class TaskRecordRuntimeState(BaseModel):
 
 
 class TaskInternalState(BaseModel):
-    """A task's server-internal bookkeeping, stored with its record and served by no
-    API."""
+    """A task's server-internal bookkeeping, stored with its record and hidden from
+    clients."""
 
     dispatch_id: str | None = Field(
         default=None, description="Dispatch holding the task."

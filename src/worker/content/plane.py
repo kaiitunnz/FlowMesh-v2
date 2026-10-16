@@ -188,7 +188,7 @@ class WorkerContentPlane:
         file itself as the cache's copy.
 
         The cache links the inode the store read through this descriptor, so the bytes
-        are not copied a second time; the file must not be modified after this.
+        are written once; the file must not be modified after this.
         """
         reference = self._store(task_id, scope).write_file(
             scope, fd_path(source.fileno()), media_type=media_type, cancelled=cancelled

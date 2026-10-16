@@ -149,9 +149,8 @@ class WorkerContentCache(FabricObjectStore):
         self._kept(reference)
 
     def keep_staged(self, reference: ContentReference, held: Path) -> None:
-        """Name a file upload custody holds as this object's copy, leaving it in place;
-        a copy already named stays, and a file not the reference's size is not
-        named."""
+        """Name a file upload custody holds, when it is the reference's size, as this
+        object's copy, leaving it in place; a copy already named stays."""
         if held.stat().st_size != reference.size_bytes:
             return
         target = self._objects.object_path(
@@ -170,9 +169,8 @@ class WorkerContentCache(FabricObjectStore):
         linking its inode, when the descriptor's bytes were just stored as it; a copy
         already named stays. Returns False when the filesystem cannot link it here.
 
-        A file that is not the size the reference names, or that the descriptor no
-        longer reaches, is not taken in. Its digest is not read again: every read of
-        a copy verifies it.
+        The linked file is taken in only when it is the descriptor's inode at the
+        size the reference names; every read of a copy verifies its digest.
         """
         opened = os.fstat(source.fileno())
         if opened.st_size != reference.size_bytes:

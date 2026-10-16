@@ -649,10 +649,8 @@ class Dispatcher:
         # A worker that could not reach an input of the task is passed over while
         # another idle worker can take it: the input reads fine at control, so the
         # fault is likely its own path to the store.
-        if record.internal.runtime.avoided_worker is not None:
-            pool = [
-                c for c in pool if c.id != record.internal.runtime.avoided_worker
-            ] or pool
+        if (avoided := record.internal.runtime.avoided_worker) is not None:
+            pool = [c for c in pool if c.id != avoided] or pool
 
         # 5. Worker selection (best-fit scoring by default)
         selection_info: dict[str, Any] = {}
@@ -1551,11 +1549,8 @@ class Dispatcher:
         if owner is not None:
             return {owner.worker_id}
         eligible = self.eligible_worker_ids(record, relay=relays_only) - failed_ids
-        return (
-            eligible - {record.internal.runtime.avoided_worker}
-            if record.internal.runtime.avoided_worker
-            else eligible
-        )
+        avoided = record.internal.runtime.avoided_worker
+        return eligible - {avoided} if avoided else eligible
 
     def _settling_holder(
         self,
