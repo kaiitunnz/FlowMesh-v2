@@ -3867,8 +3867,8 @@ class TaskRuntime:
             owed = self._tasks.get(task_id)
             if (
                 owed is not None
-                and (owed_internal := owed.internal).artifact_upload is not None
-                and owed_internal.artifact_upload.dispatch_id == dispatch_id
+                and (upload := owed.internal.artifact_upload) is not None
+                and upload.dispatch_id == dispatch_id
             ):
                 self._ack_upload_locked(owed, worker_id)
             else:
@@ -4184,8 +4184,8 @@ class TaskRuntime:
             producer
             for producer in record_internal.dispatched_producers
             if (upstream := self._tasks.get(producer)) is not None
-            and upstream.internal.artifact_upload is not None
-            and upstream.internal.artifact_upload.pending
+            and (upload := upstream.internal.artifact_upload) is not None
+            and upload.pending
         }
         for binding in record_internal.dispatched_artifacts:
             pending.update(self._pending_publisher_locked(binding))
