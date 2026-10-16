@@ -44,6 +44,26 @@ _JOURNAL = "journal.json"
 type KeepCopy = Callable[[ContentReference, Path], None]
 
 
+def holds_inode(root: Path, reference: ContentReference, held: os.stat_result) -> bool:
+    """Return whether any dispatch's custody under the content directory ``root``
+    holds the file ``held`` describes as the reference's staged bytes."""
+    custody = root / safe_segment(reference.authorization_scope) / CUSTODY_DIR
+    name = safe_segment(reference.content_digest)
+    try:
+        publications = os.scandir(custody)
+    except FileNotFoundError:
+        return False
+    with publications:
+        for publication in publications:
+            try:
+                staged = os.stat(Path(publication.path) / name)
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            if os.path.samestat(staged, held):
+                return True
+    return False
+
+
 class StagedTask(BaseModel):
     """One task's staged artifacts, and how far control has taken them."""
 

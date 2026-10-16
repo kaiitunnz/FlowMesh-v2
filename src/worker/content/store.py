@@ -18,6 +18,7 @@ has the object.
 
 import logging
 import os
+import shutil
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -34,7 +35,9 @@ from shared.content import (
     FilesystemObjectBacking,
     verify_content,
 )
+from shared.utils.atomic import temp_path
 
+from .custody import holds_inode
 from .holding import AnnounceHolding, HoldingReporter
 
 _STALE_STAGING_SEC = 3600.0
@@ -52,6 +55,7 @@ class WorkerContentCache(FabricObjectStore):
         announce: AnnounceHolding | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
+        self._root = root
         self._objects = FilesystemObjectBacking(root, repair=True)
         self._objects.clear_staging(_STALE_STAGING_SEC)
         self._retain_sec = retain_sec
@@ -184,7 +188,11 @@ class WorkerContentCache(FabricObjectStore):
 
     def link_to(self, reference: ContentReference, dest: Path) -> None:
         """Link this worker's copy at ``dest`` once it verifies as the reference's
-        bytes, so a reader gets the copy without a second one on disk."""
+        bytes, so a reader gets the copy without a second one on disk.
+
+        A copy upload custody still holds is copied to ``dest`` instead, so a reader
+        writing its input never changes bytes an upload has yet to store.
+        """
         for _ in self.open(reference):
             pass
         source = self._objects.object_path(
@@ -192,6 +200,16 @@ class WorkerContentCache(FabricObjectStore):
         )
         dest.parent.mkdir(parents=True, exist_ok=True)
         os.link(source, dest)
+        # Only the copy and this link: no custody holds it.
+        if (linked := os.stat(dest)).st_nlink > 2 and holds_inode(
+            self._root, reference, linked
+        ):
+            copied = temp_path(dest.parent)
+            try:
+                shutil.copyfile(dest, copied)
+                os.replace(copied, dest)
+            finally:
+                copied.unlink(missing_ok=True)
 
     def drop(self, reference: ContentReference) -> None:
         """Remove a copy."""
