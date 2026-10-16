@@ -22,10 +22,13 @@ from server.registries.worker import (
     WorkerRegistry,
 )
 from shared.schemas.worker import WorkerStatus
+from tests.support.live_redis import LIVE_REDIS
 
 _LIVE_URL = os.getenv("FLOWMESH_TEST_REDIS_URL")
 
 _live = pytest.mark.skipif(not _LIVE_URL, reason="FLOWMESH_TEST_REDIS_URL is not set")
+
+pytestmark = LIVE_REDIS
 
 _WORKER = "wkr-fence"
 

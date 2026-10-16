@@ -44,13 +44,15 @@ from tests.server.task.test_task_merge import (
 from tests.server.task.test_v2_orchestration import FakeRegistry
 from tests.server.task.test_v2_orchestration import _register as _register_v2
 from tests.server.task.test_v2_orchestration import _runtime as _v2_runtime
+from tests.support.live_redis import LIVE_REDIS
 from worker.executors.harness.scripted import ScriptedHarnessAdapter
 
 _LIVE_URL = os.getenv("FLOWMESH_TEST_REDIS_URL")
 
-pytestmark = pytest.mark.skipif(
-    not _LIVE_URL, reason="FLOWMESH_TEST_REDIS_URL is not set"
-)
+pytestmark = [
+    pytest.mark.skipif(not _LIVE_URL, reason="FLOWMESH_TEST_REDIS_URL is not set"),
+    LIVE_REDIS,
+]
 
 _WORKER = "wkr-release"
 
