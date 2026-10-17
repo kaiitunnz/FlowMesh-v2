@@ -131,8 +131,10 @@ def test_a_malformed_manifest_is_refused_early_in_bounded_memory(
 
 
 def test_a_path_longer_than_any_tree_holds_is_refused() -> None:
+    data = TreeManifest.of([TreeMember("a" * (1 << 17), _digest(1), 1)]).encode()
+
     with pytest.raises(TreeManifestError):
-        TreeManifest.of([TreeMember("a" * (1 << 17), _digest(1), 1)])
+        list(iter_members(_windows(data, 4096)))
 
 
 @pytest.mark.parametrize("at", [0, 500, len(_MANIFEST) - 1])

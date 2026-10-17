@@ -149,8 +149,9 @@ def iter_members(chunks: Iterable[bytes]) -> Iterator[TreeMember]:
     member at a time.
 
     Only the encoding ``TreeManifest.encode`` writes is read, so text that cannot
-    begin it, a member line longer than any valid member encodes to, or a byte past
-    the closing brace is refused once it is read. A caller verifying the bytes by
+    begin it, a path past any a published walk reaches, a member line longer than
+    such a member encodes to, or a byte past the closing brace is refused once it is
+    read. A caller verifying the bytes by
     digest learns of a corrupt manifest only once the stream ends, so it acts on no
     member as settled before then.
     """
@@ -238,6 +239,7 @@ class _MemberReader:
                 case _:
                     raise TreeManifestError(f"malformed tree member {entry!r}")
             _check_member(member)
+            _check_bounds(member)
             if self._previous is not None and path <= self._previous:
                 raise TreeManifestError(
                     f"tree member {path!r} is repeated or out of path order"
@@ -252,11 +254,16 @@ class _MemberReader:
 def _check_member(member: TreeMember) -> None:
     if not is_member_path(member.path):
         raise TreeManifestError(f"tree member path {member.path!r} is not plain")
-    if len(member.path) > _MAX_PATH_CHARS:
-        raise TreeManifestError(f"tree member path {member.path[:64]!r}... is too long")
     if len(member.digest) != 64 or not set(member.digest) <= _HEX:
         raise TreeManifestError(f"tree member {member.path!r} has a bad digest")
-    if not 0 <= member.size_bytes <= _MAX_SIZE_BYTES:
+    if member.size_bytes < 0:
+        raise TreeManifestError(f"tree member {member.path!r} has a negative size")
+
+
+def _check_bounds(member: TreeMember) -> None:
+    if len(member.path) > _MAX_PATH_CHARS:
+        raise TreeManifestError(f"tree member path {member.path[:64]!r}... is too long")
+    if member.size_bytes > _MAX_SIZE_BYTES:
         raise TreeManifestError(f"tree member {member.path!r} has a bad size")
 
 
