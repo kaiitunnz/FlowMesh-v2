@@ -2,23 +2,20 @@
 
 Each expected set below is written by hand, so a new field that can hold a content
 reference fails this suite until it is classified here; a reference a binding names
-but the protection walk misses is content a collector could remove.
+but the walk misses is content the audit reports unbound.
 """
 
 import itertools
-import threading
 import types
 import typing
 from collections.abc import Mapping
-from typing import Any, Literal, Union, get_args, get_origin
+from typing import Any, Union, get_args, get_origin
 
 import pytest
 from pydantic import BaseModel
 
-import server.reclamation.references as references_module
 from server.orchestration.ledger_layout import HISTORIES, KEYED
 from server.reclamation.references import (
-    distinct,
     reference_paths,
     references_of,
 )
@@ -130,7 +127,7 @@ def test_every_reference_at_a_classified_path_is_found(
     value = _build(model, expected, minted)
     found = list(references_of(value))
     assert {r.identity for r in found} == {r.identity for r in minted.references}
-    assert len(distinct(found)) == len(minted.references) == len(found)
+    assert len({r.identity for r in found}) == len(minted.references) == len(found)
 
 
 def test_a_model_reached_back_through_a_cycle_bears_what_the_cycle_reaches() -> None:
@@ -158,59 +155,6 @@ def test_a_model_reached_back_through_a_cycle_bears_what_the_cycle_reaches() -> 
         "inner.outer.reference",
         "inner.outer.inner@Inner",
     }
-
-
-def test_a_first_decision_racing_another_still_finds_the_reference(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    gate = list[Literal["race-gate"]]
-
-    class Outer(BaseModel):
-        gate: list[Literal["race-gate"]] = []
-        reference: ContentReference | None = None
-
-    class Holder(BaseModel):
-        outer: Outer | None = None
-
-    class Inner(BaseModel):
-        outer: Outer | None = None
-
-    entered = threading.Event()
-    others_done = threading.Event()
-    members = references_module._members
-
-    def interleaved(annotation: Any) -> list[tuple[str, Any]]:
-        if annotation == gate and not entered.is_set():
-            entered.set()
-            # Holds the first decision open while the others decide; a decision that
-            # serializes them keeps them waiting instead, so this times out.
-            others_done.wait(0.5)
-        return members(annotation)
-
-    monkeypatch.setattr(references_module, "_members", interleaved)
-    reference = reference_for("org", b"x")
-    first: list[list[ContentReference]] = []
-    others: list[list[ContentReference]] = []
-
-    def decide_outer() -> None:
-        first.append(list(references_of(Holder(outer=Outer(reference=reference)))))
-
-    def decide_inner() -> None:
-        others.append(list(references_of(Inner(outer=Outer(reference=reference)))))
-
-    leader = threading.Thread(target=decide_outer)
-    leader.start()
-    assert entered.wait(5)
-    followers = [threading.Thread(target=decide_inner) for _ in range(8)]
-    for follower in followers:
-        follower.start()
-    for follower in followers:
-        follower.join(5)
-    others_done.set()
-    leader.join(5)
-
-    assert first == [[reference]]
-    assert others == [[reference]] * 8
 
 
 class _Mint:

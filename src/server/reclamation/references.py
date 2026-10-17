@@ -3,11 +3,9 @@
 Which fields of a model can hold a ``ContentReference`` is read from its annotations
 once per class, so a walk visits only those fields and never interprets opaque values
 or a field that merely looks like a digest. ``reference_paths`` reports the same
-decision as dotted paths, the inventory a test pins every reference-bearing field
-against.
+decision as dotted paths.
 """
 
-import threading
 import types
 import typing
 from collections.abc import Iterable, Iterator, Mapping
@@ -50,7 +48,6 @@ def _members(annotation: Any) -> list[tuple[str, Any]]:
 
 
 _BEARING: dict[type[BaseModel], bool] = {}
-_BEARING_LOCK = threading.Lock()
 
 
 def _scan(annotation: Any, models: set[type[BaseModel]]) -> bool:
@@ -100,19 +97,16 @@ def _decide(root: type[BaseModel]) -> dict[type[BaseModel], bool]:
     return {model: model in bearing for model in nested}
 
 
-def _model_bears(model: type[BaseModel]) -> bool:
+def model_bears(model: type[BaseModel]) -> bool:
     """Whether any field of ``model`` can hold a reference."""
-    if (known := _BEARING.get(model)) is not None:
-        return known
-    with _BEARING_LOCK:
-        if model not in _BEARING:
-            _BEARING.update(_decide(model))
-        return _BEARING[model]
+    if model not in _BEARING:
+        _BEARING.update(_decide(model))
+    return _BEARING[model]
 
 
 def _bears(annotation: Any) -> bool:
     models: set[type[BaseModel]] = set()
-    return _scan(annotation, models) or any(_model_bears(m) for m in models)
+    return _scan(annotation, models) or any(model_bears(m) for m in models)
 
 
 @cache
@@ -137,11 +131,6 @@ def _walk(value: Any) -> Iterator[ContentReference]:
     elif isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
         for item in value:
             yield from _walk(item)
-
-
-def distinct(references: Iterable[ContentReference]) -> tuple[ContentReference, ...]:
-    """The references, one per content identity, in first-seen order."""
-    return tuple({reference.identity: reference for reference in references}.values())
 
 
 def references_of(*values: Any) -> Iterator[ContentReference]:
@@ -180,4 +169,4 @@ def reference_paths(model: type[BaseModel]) -> frozenset[str]:
     return frozenset(paths)
 
 
-__all__ = ["ELEMENT", "distinct", "reference_paths", "references_of"]
+__all__ = ["ELEMENT", "model_bears", "reference_paths", "references_of"]
