@@ -39,7 +39,7 @@ def _serving(data: bytes) -> Opener:
 
 
 def _closures(open_content: Opener, **kwargs: int) -> TreeClosures:
-    return TreeClosures(open_content, _LOGGER, pause_sec=0, **kwargs)
+    return TreeClosures(open_content, _LOGGER, duty=1.0, min_pause_sec=0, **kwargs)
 
 
 def test_a_verified_tree_marks_its_members_in_its_own_scope() -> None:

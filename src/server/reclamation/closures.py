@@ -19,10 +19,10 @@ from shared.content.tree import TreeManifestError, iter_members
 
 from ..task.results import ResultUnavailable, ResultUnreadable
 from .mark import Mark, digest_words
+from .pacing import DUTY, MIN_PAUSE_SEC, Pacer
 
-# Members read between pauses, and the pause, so a large manifest yields the GIL.
+# Members read between pauses.
 MEMBERS_PER_PAUSE = 1000
-MEMBER_PAUSE_SEC = 0.002
 
 type OpenContent = Callable[[ContentReference], Iterator[bytes]]
 
@@ -49,12 +49,14 @@ class TreeClosures:
         logger: logging.Logger,
         *,
         members_per_pause: int = MEMBERS_PER_PAUSE,
-        pause_sec: float = MEMBER_PAUSE_SEC,
+        duty: float = DUTY,
+        min_pause_sec: float = MIN_PAUSE_SEC,
     ) -> None:
         self._open = open_content
         self._logger = logger
         self._members_per_pause = members_per_pause
-        self._pause = pause_sec
+        self._duty = duty
+        self._min_pause = min_pause_sec
         self._mark = Mark()
         self._expanded: set[tuple[str, str]] = set()
         self._malformed: dict[tuple[str, str], str] = {}
@@ -80,11 +82,17 @@ class TreeClosures:
         self.reads += 1
         # Two words per member, folded into the closure only once the bytes verify.
         words = array("Q")
+        pacer = Pacer(
+            stop,
+            self._members_per_pause,
+            duty=self._duty,
+            min_pause_sec=self._min_pause,
+        )
         chunks = self._open(tree)
         try:
-            for count, member in enumerate(iter_members(chunks), 1):
+            for member in iter_members(chunks):
                 words.extend(digest_words(member.digest))
-                if count % self._members_per_pause == 0 and stop.wait(self._pause):
+                if pacer.tick():
                     return Expansion.STOPPED
         except TreeManifestError as exc:
             self._malformed[identity] = str(exc)

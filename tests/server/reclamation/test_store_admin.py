@@ -312,7 +312,7 @@ def test_a_full_sweep_only_reads_the_store() -> None:
     ]
     s3.parts = {"u-1": [{"Size": 4}]}
     service = ReclamationService(
-        Marker(rds, _LOGGER, page_pause_sec=0),
+        Marker(rds, _LOGGER, page_pause_sec=0, duty=1.0),
         TreeClosures(lambda ref: iter(()), _LOGGER),
         AuditCollector(
             _admin(s3), _LOGGER, AuditTrail(rds), page_pause_sec=0, recent_sec=0

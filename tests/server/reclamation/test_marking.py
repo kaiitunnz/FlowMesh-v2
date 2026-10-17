@@ -78,7 +78,7 @@ class _Fixture:
         server = fakeredis.FakeServer()
         self.rds = fake_redis_client(server)
         self.raw = fakeredis.FakeRedis(server=server, decode_responses=True)
-        self.marker = Marker(self.rds, _LOGGER, page_pause_sec=0)
+        self.marker = Marker(self.rds, _LOGGER, page_pause_sec=0, duty=1.0)
 
     def run(self, stop: threading.Event | None = None) -> MarkPass:
         return self.marker.run(stop or threading.Event())
@@ -433,7 +433,7 @@ def test_the_pass_waits_on_stop_every_few_values_and_between_pages(
             ).model_dump_json(),
         )
     trail = _Trail()
-    marker = Marker(fx.rds, _LOGGER, page_pause_sec=0.0001)
+    marker = Marker(fx.rds, _LOGGER, page_pause_sec=0.0001, duty=1.0)
     decode, finalize = marking.ledger_field, marking.finalization_value
     scan_page, hscan_page = marker._scan_page, marker._hscan_page
 

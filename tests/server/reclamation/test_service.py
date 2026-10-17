@@ -41,10 +41,12 @@ class _Fixture:
         self.s3 = ReadOnlyS3()
         self.manifests: dict[str, bytes] = {}
         self.opened: list[str] = []
-        self.marker = Marker(self.rds, _LOGGER, page_pause_sec=0, clock=lambda: NOW)
+        self.marker = Marker(
+            self.rds, _LOGGER, page_pause_sec=0, duty=1.0, clock=lambda: NOW
+        )
         self.service = ReclamationService(
             self.marker,
-            TreeClosures(self.open, _LOGGER, pause_sec=0),
+            TreeClosures(self.open, _LOGGER, duty=1.0, min_pause_sec=0),
             AuditCollector(
                 StoreAdmin(self.s3, "bucket", PREFIX),
                 _LOGGER,

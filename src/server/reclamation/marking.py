@@ -6,8 +6,8 @@ finalizations — decoding each value with the codec that wrote it and extractin
 references only through typed fields, into a fresh ``Mark``. One scan of the keyspace
 classifies each key into its family, a page of keys at a time and a large hash a page of
 fields at a time, holding no runtime lock and reading nothing the runtime holds in
-memory. The pass pauses between pages and every few decoded values, so it never holds
-the interpreter for long.
+memory. The pass pauses between pages and every few decoded values, for long enough
+that it takes only a small share of the interpreter.
 
 A value that does not decode leaves the scope it names incomplete, or every scope when
 its scope cannot be read. The pass names each tree manifest it finds, for its members
@@ -57,12 +57,13 @@ from ..task.history import (
     output_member_field,
 )
 from .mark import Mark
+from .pacing import DUTY, Pacer
 from .references import reference_paths, references_of
 
 # Keys one SCAN page asks for and fields one HSCAN page asks for.
 SCAN_COUNT = 500
 FIELD_COUNT = 256
-# The pause between pages, and after every so many decoded values.
+# The least pause between pages, and how many decoded values run between pauses.
 PAGE_PAUSE_SEC = 0.005
 VALUES_PER_PAUSE = 100
 
@@ -329,26 +330,6 @@ class MarkPass:
         return ""
 
 
-class _Pacer:
-    """Pauses after every so many values, so a pass yields the interpreter."""
-
-    def __init__(self, stop: threading.Event, every: int, pause_sec: float) -> None:
-        self._stop = stop
-        self._every = every
-        self._pause = pause_sec
-        self._count = 0
-
-    def tick(self) -> bool:
-        """Count one value; True once the pass is to stop."""
-        self._count += 1
-        if self._count % self._every:
-            return self._stop.is_set()
-        return self._stop.wait(self._pause)
-
-    def pause(self) -> bool:
-        return self._stop.wait(self._pause)
-
-
 class _Stopped(Exception):
     pass
 
@@ -363,12 +344,14 @@ class Marker:
         *,
         page_pause_sec: float = PAGE_PAUSE_SEC,
         values_per_pause: int = VALUES_PER_PAUSE,
+        duty: float = DUTY,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self._rds = rds
         self._logger = logger
         self._page_pause = page_pause_sec
         self._values_per_pause = values_per_pause
+        self._duty = duty
         self._clock = clock
 
     def run(
@@ -379,7 +362,12 @@ class Marker:
         started = time.monotonic()
         result = MarkPass(Mark(capacities), self._clock())
         result.reports = {family.value: FamilyReport() for family in Family}
-        pacer = _Pacer(stop, self._values_per_pause, self._page_pause)
+        pacer = Pacer(
+            stop,
+            self._values_per_pause,
+            duty=self._duty,
+            min_pause_sec=self._page_pause,
+        )
         try:
             cursor = 0
             while True:
@@ -450,7 +438,7 @@ class Marker:
         report: FamilyReport,
         key: str,
         exc: Exception,
-        pacer: _Pacer | None = None,
+        pacer: Pacer | None = None,
     ) -> None:
         scope = exc.scope if isinstance(exc, Undecodable) else None
         report.faults += 1
@@ -468,7 +456,7 @@ class Marker:
             raise _Stopped
 
     def _add(
-        self, result: MarkPass, report: FamilyReport, found: Found, pacer: _Pacer
+        self, result: MarkPass, report: FamilyReport, found: Found, pacer: Pacer
     ) -> None:
         for reference in found.references:
             result.mark.add(reference.authorization_scope, reference.content_digest)
@@ -485,7 +473,7 @@ class Marker:
         key: str,
         result: MarkPass,
         report: FamilyReport,
-        pacer: _Pacer,
+        pacer: Pacer,
     ) -> None:
         decode = _FIELD_DECODERS[family]
         cursor = 0
@@ -516,7 +504,7 @@ class Marker:
         keys: Sequence[str],
         result: MarkPass,
         report: FamilyReport,
-        pacer: _Pacer,
+        pacer: Pacer,
     ) -> None:
         """Decode task states or blueprints, which load under their workflow's stored
         sources."""
@@ -566,7 +554,7 @@ class Marker:
         keys: Sequence[str],
         result: MarkPass,
         report: FamilyReport,
-        pacer: _Pacer,
+        pacer: Pacer,
     ) -> None:
         raws = self._get_many(keys)
         for key, raw in zip(keys, raws, strict=True):
