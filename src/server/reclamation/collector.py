@@ -33,7 +33,8 @@ from .store_admin import (
     StoredVersion,
 )
 
-# How often a sweep runs, and how long before the mark an object counts as recent.
+# The least rest between sweeps, and how long before the mark an object counts as
+# recent.
 SWEEP_INTERVAL_SEC = 3600.0
 RECENT_SEC = 3600.0
 # The most open uploads one sweep sizes by listing their parts.

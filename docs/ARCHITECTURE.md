@@ -497,7 +497,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   one control assigned the work when it authorized the key, so the producer reporting a
   finalization is held to it rather than naming a scope of its own.
 - **Content audit.** With `CONTENT_AUDIT_ENABLED` (on by default) the root runs a
-  read-only audit of the shared store hourly in the background. Each audit marks every
+  read-only audit of the shared store in the background, hourly, or less often for a
+  store large enough that an audit takes over six minutes. Each audit marks every
   reference the control store's bindings name — workflow ledgers, task records and stored
   task definitions, artifact catalogs, settled workflows' histories and outcome
   finalizations — and every member of each bound tree, then lists the store: every object

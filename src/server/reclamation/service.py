@@ -37,6 +37,7 @@ class ContentAuditService:
         *,
         interval_sec: float = SWEEP_INTERVAL_SEC,
         clock: Callable[[], float] = time.time,
+        monotonic: Callable[[], float] = time.monotonic,
         reads_per_pause: int = READS_PER_PAUSE,
         duty: float = DUTY,
         min_pause_sec: float = MIN_PAUSE_SEC,
@@ -47,6 +48,7 @@ class ContentAuditService:
         self._logger = logger
         self._interval = interval_sec
         self._clock = clock
+        self._monotonic = monotonic
         self._reads_per_pause = reads_per_pause
         self._duty = duty
         self._min_pause = min_pause_sec
@@ -75,15 +77,18 @@ class ContentAuditService:
         )
 
     def run(self, stop: threading.Event) -> None:
-        """Sweep until stopped."""
+        """Sweep until stopped, resting at least the interval after each sweep and
+        long enough that sweeping takes at most the duty's share of the time."""
         while not stop.is_set():
+            started = self._monotonic()
             try:
                 self.sweep(stop)
             except Exception:
                 self._logger.warning(
                     "Content audit failed; trying again next interval", exc_info=True
                 )
-            if stop.wait(self._interval):
+            took = self._monotonic() - started
+            if stop.wait(max(self._interval, took * (1 - self._duty) / self._duty)):
                 return
 
     def sweep(self, stop: threading.Event) -> SweepAudit:

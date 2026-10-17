@@ -237,6 +237,48 @@ def test_run_survives_a_failed_sweep_and_stops_on_stop(
     assert len(calls) == 2
 
 
+class _Rests(threading.Event):
+    """A stop that records each rest instead of taking it, set after ``after``."""
+
+    def __init__(self, after: int) -> None:
+        super().__init__()
+        self.rests: list[float] = []
+        self.after = after
+
+    def wait(self, timeout: float | None = None) -> bool:
+        assert timeout is not None
+        self.rests.append(timeout)
+        if len(self.rests) >= self.after:
+            self.set()
+        return self.is_set()
+
+
+def test_a_long_sweep_stretches_the_rest_after_it_and_a_short_one_keeps_the_hour(
+    fx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = [0.0]
+    takes = iter([60.0, 7200.0, 1.0])
+    service = ContentAuditService(
+        fx.marker,
+        TreeClosures(fx.open, _LOGGER),
+        fx.service._collector,
+        _LOGGER,
+        interval_sec=3600,
+        monotonic=lambda: now[0],
+        duty=0.1,
+    )
+
+    def sweep(stop: threading.Event) -> None:
+        now[0] += next(takes)
+
+    monkeypatch.setattr(service, "sweep", sweep)
+    stop = _Rests(after=3)
+
+    service.run(stop)
+
+    assert stop.rests == [3600, pytest.approx(64800), 3600]
+
+
 def test_start_content_audit_runs_a_daemon_thread_until_stopped(fx) -> None:
     stop = threading.Event()
 
