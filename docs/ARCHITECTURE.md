@@ -511,7 +511,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   to metrics (see [`TELEMETRY.md`](TELEMETRY.md)) and to the capped `rc:audit` stream in
   the control store. A filesystem store is not audited. The mark lives in the root's
   memory, a compact filter that may count an unbound object as bound but never the
-  reverse; each tree's manifest is read once per root.
+  reverse; each tree's manifest is read once per root. An audit takes at most a tenth of
+  the root's interpreter time while it marks.
 - **Store access.** A worker reaches the store only under a `csg-`
   `ContentStoreAccessGrant` the control plane mints for one dispatched task in one
   authorization scope, bound to the worker incarnation running it and expiring shortly
