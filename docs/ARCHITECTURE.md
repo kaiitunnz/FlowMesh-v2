@@ -107,6 +107,7 @@ src/
     network/              Network plane: endpoint directory, reachability, resolver, relay
     orchestration/        Durable orchestration ledger (DS), engine, outcomes
       engine/               Orchestration engine, its ledger, stores and actors
+    reclamation/          Content protection, removal holds, backfill and store audit
     registries/           Worker / Node registries (Redis-backed)
     routers/v1/           workflows, tasks, results, workers, nodes, ssh, stack, system
     schemas/              REST API request and response schemas
@@ -495,32 +496,25 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   and never treats an idempotency key as a name. The scope that binding lands in is the
   one control assigned the work when it authorized the key, so the producer reporting a
   finalization is held to it rather than naming a scope of its own.
-- **Content retention.** Every bound object is retained, and the root keeps the
-  evidence of that: each write that binds content records the identities it names in
-  its scope's protection index in the same transaction, and a bound tree's members
-  join it once the root has read the tree's manifest from the store, a window at a
-  time, and it has verified whole. A worker's report naming objects it stored — a
-  success, a checkpoint or a prepared request — is a publication. The task-event
-  consumer only receives it; on a bounded lane that admits publications fairly across
-  workflows, control holds every object the report names against retirement before
-  binding any, a written-through tree's members included, and answers the worker once
-  the binding is durable. The worker keeps a copy of each object until its publication
-  is committed or rejected, repeats the report until then, and stores an object again
-  from its copy when control refuses it, so a refusal never runs a task, a provider
-  call or an input resolution again; a worker lost before the commit loses its
-  dispatch as any lost worker does. An artifact that uploads after its task's success
-  settles durable only once nothing it names is being removed from the store: its
-  worker waits while an object is, and stores again from its copy an object a removal
-  took. A root takes a new epoch when it starts, a write
-  carrying a publication lands only under the epoch it was made in, and a root a
-  later one has replaced stops. A worker registers each multipart upload's exact id
-  with control before sending any part. With `CONTENT_RECLAMATION_ENABLED` (on by
-  default) the root backfills protection for what was bound before, certifies each
-  scope whose coverage is complete, and audits a store it is eligible on — an S3
-  bucket with versioning enabled that its credential can list — reporting the
-  objects no binding names, those too recent to condemn counted apart, and the open
-  multipart uploads to its log, metrics and an audit stream. It deletes and aborts nothing. A filesystem store, or a bucket without
-  versioning, is reported ineligible and keeps every object.
+- **Content retention.** Each write that binds content records the identities it names
+  in its scope's protection index, in the same transaction; a bound tree's members join
+  once the root has read and verified its manifest. A worker's report of objects it
+  stored — a success, a checkpoint or a prepared request — commits off the task-event
+  stream: control holds each object against removal before binding any and answers once
+  the binding is durable. The worker keeps a copy of each and repeats the report until
+  answered. Refused because an object is being removed, it waits and reports again;
+  refused because one is gone, it stores it again from its copy, so a refusal repeats
+  only the write, and fails its dispatch when that copy is missing or damaged. An
+  artifact uploading after its task's success settles durable under the same rule. Each
+  starting root takes a new epoch; a write carrying a report lands only under its own
+  epoch, and a replaced root shuts down. A worker registers each multipart upload with
+  control before sending a part, so control knows which open uploads have a live owner.
+  With `CONTENT_RECLAMATION_ENABLED` (on by default) the root backfills protection for
+  every binding the control store holds and certifies each scope once its index covers
+  every binding; both persist across restarts. Hourly it audits the certified scopes of
+  a versioned S3 bucket its credential can list, reporting objects no binding names
+  (recent ones counted apart) and open multipart uploads to its log, metrics and an
+  audit stream. Any other store is reported ineligible.
 - **Store access.** A worker reaches the store only under a `csg-`
   `ContentStoreAccessGrant` the control plane mints for one dispatched task in one
   authorization scope, bound to the worker incarnation running it and expiring shortly
@@ -764,9 +758,11 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   transition waits for it: a task event is acknowledged, and its task's log stream
   closed, usage reported and exposed endpoints released, only once its transition is
   durable, and the task is dispatched again only after that; a dispatch carrying a held
-  transition publishes once it is durable, and a cancel answers `503` meanwhile. A
-  submission registers its workflow, tasks and initial ledger in one write before any of
-  its work runs.
+  transition publishes once it is durable, and a cancel answers `503` meanwhile. A task
+  event carrying a worker's report of objects it stored — a success, a checkpoint or a
+  prepared request — is acknowledged on receipt, and its worker repeats the report until
+  control answers it. A submission registers its workflow, tasks and initial ledger in
+  one write before any of its work runs.
 - **Workflow completion.** A workflow closes once, through one serialized finalizer:
   its log stream is sealed and its `flowmesh.workflow` span emitted when every task has
   durably settled and its artifacts have uploaded or been lost. The span's end is the

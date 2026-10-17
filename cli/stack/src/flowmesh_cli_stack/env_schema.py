@@ -984,10 +984,7 @@ STACK_ENV_SCHEMA = EnvSchema(
                 EnvVar(
                     "CONTENT_RECLAMATION_ENABLED",
                     "true",
-                    description=(
-                        "Backfill content protection and audit stored content no "
-                        "binding names."
-                    ),
+                    description="Audit the content store for objects no binding names.",
                     var_type=EnvVarType.BOOL,
                 ),
             ],

@@ -589,8 +589,7 @@ class ContentStoreConfig:
     that has stopped sending, and ``read_attempts`` how many times its request is made.
     ``transfer_window_bytes`` and ``transfer_timeout_sec`` are the window and stall
     deadline the workers' transfers run under, which a node relaying one sizes by.
-    ``reclamation_enabled`` runs the root's protection backfill and audit sweeps of
-    stored content no binding names.
+    ``reclamation_enabled`` audits the content store for objects no binding names.
     """
 
     hydration_enabled: bool = False
