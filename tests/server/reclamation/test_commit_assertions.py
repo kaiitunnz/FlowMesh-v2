@@ -19,6 +19,10 @@ from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import result_payload
 from tests.server.services.test_task_event_fence import _ECHO_V2
 from tests.server.task.test_runtime_commit_then_act import _runtime
+from tests.server.task.test_task_merge import _next
+from tests.server.task.test_task_merge import _register as _register_v1
+from tests.server.task.test_task_merge import _runtime as _merging_runtime
+from tests.server.task.test_task_merge import _siblings
 from tests.server.task.test_v2_orchestration import FakeRegistry, _register
 from tests.support.waiting import pop_ready
 
@@ -226,3 +230,27 @@ def test_a_scope_mark_the_store_refuses_is_stored_by_the_retry(rig) -> None:
     with pytest.raises(ResponseError):
         rig.runtime._retry_durability(rig.workflow_id)
     assert rig.store.uncovered == {(record.org_id, rig.workflow_id)}
+
+
+def test_a_merged_dispatch_guards_every_workflow_it_binds_into() -> None:
+    store = _Guarded()
+    runtime = _merging_runtime(cast(Any, store))
+    epoch = runtime.claim_root_epoch()
+    _, own = asyncio.run(_register_v1(runtime, _siblings(names=["a1"])))
+    _, other = asyncio.run(_register_v1(runtime, _siblings(names=["b1"])))
+    parent, child = own["a1"], other["b1"]
+    assert _next(runtime) == parent
+    assert runtime.plan_merge(parent, 8, "wkr-1") == [child]
+    record_dispatch(runtime, parent, "wkr-1", "dsp-1")
+
+    asserted = runtime.assert_publication(parent)
+    assert asserted is not None
+    with runtime.transition(), runtime._lock:
+        runtime._committer.commit_locked(child, sched=False)
+    assert store.guards[-1] == CommitGuard(epoch)
+
+    with runtime._lock:
+        runtime._committer.release_assertion_locked(asserted)
+    with runtime.transition(), runtime._lock:
+        runtime._committer.commit_locked(child, sched=False)
+    assert store.guards[-1] is None

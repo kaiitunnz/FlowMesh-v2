@@ -991,3 +991,37 @@ def test_a_staged_tree_with_members_retired_before_checks_them_on_the_next_repor
     setup.reader.store.write("org", b"weights")
     setup.report(UploadReport.UPLOADED)
     assert _last(setup).disposition is UploadDisposition.DURABLE
+
+
+def test_a_tree_expanded_while_its_upload_is_checked_is_checked_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    setup = _dispatched()
+    _retirement(setup)
+    tree = setup.tree(stored=False)
+    setup.succeed([tree])
+    manifest = tree.reference.content_digest
+    setup.runtime.expanding_trees(setup.train, [manifest])
+    member = ContentReference(
+        authorization_scope="org",
+        content_digest=hashlib.sha256(b"weights").hexdigest(),
+        size_bytes=len(b"weights"),
+    )
+    fakeredis.FakeRedis(server=setup.server).hset(
+        reclaim_history_key("org"), member.content_digest, "1"
+    )
+    check = setup.runtime._staged_verdict
+
+    def expanded_meanwhile(*args: Any) -> Any:
+        checked = check(*args)
+        setup.runtime.tree_expanded(setup.train, manifest, retired=[member])
+        return checked
+
+    monkeypatch.setattr(setup.runtime, "_staged_verdict", expanded_meanwhile)
+    setup.report(UploadReport.UPLOADED)
+    upload = setup.record(setup.train).internal.artifact_upload
+    assert upload is not None and upload.pending
+
+    monkeypatch.setattr(setup.runtime, "_staged_verdict", check)
+    setup.report(UploadReport.UPLOADED)
+    assert _last(setup).refusal is StoreRefusal.REMATERIALIZE
