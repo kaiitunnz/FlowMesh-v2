@@ -439,9 +439,13 @@ class PublicationOutbox:
             self._logger.debug("could not report a publication again", exc_info=True)
 
     def _restore(self, dispatch_id: str, entry: _Entry) -> bool:
-        """Store again each object control asked for, from the copy kept of it; a
-        store that cannot take it now is retried, and an object no intact copy is kept
-        of fails the dispatch."""
+        """Store again each object control asked for, from the copy kept of it, and
+        return whether to report the publication again.
+
+        A store that cannot take an object now is retried on the next round, whose
+        report lets control answer for a dispatch it no longer holds; an object no
+        intact copy is kept of fails the dispatch.
+        """
         with self._cv:
             dispatch = self._dispatches.get(dispatch_id)
             kept = dict(dispatch.kept) if dispatch is not None else {}
@@ -469,7 +473,7 @@ class PublicationOutbox:
             )
             with self._cv:
                 entry.due = self._clock() + self._backoff(entry)
-            return False
+            return True
         else:
             self._logger.info(
                 "Stored %d object(s) of publication %s again",

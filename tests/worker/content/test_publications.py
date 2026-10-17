@@ -282,12 +282,35 @@ def test_a_store_failure_while_restoring_is_retried(rig) -> None:
         _answer(reference, StoreRefusal.REMATERIALIZE, [reference.content_digest])
     )
     _nudge(outbox, clock, 1.0)
-    ports.wait(lambda: ports.upload_attempts == 1)
+    ports.wait(lambda: ports.upload_attempts == 1 and len(ports.sent) == 1)
     _until(lambda: _due_in(outbox) == pytest.approx(2.0))
-    assert ports.sent == []
     ports.fail_upload = False
     _nudge(outbox, clock, 2.0)
-    ports.wait(lambda: ports.uploaded and ports.sent)
+    ports.wait(lambda: ports.uploaded and len(ports.sent) == 2)
+
+
+def test_a_restore_that_keeps_failing_is_still_reported_until_rejected(rig) -> None:
+    outbox, ports, clock, tmp_path = rig
+    reference = _kept_store(outbox, ports).write(_SCOPE, b"result")
+    outbox.reported("TASK_SUCCEEDED", "tsk-1", "dsp-1", _success(reference))
+    outbox.end("dsp-1")
+    ports.fail_upload = True
+    outbox.answer(
+        _answer(reference, StoreRefusal.REMATERIALIZE, [reference.content_digest])
+    )
+    assert _kept(tmp_path) == {reference.content_digest}
+    for round_ in (1, 2, 3):
+        _nudge(outbox, clock, _due_in(outbox))
+        ports.wait(
+            lambda: ports.upload_attempts == round_ and len(ports.sent) == round_
+        )
+
+    outbox.answer(_answer(reference, PublicationDisposition.REJECTED))
+
+    assert outbox.dispatch_of("tsk-1") is None
+    assert not (tmp_path / "outbox" / "dsp-1").exists()
+    _nudge(outbox, clock, RESEND_SEC + 1)
+    assert (ports.upload_attempts, len(ports.sent)) == (3, 3)
 
 
 def test_a_retirement_is_waited_out_and_reported_again_storing_nothing(rig) -> None:
