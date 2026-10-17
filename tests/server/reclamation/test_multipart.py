@@ -15,6 +15,8 @@ from server.clients.redis import (
     worker_key,
 )
 from server.reclamation.multipart import (
+    RECORD_PAGE,
+    ClosedUpload,
     MultipartOwner,
     MultipartRegistrations,
     MultipartStore,
@@ -158,7 +160,7 @@ def test_a_transfer_moves_only_the_dispatchs_live_uploads(store) -> None:
     assert _record(raw, "up-1") == {
         "key": _KEY,
         "state": "registered",
-        "owner": {"kind": "upload", "dispatch_id": "dsp-1"},
+        "owner": {"kind": "upload", "dispatch_id": "dsp-1", "task_id": "tsk-1"},
         "registration": "wkr-1",
         "initiated_at": 1000,
         "content_protocol": 0,
@@ -177,7 +179,11 @@ def test_a_registration_racing_its_dispatchs_transfer_takes_the_new_owner(
     late = multipart.register(_SCOPE, "up-1", _KEY, _DISPATCH, "wkr-1")
 
     assert late.verdict is MultipartVerdict.ACK
-    assert _record(raw, "up-1")["owner"] == {"kind": "upload", "dispatch_id": "dsp-1"}
+    assert _record(raw, "up-1")["owner"] == {
+        "kind": "upload",
+        "dispatch_id": "dsp-1",
+        "task_id": "tsk-1",
+    }
     assert raw.hkeys(reclaim_multipart_dispatch_key(_SCOPE, "dsp-1")) == ["~moved"]
 
 
@@ -204,36 +210,43 @@ def test_a_key_of_the_wrong_type_refuses_before_writing(store) -> None:
     assert not raw.exists(reclaim_multipart_key(_SCOPE))
 
 
-def test_a_prune_drops_only_closed_uploads_registered_before_the_listing(
-    store,
-) -> None:
+def _closed(raw: fakeredis.FakeRedis, upload_id: str) -> ClosedUpload:
+    value = cast(str, raw.hget(reclaim_multipart_key(_SCOPE), upload_id))
+    return ClosedUpload(upload_id, value, json.loads(value)["owner"]["dispatch_id"])
+
+
+def test_a_drop_removes_only_records_unchanged_since_they_were_read(store) -> None:
     multipart, raw = store
-    multipart.register(_SCOPE, "up-open", _KEY, _DISPATCH, "wkr-1", now=1.0)
-    multipart.register(_SCOPE, "up-closed", _KEY, _DISPATCH, "wkr-1", now=2.0)
-    multipart.register(_SCOPE, "up-late", _KEY, _DISPATCH, "wkr-1", now=9.0)
-    raw.hset(reclaim_multipart_key(_SCOPE), "up-corrupt", "not json")
+    for upload_id in ("up-open", "up-closed", "up-moved"):
+        multipart.register(_SCOPE, upload_id, _KEY, _DISPATCH, "wkr-1")
+    closed, moved = _closed(raw, "up-closed"), _closed(raw, "up-moved")
+    multipart.transfer(_SCOPE, "dsp-1", MultipartOwner.upload("dsp-1"))
 
-    assert multipart.prune(_SCOPE, {"up-open"}, registered_before=5.0) == 1
+    assert multipart.drop(_SCOPE, [closed, moved]) == 0
+    assert multipart.drop(_SCOPE, [_closed(raw, "up-closed")]) == 1
 
-    assert set(raw.hkeys(reclaim_multipart_key(_SCOPE))) == {
-        "up-open",
-        "up-late",
-        "up-corrupt",
-    }
-    assert set(raw.hkeys(reclaim_multipart_dispatch_key(_SCOPE, "dsp-1"))) == {
-        "up-open",
-        "up-late",
-    }
+    assert set(raw.hkeys(reclaim_multipart_key(_SCOPE))) == {"up-open", "up-moved"}
 
 
-def test_the_last_prune_of_a_dispatchs_uploads_leaves_no_index(store) -> None:
+def test_the_last_drop_of_a_dispatchs_uploads_leaves_no_index(store) -> None:
     multipart, raw = store
     multipart.register(_SCOPE, "up-1", _KEY, _DISPATCH, "wkr-1", now=1.0)
 
-    multipart.prune(_SCOPE, set(), registered_before=5.0)
+    multipart.drop(_SCOPE, [_closed(raw, "up-1")])
 
     assert not raw.exists(reclaim_multipart_key(_SCOPE))
     assert not raw.exists(reclaim_multipart_dispatch_key(_SCOPE, "dsp-1"))
+
+
+def test_records_are_read_a_page_at_a_time(store) -> None:
+    multipart, _ = store
+    for i in range(RECORD_PAGE * 2 + 3):
+        multipart.register(_SCOPE, f"up-{i}", _KEY, _DISPATCH, "wkr-1")
+
+    pages = list(multipart.records(_SCOPE))
+
+    assert len(pages) > 1
+    assert len(multipart.upload_ids(_SCOPE)) == RECORD_PAGE * 2 + 3
 
 
 def test_a_released_dispatch_leaves_no_index_and_keeps_its_records(store) -> None:
@@ -244,7 +257,11 @@ def test_a_released_dispatch_leaves_no_index_and_keeps_its_records(store) -> Non
     multipart.release(_SCOPE, "dsp-1")
 
     assert not raw.exists(reclaim_multipart_dispatch_key(_SCOPE, "dsp-1"))
-    assert _record(raw, "up-1")["owner"] == {"kind": "upload", "dispatch_id": "dsp-1"}
+    assert _record(raw, "up-1")["owner"] == {
+        "kind": "upload",
+        "dispatch_id": "dsp-1",
+        "task_id": "tsk-1",
+    }
 
 
 def test_a_record_carries_the_content_protocol_its_worker_registered_with(
@@ -382,3 +399,16 @@ def test_a_store_that_cannot_decide_leaves_the_registration_unanswered(
     service.on_registration("wkr-1", _payload())
 
     assert workers.sent == []
+
+
+def test_an_upload_owner_is_recorded_with_the_registering_task(store) -> None:
+    multipart, raw = store
+    service, _, _ = _registrations(multipart, (_SCOPE, MultipartOwner.upload("dsp-1")))
+
+    service.on_registration("wkr-1", _payload())
+
+    assert _record(raw, "up-1")["owner"] == {
+        "kind": "upload",
+        "dispatch_id": "dsp-1",
+        "task_id": "tsk-1",
+    }

@@ -8,13 +8,14 @@ from typing import Any, cast
 
 import fakeredis
 import pytest
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
 from server.clients.redis import (
     RECLAIM_AUDIT_KEY,
     RECLAIM_SCOPES_KEY,
     reclaim_condemned_key,
     reclaim_deleting_key,
-    reclaim_multipart_dispatch_key,
     reclaim_multipart_key,
     reclaim_pins_key,
     reclaim_protected_key,
@@ -324,30 +325,72 @@ def test_open_uploads_are_reported_and_left_open(fx) -> None:
     _assert_nothing_destroyed(fx.s3, fx.raw)
 
 
-def test_a_sweep_drops_the_registrations_of_uploads_the_store_no_longer_holds(
+def _gauges(reader: InMemoryMetricReader) -> dict[str, float]:
+    data = reader.get_metrics_data()
+    assert data is not None
+    return {
+        metric.name: point.value
+        for resource in data.resource_metrics
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+        for point in metric.data.data_points
+    }
+
+
+def test_a_listing_that_omits_a_registered_upload_reports_the_uploads_unknown(
     fx,
 ) -> None:
+    reader = InMemoryMetricReader()
+    meter = MeterProvider(metric_readers=[reader]).get_meter("test")
+    collector = AuditCollector(
+        fx.rds,
+        fx.coverage,
+        StoreAdmin(fx.s3, "bucket", _PREFIX),
+        _LOGGER,
+        AuditTrail(fx.rds),
+        meter,
+        MultipartStore(fx.rds),
+        clock=lambda: _NOW,
+    )
     fx.certify_all()
     store = MultipartStore(fx.rds)
     owner = MultipartOwner.dispatch("dsp-1", "tsk-1")
-    for upload_id in ("u-open", "u-closed"):
+    for upload_id in ("u-listed", "u-unlisted"):
         store.register(_A, upload_id, "k", owner, "wkr-1", now=_NOW - 10)
-    store.register(_A, "u-late", "k", owner, "wkr-1", now=_NOW + 1)
     fx.s3.uploads = [
         {
             "Key": f"{_PREFIX}/{_A}/sha256/x",
-            "UploadId": "u-open",
+            "UploadId": "u-listed",
             "Initiated": _when(_OLD),
         }
     ]
 
-    fx.collector.sweep()
+    result = collector.sweep()
 
-    assert set(fx.raw.hkeys(reclaim_multipart_key(_A))) == {"u-open", "u-late"}
-    assert set(fx.raw.hkeys(reclaim_multipart_dispatch_key(_A, "dsp-1"))) == {
-        "u-open",
-        "u-late",
-    }
+    assert result.uploads is not None
+    assert (result.uploads.unlisted, result.uploads.known) == (1, False)
+    assert fx.audit("uploads")[0]["known"] == "false"
+    assert fx.audit("sweep")[0]["uploads_known"] == "false"
+    gauges = _gauges(reader)
+    assert gauges["flowmesh.content.reclamation.open_uploads_known"] == 0
+    assert "flowmesh.content.reclamation.open_uploads" not in gauges
+    assert set(fx.raw.hkeys(reclaim_multipart_key(_A))) == {"u-listed", "u-unlisted"}
+
+
+def test_a_listing_naming_every_registered_upload_reports_the_count(fx) -> None:
+    fx.certify_all()
+    MultipartStore(fx.rds).register(
+        _A, "u-1", "k", MultipartOwner.dispatch("dsp-1", "tsk-1"), "wkr-1"
+    )
+    fx.s3.uploads = [
+        {"Key": f"{_PREFIX}/{_A}/sha256/x", "UploadId": "u-1", "Initiated": _when(_OLD)}
+    ]
+
+    result = fx.collector.sweep()
+
+    assert result.uploads is not None
+    assert (result.uploads.uploads, result.uploads.known) == (1, True)
+    assert fx.audit("sweep")[0]["uploads_known"] == "true"
 
 
 @pytest.mark.parametrize("status", [None, "Suspended"])
@@ -365,9 +408,7 @@ def test_an_unversioned_bucket_is_ineligible_and_keeps_everything(status) -> Non
 
 
 @pytest.mark.parametrize("status", [None, "Suspended"])
-def test_an_unversioned_bucket_still_drops_the_registrations_of_closed_uploads(
-    status,
-) -> None:
+def test_an_unversioned_bucket_still_reports_its_open_uploads(status) -> None:
     fx = _Fixture(StubS3(versioning=status))
     owner = MultipartOwner.dispatch("dsp-1", "tsk-1")
     for upload_id in ("u-open", "u-closed"):
@@ -384,7 +425,11 @@ def test_an_unversioned_bucket_still_drops_the_registrations_of_closed_uploads(
 
     assert result.eligibility.reason is Ineligibility.UNVERSIONED
     assert result.uploads is not None and result.uploads.uploads == 1
-    assert set(cast(list[str], fx.raw.hkeys(reclaim_multipart_key(_A)))) == {"u-open"}
+    assert not result.uploads.known
+    assert set(cast(list[str], fx.raw.hkeys(reclaim_multipart_key(_A)))) == {
+        "u-open",
+        "u-closed",
+    }
     assert "list_object_versions" not in fx.s3.calls
 
 

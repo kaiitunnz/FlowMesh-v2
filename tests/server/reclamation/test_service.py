@@ -13,9 +13,11 @@ from server.config import ContentStoreConfig
 from server.reclamation.backfill import FAMILIES, Backfill
 from server.reclamation.certification import CoverageStore
 from server.reclamation.collector import AuditCollector
+from server.reclamation.multipart import MultipartOwner
 from server.reclamation.service import ReclamationService, start_reclamation
 from server.reclamation.store_admin import StoreAdmin
-from shared.content import ObjectStoreConfig
+from server.reclamation.upkeep import MultipartUpkeep
+from shared.content import BACKEND_FILESYSTEM, ObjectStoreConfig
 from tests.server.reclamation.test_collector import StubS3
 from tests.server.redis_helpers import fake_redis_client
 
@@ -139,31 +141,62 @@ def test_the_service_stops_sweeping_once_a_later_root_takes_over(
     assert swept == [1]
 
 
-def test_reclamation_switched_off_starts_nothing(fx) -> None:
-    before = threading.active_count()
+def _no_owner(
+    task_id: str, worker_id: str, dispatch_id: str | None
+) -> tuple[str, MultipartOwner] | None:
+    return None
 
-    thread = start_reclamation(
-        False, fx.rds, ObjectStoreConfig(), lambda: 1, _LOGGER, threading.Event()
+
+@pytest.fixture
+def ran(monkeypatch: pytest.MonkeyPatch) -> dict[str, threading.Event]:
+    events = {
+        "content-reclamation": threading.Event(),
+        "multipart-upkeep": threading.Event(),
+    }
+    monkeypatch.setattr(
+        ReclamationService,
+        "run",
+        lambda self, stop: events["content-reclamation"].set(),
     )
+    monkeypatch.setattr(
+        MultipartUpkeep,
+        "run",
+        lambda self, epoch, stop: events["multipart-upkeep"].set(),
+    )
+    return events
 
-    assert thread is None
-    assert threading.active_count() == before
+
+def _started(enabled: bool, fx: _Fixture, store: ObjectStoreConfig) -> list[str]:
+    threads = start_reclamation(
+        enabled, fx.rds, store, lambda: 1, _no_owner, _LOGGER, threading.Event()
+    )
+    for thread in threads:
+        thread.join(5)
+    return sorted(thread.name for thread in threads)
+
+
+def test_reclamation_switched_off_still_keeps_multipart_records(fx, ran) -> None:
+    assert _started(False, fx, ObjectStoreConfig()) == ["multipart-upkeep"]
+
+    assert ran["multipart-upkeep"].is_set()
+    assert not ran["content-reclamation"].is_set()
     assert not list(fx.raw.scan_iter("rc:*"))
 
 
-def test_reclamation_switched_on_runs_on_its_own_thread(
-    fx, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    ran = threading.Event()
-    monkeypatch.setattr(ReclamationService, "run", lambda self, stop: ran.set())
+def test_reclamation_switched_on_runs_both_on_their_own_threads(fx, ran) -> None:
+    assert _started(True, fx, ObjectStoreConfig()) == [
+        "content-reclamation",
+        "multipart-upkeep",
+    ]
 
-    thread = start_reclamation(
-        True, fx.rds, ObjectStoreConfig(), lambda: 1, _LOGGER, threading.Event()
-    )
+    assert all(event.is_set() for event in ran.values())
 
-    assert thread is not None and thread.name == "content-reclamation"
-    thread.join(5)
-    assert ran.is_set()
+
+def test_a_filesystem_store_needs_no_multipart_upkeep(fx, ran) -> None:
+    store = ObjectStoreConfig(backend=BACKEND_FILESYSTEM)
+
+    assert _started(False, fx, store) == []
+    assert _started(True, fx, store) == ["content-reclamation"]
 
 
 @pytest.mark.parametrize(("value", "expected"), [(None, True), ("false", False)])

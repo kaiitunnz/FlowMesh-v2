@@ -11,16 +11,16 @@ A scope's records live in one hash. Uploads owned by a dispatch are indexed by i
 moving them to the obligation the dispatch's success leaves costs one call per
 dispatch, proportional to its own uploads; once moved, a dispatch's later
 registrations take the obligation directly, until the obligation settles and its index
-is released. A record leaves once a listing of the store's open uploads that started
-after its registration no longer names its UploadId: the upload was completed or
-aborted, and an UploadId never opens again.
+is released. A record leaves once its owner has ended and the store, asked about its
+exact UploadId, no longer holds the upload: the upload was completed or aborted, and
+an UploadId never opens again.
 """
 
 import json
 import logging
 import time
-from collections.abc import Set
-from dataclasses import dataclass
+from collections.abc import Iterator, Sequence
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Protocol, Self
 
@@ -69,7 +69,9 @@ if owner.kind == 'finalization' then
 elseif owner.kind == 'dispatch' then
   local moved = redis.call('HGET', KEYS[2], '~moved')
   if moved then
+    local task_id = owner.task_id
     owner = cjson.decode(moved)
+    owner.task_id = task_id
   else
     indexed = true
   end
@@ -108,6 +110,7 @@ for _, id in ipairs(redis.call('HKEYS', KEYS[2])) do
     local record = cjson.decode(current)
     if record.state == 'registered' and record.owner.kind == 'dispatch'
         and record.owner.dispatch_id == ARGV[1] then
+      owner.task_id = record.owner.task_id
       record.owner = owner
       moving[id] = cjson.encode(record)
     end
@@ -126,9 +129,9 @@ return moved
 """
 
 
-# KEYS: records, then each candidate's dispatch index.
+# KEYS: records, then each closed upload's dispatch index.
 # ARGV: id1, record1, ..., idn, recordn.
-_PRUNE = """
+_DROP = """
 if redis.call('TYPE', KEYS[1]).ok ~= 'hash' then
   return 0
 end
@@ -146,8 +149,8 @@ end
 return pruned
 """
 
-# Records one prune reads and removes at a time.
-PRUNE_PAGE = 256
+# Records one page of a scope's records holds.
+RECORD_PAGE = 256
 
 
 class OwnerKind(StrEnum):
@@ -171,8 +174,8 @@ class MultipartOwner:
         return cls(OwnerKind.DISPATCH, dispatch_id=dispatch_id, task_id=task_id)
 
     @classmethod
-    def upload(cls, dispatch_id: str) -> Self:
-        return cls(OwnerKind.UPLOAD, dispatch_id=dispatch_id)
+    def upload(cls, dispatch_id: str, task_id: str = "") -> Self:
+        return cls(OwnerKind.UPLOAD, dispatch_id=dispatch_id, task_id=task_id)
 
     @classmethod
     def finalization(cls, idempotency_key: str) -> Self:
@@ -185,9 +188,20 @@ class MultipartOwner:
                 fields |= {"dispatch_id": self.dispatch_id, "task_id": self.task_id}
             case OwnerKind.UPLOAD:
                 fields["dispatch_id"] = self.dispatch_id
+                if self.task_id:
+                    fields["task_id"] = self.task_id
             case OwnerKind.FINALIZATION:
                 fields["idm"] = self.idempotency_key
         return json.dumps(fields, sort_keys=True, separators=(",", ":"))
+
+
+@dataclass(frozen=True)
+class ClosedUpload:
+    """A record whose upload the store no longer holds, as it was read."""
+
+    upload_id: str
+    raw: str
+    dispatch_id: str
 
 
 @dataclass(frozen=True)
@@ -294,47 +308,38 @@ class MultipartStore:
             reclaim_multipart_dispatch_key(scope, dispatch_id)
         )
 
-    def prune(self, scope: str, open_ids: Set[str], registered_before: float) -> int:
-        """Remove each record registered before ``registered_before`` whose UploadId
-        ``open_ids`` does not name; returns how many were removed.
-
-        ``open_ids`` is every upload the store held open in a listing that started at
-        ``registered_before`` or later, so an upload it does not name was completed or
-        aborted. A record that changed since it was read is left for the next prune.
-        """
-        cutoff_ms = registered_before * 1000
+    def records(self, scope: str) -> Iterator[dict[str, str]]:
+        """Every record under ``scope`` by UploadId, as stored, a page at a time."""
         records = reclaim_multipart_key(scope)
-        pruned = 0
         cursor = 0
         while True:
             with self._rds.sync.control_pipeline(transaction=False) as pipe:
-                pipe.hscan(records, cursor, count=PRUNE_PAGE)
+                pipe.hscan(records, cursor, count=RECORD_PAGE)
                 next_cursor, page = pipe.execute()[0]
             cursor = int(next_cursor)
-            closed: list[tuple[str, str, str]] = []
-            for upload_id, raw in page.items():
-                if upload_id in open_ids:
-                    continue
-                try:
-                    record = json.loads(raw)
-                    initiated_at = float(record["initiated_at"])
-                    dispatch_id = str(record["owner"].get("dispatch_id") or "")
-                except (ValueError, TypeError, KeyError, AttributeError):
-                    continue
-                if initiated_at < cutoff_ms:
-                    closed.append((upload_id, raw, dispatch_id))
-            if closed:
-                keys = [records]
-                keys += [
-                    reclaim_multipart_dispatch_key(scope, dispatch_id)
-                    for _, _, dispatch_id in closed
-                ]
-                args = [
-                    value for upload_id, raw, _ in closed for value in (upload_id, raw)
-                ]
-                pruned += int(self._rds.sync.eval(_PRUNE, len(keys), *keys, *args))
+            if page:
+                yield page
             if cursor == 0:
-                return pruned
+                return
+
+    def upload_ids(self, scope: str) -> set[str]:
+        """The UploadId of every record under ``scope``."""
+        return {upload_id for page in self.records(scope) for upload_id in page}
+
+    def drop(self, scope: str, closed: Sequence[ClosedUpload]) -> int:
+        """Remove the record of each closed upload; returns how many were removed.
+
+        A record that changed since it was read is left in place.
+        """
+        if not closed:
+            return 0
+        keys = [reclaim_multipart_key(scope)]
+        keys += [
+            reclaim_multipart_dispatch_key(scope, upload.dispatch_id)
+            for upload in closed
+        ]
+        args = [value for upload in closed for value in (upload.upload_id, upload.raw)]
+        return int(self._rds.sync.eval(_DROP, len(keys), *keys, *args))
 
 
 class OwnerResolver(Protocol):
@@ -399,6 +404,8 @@ class MultipartRegistrations:
             )
         ) is not None and resolved[0] == scope:
             owner = resolved[1]
+            if owner.kind is OwnerKind.UPLOAD:
+                owner = replace(owner, task_id=task_id)
         else:
             return MultipartVerdict.UNOWNED
         try:
@@ -425,6 +432,8 @@ class MultipartRegistrations:
 
 
 __all__ = [
+    "RECORD_PAGE",
+    "ClosedUpload",
     "MultipartOwner",
     "MultipartRegistrations",
     "MultipartStore",

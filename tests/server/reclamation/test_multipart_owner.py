@@ -1,13 +1,17 @@
 """The runtime names a multipart upload's owner and moves it to the owed upload."""
 
 import json
+import logging
 from typing import Any, cast
 
 import fakeredis
 
 from server.clients.redis import reclaim_multipart_dispatch_key, reclaim_multipart_key
 from server.reclamation.multipart import MultipartOwner, MultipartStore
+from server.reclamation.store_admin import StoreAdmin
+from server.reclamation.upkeep import MultipartUpkeep
 from shared.tasks.artifact_upload import UploadReport
+from tests.server.reclamation.test_upkeep import SiloS3
 from tests.server.redis_helpers import fake_redis_client
 from tests.server.task.test_artifact_uploads import _dispatched, _Setup
 
@@ -46,7 +50,11 @@ def test_a_staged_success_moves_its_dispatchs_uploads_to_the_owed_upload() -> No
 
     setup.succeed([setup.tree(stored=False)])
 
-    assert _owner(raw, "up-1")["owner"] == {"kind": "upload", "dispatch_id": "dsp-1"}
+    assert _owner(raw, "up-1")["owner"] == {
+        "kind": "upload",
+        "dispatch_id": "dsp-1",
+        "task_id": setup.train,
+    }
     assert _owner(raw, "up-1")["initiated_at"] == 3000
     assert _owner(raw, "up-1")["registration"] == "wkr-1"
     assert setup.runtime.multipart_owner(setup.train, "wkr-1", "dsp-1") == (
@@ -87,3 +95,32 @@ def test_a_success_owing_no_upload_moves_nothing() -> None:
     setup.succeed([])
 
     assert _owner(raw, "up-1")["owner"]["kind"] == "dispatch"
+
+
+def test_the_upkeep_checks_an_upload_only_once_its_runtime_owner_ends() -> None:
+    setup, store, raw = _wired()
+    s3 = SiloS3()
+    upkeep = MultipartUpkeep(
+        fake_redis_client(setup.server),
+        store,
+        StoreAdmin(s3, "bucket"),
+        setup.runtime.multipart_owner,
+        logging.getLogger("test"),
+        page_pause_sec=0,
+    )
+    scope, owner = cast(
+        tuple[str, MultipartOwner],
+        setup.runtime.multipart_owner(setup.train, "wkr-1", "dsp-1"),
+    )
+    store.register(scope, "up-1", "org/sha256/a", owner, "wkr-1")
+
+    upkeep.run_pass()
+    setup.succeed([setup.file(b"weights", "weights.bin", stored=True)])
+    upkeep.run_pass()
+    assert s3.checked() == []
+
+    setup.report(UploadReport.UPLOADED)
+    upkeep.run_pass()
+
+    assert s3.checked() == ["up-1"]
+    assert not raw.exists(reclaim_multipart_key("org"))

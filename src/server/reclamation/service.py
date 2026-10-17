@@ -21,8 +21,9 @@ from .audit import AuditTrail
 from .backfill import FAMILIES, Backfill
 from .certification import CoverageStore
 from .collector import SWEEP_INTERVAL_SEC, AuditCollector
-from .multipart import MultipartStore
+from .multipart import MultipartStore, OwnerResolver
 from .store_admin import StoreAdmin
+from .upkeep import start_multipart_upkeep
 
 
 class ReclamationService:
@@ -123,23 +124,33 @@ def start_reclamation(
     rds: RedisClient,
     store: ObjectStoreConfig,
     epoch: Callable[[], int | None],
+    owner_of: OwnerResolver,
     logger: logging.Logger,
     stop: threading.Event,
     meter: Meter | None = None,
     expand_trees: Callable[[threading.Event], None] | None = None,
-) -> threading.Thread | None:
-    """Start the reclamation service's thread when ``enabled``; returns it, or None.
+) -> list[threading.Thread]:
+    """Start the root's content upkeep threads; returns them.
 
-    ``expand_trees`` protects the members of bound trees before each sweep.
+    The multipart records' upkeep runs on any store that takes multipart uploads, and
+    the reclamation service only when ``enabled``. ``owner_of`` resolves whether an
+    upload's owner still lives; ``expand_trees`` protects the members of bound trees
+    before each sweep.
     """
+    threads: list[threading.Thread] = []
+    if (
+        upkeep := start_multipart_upkeep(rds, store, owner_of, epoch, logger, stop)
+    ) is not None:
+        threads.append(upkeep)
     if not enabled:
-        return None
+        return threads
     service = ReclamationService.build(rds, store, epoch, logger, meter, expand_trees)
     thread = threading.Thread(
         target=service.run, args=(stop,), name="content-reclamation", daemon=True
     )
     thread.start()
-    return thread
+    threads.append(thread)
+    return threads
 
 
 __all__ = ["ReclamationService", "start_reclamation"]

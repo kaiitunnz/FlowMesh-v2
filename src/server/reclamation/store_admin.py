@@ -3,6 +3,10 @@
 These run under the deployment's own store credential, which can list the bucket's
 object versions and multipart uploads and read its versioning state; the scoped
 sessions workers hold can do none of that. Nothing here writes, deletes or aborts.
+
+A MinIO-family store, the co-located one included, lists open multipart uploads only
+by exact key and from memory a restart empties, so a listing of its open uploads can
+omit uploads still open. Asked about one UploadId, every store answers exactly.
 """
 
 import re
@@ -14,6 +18,7 @@ from typing import Any
 
 import boto3
 from botocore.client import Config
+from botocore.exceptions import ClientError
 
 from shared.content import BACKEND_S3, DigestAlgorithm, ObjectStoreConfig
 
@@ -79,7 +84,7 @@ class StoredVersion:
 
 @dataclass(frozen=True)
 class OpenUpload:
-    """A multipart upload the store holds open."""
+    """A multipart upload a listing names open."""
 
     key: str
     upload_id: str
@@ -212,6 +217,21 @@ class StoreAdmin:
                 "KeyMarker": page.get("NextKeyMarker", ""),
                 "UploadIdMarker": page.get("NextUploadIdMarker", ""),
             }
+
+    def upload_open(self, key: str, upload_id: str) -> bool:
+        """Whether the store still holds the upload ``upload_id`` of ``key`` open.
+
+        Raises when the store gives no answer.
+        """
+        try:
+            self._client.list_parts(
+                Bucket=self._bucket, Key=key, UploadId=upload_id, MaxParts=1
+            )
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") == "NoSuchUpload":
+                return False
+            raise
+        return True
 
     def upload_bytes(self, upload: OpenUpload) -> tuple[int, int]:
         """The parts an open upload holds and their total size."""

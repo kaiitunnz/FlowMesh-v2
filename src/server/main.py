@@ -668,18 +668,19 @@ def _start_root_threads() -> None:
         holds_thread.start()
         BACKGROUND_THREADS.append(holds_thread)
 
-    reclamation_thread = start_reclamation(
-        config.content_store.reclamation_enabled,
-        REDIS_CLIENT,
-        config.object_store,
-        lambda: runtime.root_epoch,
-        logger,
-        STOP_EVENT,
-        SERVER_METER,
-        _expand_bound_trees,
+    BACKGROUND_THREADS.extend(
+        start_reclamation(
+            config.content_store.reclamation_enabled,
+            REDIS_CLIENT,
+            config.object_store,
+            lambda: runtime.root_epoch,
+            runtime.multipart_owner,
+            logger,
+            STOP_EVENT,
+            SERVER_METER,
+            _expand_bound_trees,
+        )
     )
-    if reclamation_thread is not None:
-        BACKGROUND_THREADS.append(reclamation_thread)
 
     watchdog_thread = WATCHDOG.start(STOP_EVENT)
     if watchdog_thread and watchdog_thread not in BACKGROUND_THREADS:

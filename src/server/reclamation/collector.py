@@ -6,8 +6,9 @@ assertion in flight, nor a bound tree awaiting expansion. Condemnation is one sc
 that re-checks all of that, and the scope's certification, atomically, so an object a
 binding names is never condemned. A condemned object stays cancellable: an assertion
 that names it removes it. The collector also reports the multipart uploads the store
-holds open, and drops the registration of each upload a listing no longer names. It
-records what it found in the audit stream, its log and its metrics.
+holds open, and records what it found in the audit stream, its log and its metrics. A
+listing that omits an upload a registration record still names may be one the store
+answers incompletely, so the sweep then reports the open uploads as unknown.
 
 An object younger than ``MIN_AGE_SEC`` is passed over, which paces condemnation behind
 writers still about to bind what they wrote; no decision rests on that age.
@@ -120,13 +121,23 @@ class ScopeAudit:
 
 @dataclass
 class UploadAudit:
-    """The multipart uploads the store holds open, by scope."""
+    """The multipart uploads a listing of the store names open, by scope."""
 
     uploads: int = 0
     parts: int = 0
     bytes: int = 0
     unsized: int = 0
     by_scope: dict[str, int] = field(default_factory=dict)
+    unlisted: int = 0
+    """Registered uploads the listing does not name."""
+
+    @property
+    def known(self) -> bool:
+        """Whether the listing names every registered upload, so its counts hold.
+
+        A registered upload it omits may have closed or may be one the store left out.
+        """
+        return self.unlisted == 0
 
 
 @dataclass
@@ -223,6 +234,12 @@ class AuditCollector:
             description="Bytes of parts open multipart uploads hold, as of the last "
             "sweep.",
         )
+        self._uploads_known = meter.create_gauge(
+            "flowmesh.content.reclamation.open_uploads_known",
+            unit="1",
+            description="Whether the last sweep's listing named every registered "
+            "upload; the open-upload gauges hold the last known counts otherwise.",
+        )
         self._uncertified = meter.create_gauge(
             "flowmesh.content.reclamation.uncertified_scopes",
             unit="{scope}",
@@ -251,8 +268,6 @@ class AuditCollector:
         self._eligible.set(1 if eligibility.eligible else 0)
         if not eligibility.eligible:
             self._report_ineligible(eligibility, sweep_id)
-            # Open uploads list without versioning, so their records stay bounded on
-            # any bucket the root can list.
             if eligibility.reason in _UPLOADS_LISTABLE and not stop.is_set():
                 self._audit_uploads(result, sweep_id)
                 self._publish(result)
@@ -377,13 +392,17 @@ class AuditCollector:
     def _audit_uploads(self, result: SweepAudit, sweep_id: str) -> None:
         result.uploads = self._uploads()
         if self._audit is not None:
-            self._audit.record("uploads", sweep=sweep_id, **asdict(result.uploads))
+            self._audit.record(
+                "uploads",
+                sweep=sweep_id,
+                known=result.uploads.known,
+                **asdict(result.uploads),
+            )
 
     def _uploads(self) -> UploadAudit:
         assert self._admin is not None
         audit = UploadAudit()
         by_scope: dict[str, int] = defaultdict(int)
-        listed_at = self._clock()
         open_ids: set[str] = set()
         for page in self._admin.uploads():
             for upload in page:
@@ -402,8 +421,8 @@ class AuditCollector:
                 audit.bytes += size
         audit.by_scope = dict(by_scope)
         if self._multipart is not None:
-            for scope in sorted(self._rds.sync.set_members(RECLAIM_SCOPES_KEY)):
-                self._multipart.prune(scope, open_ids, listed_at)
+            for scope in self._rds.sync.set_members(RECLAIM_SCOPES_KEY):
+                audit.unlisted += len(self._multipart.upload_ids(scope) - open_ids)
         return audit
 
     def _publish(self, result: SweepAudit) -> None:
@@ -413,12 +432,14 @@ class AuditCollector:
         self._young_bytes.set(result.young_bytes)
         self._uncertified.set(result.uncertified)
         uploads = result.uploads or UploadAudit()
-        self._open_uploads.set(uploads.uploads)
-        self._open_upload_bytes.set(uploads.bytes)
+        self._uploads_known.set(1 if uploads.known else 0)
+        if uploads.known:
+            self._open_uploads.set(uploads.uploads)
+            self._open_upload_bytes.set(uploads.bytes)
         self._logger.info(
             "Content reclamation sweep %s: %d scopes (%d uncertified), %d orphaned "
             "versions (%d bytes) condemned, %d unbound versions (%d bytes) too recent "
-            "to condemn, %d open uploads (%d bytes), in %.1fs",
+            "to condemn, %s open uploads (%d bytes listed), in %.1fs",
             result.sweep,
             len(result.scopes),
             result.uncertified,
@@ -426,7 +447,7 @@ class AuditCollector:
             result.orphan_bytes,
             result.young,
             result.young_bytes,
-            uploads.uploads,
+            uploads.uploads if uploads.known else "unknown",
             uploads.bytes,
             result.seconds,
         )
@@ -442,6 +463,7 @@ class AuditCollector:
                 young_bytes=result.young_bytes,
                 uploads=uploads.uploads,
                 upload_bytes=uploads.bytes,
+                uploads_known=uploads.known,
                 seconds=round(result.seconds, 3),
             )
 
