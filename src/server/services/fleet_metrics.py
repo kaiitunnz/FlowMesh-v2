@@ -161,9 +161,9 @@ def build_fleet_sampler(
     """Build the fleet/residency sampler for the root server.
 
     ``stores`` is ``None`` when resident-capacity control is disabled; the sampler
-    then reports queue depth only; ``publication_lane`` reads the publication lane's
-    depth once the event monitor runs one. The caller starts it on the root event loop once
-    it is running (``sampler.start(loop)``) and stops it at shutdown
+    then reports queue depth only. ``publication_lane`` reads the publication lane's
+    depth once the event monitor runs one. The caller starts it on the root event loop
+    once it is running (``sampler.start(loop)``) and stops it at shutdown
     (``sampler.shutdown()``), the same lifecycle ``ResidentCapacityControl`` uses.
     """
     return FleetResidencySampler(
