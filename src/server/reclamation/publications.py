@@ -362,7 +362,11 @@ class PublicationHolds:
             self._owe(rest)
 
     def repay(self) -> int:
-        """Release the holds an outage left owed; returns how many are still owed."""
+        """Release the holds an outage left owed; returns how many are still owed.
+
+        A release that fails stays owed and the rest are still repaid; an unreachable
+        control store ends the pass. Raises nothing the release raises.
+        """
         with self._owed_lock:
             owed, self._owed = self._owed, []
         still: list[Holds] = []
@@ -372,7 +376,16 @@ class PublicationHolds:
                 try:
                     if (rest := self._settle(holds)) is not None:
                         still.append(rest)
-                except REDIS_CONN_ERRORS:
+                except REDIS_CONN_ERRORS as exc:
+                    self._logger.warning(
+                        "Repaying hold releases waits for the control store: %s", exc
+                    )
+                    break
+                except Exception:
+                    self._logger.exception(
+                        "Releasing the owed holds of %s failed; they stay owed",
+                        holds.nonce,
+                    )
                     still.append(holds)
                 done += 1
         finally:

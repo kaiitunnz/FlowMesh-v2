@@ -358,20 +358,62 @@ def test_a_release_the_control_store_drops_stays_owed_until_repaid(raw) -> None:
     assert raw.hgetall(reclaim_pins_key(_SCOPE)) == {}
 
 
-def test_a_repayment_that_fails_keeps_what_it_did_not_release(raw) -> None:
+def _owe(
+    raw: fakeredis.FakeRedis, holds: PublicationHolds, pins: _FlakyPins, scope: str
+) -> ContentReference:
+    """Leave the hold of a result in ``scope`` owed, as a refused publication whose
+    release the control store dropped does."""
+    result = _ref(b"result", scope)
+    other = _ref(b"other", "zz-retiring")
+    raw.hset(reclaim_deleting_key("zz-retiring"), other.content_digest, "{}")
+    payload = {
+        "result_reference": result.model_dump(mode="json"),
+        "child_result_references": {"tsk-2": other.model_dump(mode="json")},
+    }
+    pins.release_error = _DOWN
+    holds.acquire(assertion_of("TASK_SUCCEEDED", payload), _LOCATOR)
+    pins.release_error = None
+    return result
+
+
+def test_an_owed_release_that_fails_does_not_block_the_others(raw) -> None:
     pins = _FlakyPins(_client(raw))
     holds = _holds(raw, pins=pins)
-    pins.release_error = _DOWN
-    for _ in range(2):
-        holds.acquire(_refused_in_another_scope(raw), _LOCATOR)
-    pins.release_error = redis.exceptions.ResponseError("WRONGTYPE")
-    with pytest.raises(redis.exceptions.ResponseError):
-        holds.repay()
+    _owe(raw, holds, pins, "org-poison")
+    _owe(raw, holds, pins, _SCOPE)
+    raw.delete(reclaim_pins_key("org-poison"))
+    raw.set(reclaim_pins_key("org-poison"), "not a hash")
+
+    preparation = holds.acquire(
+        assertion_of(
+            "TASK_SUCCEEDED",
+            {"result_reference": _ref(b"c", "org-c").model_dump(mode="json")},
+        ),
+        _LOCATOR,
+    )
+    assert preparation.holds is not None
+    assert holds.finish(preparation.holds, frozenset(), _LOCATOR) == []
+
+    assert raw.hgetall(reclaim_pins_key(_SCOPE)) == {}
+    assert raw.hgetall(reclaim_pins_key("org-c")) == {}
+    assert holds.repay() == 1
+    raw.delete(reclaim_pins_key("org-poison"))
+    assert holds.repay() == 0
+
+
+def test_a_repayment_the_control_store_drops_keeps_what_it_did_not_release(
+    raw,
+) -> None:
+    pins = _FlakyPins(_client(raw))
+    holds = _holds(raw, pins=pins)
+    for scope in (_SCOPE, "org-d"):
+        _owe(raw, holds, pins, scope)
     pins.release_error = _DOWN
     assert holds.repay() == 2
     pins.release_error = None
     assert holds.repay() == 0
     assert raw.hgetall(reclaim_pins_key(_SCOPE)) == {}
+    assert raw.hgetall(reclaim_pins_key("org-d")) == {}
 
 
 def test_an_expansion_the_control_store_drops_is_unavailable(raw) -> None:
