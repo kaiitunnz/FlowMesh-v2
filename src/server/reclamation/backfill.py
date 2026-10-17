@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from fnmatch import translate
 from functools import cache
-from typing import Any
+from typing import Any, Self
 
 from pydantic import BaseModel, ValidationError
 from redis.exceptions import ResponseError
@@ -125,7 +125,7 @@ class Found:
     trees: list[ContentReference] = field(default_factory=list)
 
     @classmethod
-    def of(cls, *values: Any, trees: Iterable[ContentReference] = ()) -> "Found":
+    def of(cls, *values: Any, trees: Iterable[ContentReference] = ()) -> Self:
         references = list(references_of(*values))
         manifests = [r for r in references if r.media_type == TREE_MEDIA_TYPE]
         return cls(references, [*manifests, *trees])

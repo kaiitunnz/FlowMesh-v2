@@ -22,7 +22,7 @@ import time
 from collections.abc import Set
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, Self
 
 from shared.content.multipart import MULTIPART_ACK_FRAME_KIND, MultipartVerdict
 from shared.schemas.command import MediatedOpMessage
@@ -167,15 +167,15 @@ class MultipartOwner:
     idempotency_key: str = ""
 
     @classmethod
-    def dispatch(cls, dispatch_id: str, task_id: str) -> "MultipartOwner":
+    def dispatch(cls, dispatch_id: str, task_id: str) -> Self:
         return cls(OwnerKind.DISPATCH, dispatch_id=dispatch_id, task_id=task_id)
 
     @classmethod
-    def upload(cls, dispatch_id: str) -> "MultipartOwner":
+    def upload(cls, dispatch_id: str) -> Self:
         return cls(OwnerKind.UPLOAD, dispatch_id=dispatch_id)
 
     @classmethod
-    def finalization(cls, idempotency_key: str) -> "MultipartOwner":
+    def finalization(cls, idempotency_key: str) -> Self:
         return cls(OwnerKind.FINALIZATION, idempotency_key=idempotency_key)
 
     def encode(self) -> str:

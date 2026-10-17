@@ -7,8 +7,7 @@ that re-checks all of that, and the scope's certification, atomically, so an obj
 binding names is never condemned. A condemned object stays cancellable: an assertion
 that names it removes it. The collector also reports the multipart uploads the store
 holds open, and drops the registration of each upload a listing no longer names. It
-deletes nothing and aborts nothing in the store; it records what it found in the audit
-stream, its log and its metrics.
+records what it found in the audit stream, its log and its metrics.
 
 An object younger than ``MIN_AGE_SEC`` is passed over, which paces condemnation behind
 writers still about to bind what they wrote; no decision rests on that age.
@@ -205,13 +204,13 @@ class AuditCollector:
             "flowmesh.content.reclamation.young",
             unit="{object}",
             description="Stored content versions no binding names that were too "
-            "recent to condemn, as of the last sweep.",
+            "recent to count as orphans, as of the last sweep.",
         )
         self._young_bytes = meter.create_gauge(
             "flowmesh.content.reclamation.young_bytes",
             unit="By",
             description="Bytes of stored content versions no binding names that were "
-            "too recent to condemn, as of the last sweep.",
+            "too recent to count as orphans, as of the last sweep.",
         )
         self._open_uploads = meter.create_gauge(
             "flowmesh.content.reclamation.open_uploads",
@@ -419,7 +418,7 @@ class AuditCollector:
         self._logger.info(
             "Content reclamation sweep %s: %d scopes (%d uncertified), %d orphaned "
             "versions (%d bytes) condemned, %d unbound versions (%d bytes) too recent "
-            "to condemn, %d open uploads (%d bytes); nothing deleted, in %.1fs",
+            "to condemn, %d open uploads (%d bytes), in %.1fs",
             result.sweep,
             len(result.scopes),
             result.uncertified,
