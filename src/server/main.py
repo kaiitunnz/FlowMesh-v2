@@ -65,6 +65,7 @@ from .network.reverse_relay import (
 )
 from .network.service import NetworkPlane
 from .orchestration.telemetry import build_workflow_span_emitter
+from .reclamation.service import start_reclamation
 from .registries import WorkerRegistry, WorkflowRegistry
 from .registries.node import NodeRegistry
 from .registries.resident import ResidentRegistry
@@ -584,6 +585,27 @@ def _start_root_threads() -> None:
     )
     settled_history_thread.start()
     BACKGROUND_THREADS.append(settled_history_thread)
+
+    if config.content_store.reclamation_enabled:
+        audit_reader = ResultReader(
+            open_deployment_store(
+                config.object_store,
+                read_stall_timeout_sec=config.content_store.read_stall_timeout_sec,
+                read_attempts=config.content_store.read_attempts,
+            )
+        )
+        BACKGROUND_THREADS.append(
+            start_reclamation(
+                REDIS_CLIENT,
+                config.object_store,
+                audit_reader.open,
+                logger,
+                STOP_EVENT,
+                SERVER_METER,
+            )
+        )
+    else:
+        logger.info("Content audit is off (CONTENT_RECLAMATION_ENABLED=false)")
 
     watchdog_thread = WATCHDOG.start(STOP_EVENT)
     if watchdog_thread and watchdog_thread not in BACKGROUND_THREADS:

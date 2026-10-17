@@ -1,12 +1,14 @@
-"""Bucket-level reads the collector makes of an S3-compatible content store.
+"""Bucket-level reads the audit makes of an S3-compatible content store.
 
 These run under the deployment's own store credential, which can list the bucket's
-object versions and multipart uploads and read its versioning state; the scoped
-sessions workers hold can do none of that. Nothing here writes, deletes or aborts.
+objects, their versions and its multipart uploads and read its versioning state; the
+scoped sessions workers hold can do none of that. Nothing here writes, deletes or
+aborts.
 
-A MinIO-family store, the co-located one included, lists open multipart uploads only
-by exact key and from memory a restart empties, so a listing of its open uploads can
-omit uploads still open. Asked about one UploadId, every store answers exactly.
+Only AWS S3 is known to list every open multipart upload of a bucket; a MinIO-family
+store, the co-located one included, lists them only by exact key and from memory a
+restart empties. A listing of open uploads counts as complete only on AWS S3, and only
+bucket-wide.
 """
 
 import re
@@ -15,10 +17,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from typing import Any
+from urllib.parse import urlsplit
 
 import boto3
 from botocore.client import Config
-from botocore.exceptions import ClientError
 
 from shared.content import BACKEND_S3, DigestAlgorithm, ObjectStoreConfig
 
@@ -46,22 +48,42 @@ def admin_client(cfg: ObjectStoreConfig) -> Any:
     )
 
 
+def uploads_listing_complete(cfg: ObjectStoreConfig) -> bool:
+    """Whether a listing of the store's open multipart uploads names every one: on AWS
+    S3, listed bucket-wide."""
+    if cfg.backend != BACKEND_S3 or cfg.prefix.strip("/"):
+        return False
+    if not cfg.endpoint_url:
+        return True
+    host = urlsplit(cfg.endpoint_url).hostname or ""
+    return host == "amazonaws.com" or host.endswith(".amazonaws.com")
+
+
 class Ineligibility(StrEnum):
-    """Why a store is not collected."""
+    """Why a store is not audited."""
 
     FILESYSTEM = "filesystem_backend"
-    """A shared filesystem offers no versioned, conditional delete."""
-    UNVERSIONED = "versioning_not_enabled"
-    VERSIONING_UNKNOWN = "versioning_unreadable"
     CANNOT_LIST = "cannot_list"
+
+
+class Listing(StrEnum):
+    """What an audit lists of an eligible store."""
+
+    VERSIONS = "versions"
+    """Every version of every object, the bucket keeping versions."""
+    OBJECTS = "objects"
+    """Every object, the bucket keeping one version of each."""
 
 
 @dataclass(frozen=True)
 class Eligibility:
-    """Whether the store may be collected, and why not when it may not."""
+    """Whether the store may be audited and what its audit lists, or why not."""
 
     reason: Ineligibility | None = None
     detail: str = ""
+    listing: Listing | None = None
+    versioning: str = ""
+    """The bucket's versioning state as the store reports it."""
 
     @property
     def eligible(self) -> bool:
@@ -116,27 +138,36 @@ class StoreAdmin:
         return "/".join(parts) + "/" if parts else ""
 
     def eligibility(self) -> Eligibility:
-        """Whether the bucket keeps versions and the credential can list it."""
+        """What the credential can list of the bucket, and whether it keeps versions."""
         try:
-            status = self._client.get_bucket_versioning(Bucket=self._bucket).get(
-                "Status"
+            status = str(
+                self._client.get_bucket_versioning(Bucket=self._bucket).get("Status")
+                or "off"
             )
         except Exception as exc:
-            return Eligibility(Ineligibility.VERSIONING_UNKNOWN, str(exc))
-        if status != "Enabled":
-            return Eligibility(
-                Ineligibility.UNVERSIONED, str(status or "never enabled")
-            )
+            status = f"unreadable: {exc}"
+        listing = Listing.VERSIONS if status == "Enabled" else Listing.OBJECTS
         try:
-            self._client.list_object_versions(
-                Bucket=self._bucket, Prefix=self._root(), MaxKeys=1
-            )
+            if listing is Listing.VERSIONS:
+                self._client.list_object_versions(
+                    Bucket=self._bucket, Prefix=self._root(), MaxKeys=1
+                )
+            else:
+                self._client.list_objects_v2(
+                    Bucket=self._bucket, Prefix=self._root(), MaxKeys=1
+                )
             self._client.list_multipart_uploads(
                 Bucket=self._bucket, Prefix=self._root(), MaxUploads=1
             )
         except Exception as exc:
-            return Eligibility(Ineligibility.CANNOT_LIST, str(exc))
-        return Eligibility()
+            return Eligibility(Ineligibility.CANNOT_LIST, str(exc), versioning=status)
+        return Eligibility(listing=listing, versioning=status)
+
+    def listed(self, listing: Listing, scope: str) -> Iterator[list[StoredVersion]]:
+        """Every object, or every object version, under ``scope``, a page at a time."""
+        if listing is Listing.VERSIONS:
+            return self.versions(scope)
+        return self.objects(scope)
 
     def scopes(self) -> Iterator[str]:
         """Every scope the bucket holds a key under."""
@@ -189,6 +220,35 @@ class StoreAdmin:
                 "VersionIdMarker": page.get("NextVersionIdMarker", ""),
             }
 
+    def objects(self, scope: str) -> Iterator[list[StoredVersion]]:
+        """Every object under ``scope``, each its one version, a page at a time."""
+        root = self._root(scope)
+        content = f"{root}{DigestAlgorithm.SHA256.value}/"
+        token: str | None = None
+        while True:
+            extra = {"ContinuationToken": token} if token else {}
+            page = self._client.list_objects_v2(
+                Bucket=self._bucket, Prefix=root, MaxKeys=PAGE_SIZE, **extra
+            )
+            listed: list[StoredVersion] = []
+            for item in page.get("Contents", []):
+                key = item["Key"]
+                name = key[len(content) :] if key.startswith(content) else ""
+                listed.append(
+                    StoredVersion(
+                        key=key,
+                        version_id="null",
+                        size_bytes=int(item.get("Size") or 0),
+                        last_modified=_timestamp(item.get("LastModified")),
+                        latest=True,
+                        digest=name if _DIGEST.fullmatch(name) else None,
+                    )
+                )
+            yield listed
+            if not page.get("IsTruncated"):
+                return
+            token = page.get("NextContinuationToken")
+
     def uploads(self) -> Iterator[list[OpenUpload]]:
         """Every multipart upload the bucket holds open under the prefix, a page at a
         time."""
@@ -218,21 +278,6 @@ class StoreAdmin:
                 "UploadIdMarker": page.get("NextUploadIdMarker", ""),
             }
 
-    def upload_open(self, key: str, upload_id: str) -> bool:
-        """Whether the store still holds the upload ``upload_id`` of ``key`` open.
-
-        Raises when the store gives no answer.
-        """
-        try:
-            self._client.list_parts(
-                Bucket=self._bucket, Key=key, UploadId=upload_id, MaxParts=1
-            )
-        except ClientError as exc:
-            if exc.response.get("Error", {}).get("Code") == "NoSuchUpload":
-                return False
-            raise
-        return True
-
     def upload_bytes(self, upload: OpenUpload) -> tuple[int, int]:
         """The parts an open upload holds and their total size."""
         parts = size = 0
@@ -256,9 +301,11 @@ class StoreAdmin:
 __all__ = [
     "Eligibility",
     "Ineligibility",
+    "Listing",
     "OpenUpload",
     "PAGE_SIZE",
     "StoreAdmin",
     "StoredVersion",
     "admin_client",
+    "uploads_listing_complete",
 ]
