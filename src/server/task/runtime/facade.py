@@ -68,6 +68,7 @@ from shared.tasks.artifact_upload import (
 )
 from shared.tasks.credentials import set_spec_values
 from shared.tasks.publication import (
+    PREPARED_FIELD,
     PUBLICATION_FRAME_KIND,
     Publication,
     PublicationAnswer,
@@ -667,7 +668,7 @@ class TaskRuntime:
         self._committer.on_faulted = self._uncover_locked
         self._committer.on_fault_cleared = self._fault_cleared_locked
         self._committer.on_fenced = self._on_fenced
-        # What stops this root once a later root took the epoch; the server wires it.
+        # Stops this root once a later root holds the epoch.
         self.on_fenced: Callable[[], None] | None = None
         self._nonces: Nonces | None = None
         # The staged trees of each task whose members are still being protected, the
@@ -3591,7 +3592,7 @@ class TaskRuntime:
         carries or resumes a captured facade group each return the task to the queue,
         so a caller counting task completions counts one per task, not one per dispatch.
         """
-        if payload.get("input_materialization") is not None:
+        if payload.get(PREPARED_FIELD) is not None:
             return False
         if (step := payload.get("agent_episode")) is None:
             return True
@@ -5984,7 +5985,7 @@ class TaskRuntime:
                 if record.status in TERMINAL_TASK_STATUSES
                 else EventEffect.APPLIED
             )
-            if (prepared := payload.get("input_materialization")) is not None:
+            if (prepared := payload.get(PREPARED_FIELD)) is not None:
                 # A preparation resolved the task's inputs and ran nothing else, so it
                 # commits what it materialized and the task goes back to the queue for
                 # the dispatch that chooses an embodiment and runs it.

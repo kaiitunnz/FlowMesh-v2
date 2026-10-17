@@ -27,7 +27,7 @@ from shared.schemas.event import (
 )
 from shared.schemas.worker import WorkerStatus
 from shared.tasks.artifact_upload import UploadReport
-from shared.tasks.publication import Publication
+from shared.tasks.publication import CHECKPOINT_FIELD, Publication
 from shared.tools.contract import AgentModelTurnProposal, MediatedOperationOutcome
 from shared.utils.recent import RecentMap
 
@@ -57,6 +57,7 @@ from ..orchestration.telemetry import (
     NULL_WORKFLOW_SPAN_EMITTER,
     WorkflowSpanEmitter,
 )
+from ..reclamation.lane import LaneDepth
 from ..reclamation.multipart import MultipartRegistrations
 from ..reclamation.publications import PublicationHolds
 from ..registries.node import NodeRegistry
@@ -82,7 +83,7 @@ from ..utils.logging import log_node_event, log_worker_event
 from ..utils.time import now_iso
 from .metrics import MetricsRecorder
 from .port_forward import PortForwardService
-from .publications import PublicationIntake
+from .publications import PublicationIntake, artifacts_unaccepted
 from .watchdog import WorkerWatchdog
 
 if TYPE_CHECKING:
@@ -230,6 +231,10 @@ class EventMonitor:
 
     # ------------------------------------------------------------------ # Public API
     # ------------------------------------------------------------------ #
+
+    def publication_lane_depth(self) -> LaneDepth | None:
+        """Return the publication lane's depth, or None without one."""
+        return self._publications.depth() if self._publications is not None else None
 
     def start(self) -> None:
         """Spawn task/worker listener threads."""
@@ -533,14 +538,12 @@ class EventMonitor:
     ) -> dict[str, Any]:
         """Bind a reported checkpoint publication and keep it out of the task's
         updates."""
-        if (published := payload.get("artifact_published")) is None:
+        if (published := payload.get(CHECKPOINT_FIELD)) is None:
             return payload
         self._runtime.record_artifact_published(
             event.task_id, event.worker_id, published, event.dispatch_id
         )
-        return {
-            key: value for key, value in payload.items() if key != "artifact_published"
-        }
+        return {key: value for key, value in payload.items() if key != CHECKPOINT_FIELD}
 
     def _handle_artifact_upload(
         self, event: TaskEvent, worker_id: str, payload: dict[str, Any]
@@ -591,8 +594,7 @@ class EventMonitor:
 
     def _apply_publication(self, event: TaskEvent) -> None:
         if event.worker_id:
-            with self._runtime.event_tail(event.task_id):
-                self._apply_task_event(event, event.worker_id, event.payload or {})
+            self._apply_task_event(event, event.worker_id, event.payload or {})
 
     def _apply_task_event(
         self, event: TaskEvent, worker_id: str, payload: dict[str, Any]
@@ -646,15 +648,7 @@ class EventMonitor:
                     # A success whose publications cannot all be bound would settle
                     # with artifacts its result names missing.
                     self._handle_task_failed(
-                        event.model_copy(
-                            update={
-                                "type": "TASK_FAILED",
-                                "error": f"artifacts_unaccepted: {refusal}",
-                                "retryable": False,
-                            }
-                        ),
-                        worker_id,
-                        payload,
+                        artifacts_unaccepted(event, refusal), worker_id, payload
                     )
                     return
                 if settles and (failure := export_failure(payload)) is not None:

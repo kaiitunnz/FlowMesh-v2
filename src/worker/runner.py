@@ -43,7 +43,12 @@ from shared.tasks.artifact_upload import (
     UploadSettled,
 )
 from shared.tasks.credentials import dispatched_credentials
-from shared.tasks.publication import PUBLICATION_FRAME_KIND, PublicationAnswer
+from shared.tasks.publication import (
+    CHECKPOINT_FIELD,
+    PREPARED_FIELD,
+    PUBLICATION_FRAME_KIND,
+    PublicationAnswer,
+)
 from shared.tasks.specs import (
     EmbeddingSpecStrict,
     InferenceBackend,
@@ -1007,7 +1012,7 @@ class Runner:
 
         def report(binding: ArtifactBinding) -> None:
             self.lifecycle.notify_task_update(
-                task_id, {"artifact_published": [binding.model_dump(mode="json")]}
+                task_id, {CHECKPOINT_FIELD: [binding.model_dump(mode="json")]}
             )
 
         uploader = CheckpointUploader(
@@ -1584,9 +1589,7 @@ class Runner:
                             shard_index=shard_index,
                             shard_total=shard_total,
                         )
-                        metadata["input_materialization"] = prepared.model_dump(
-                            mode="json"
-                        )
+                        metadata[PREPARED_FIELD] = prepared.model_dump(mode="json")
                         self.lifecycle.set_succeeded(task_id, metadata=metadata)
                         self.logger.info("Task %s prepared its inputs", task_id)
                         continue

@@ -45,7 +45,7 @@ class Ineligibility(StrEnum):
     """Why a store is not collected."""
 
     FILESYSTEM = "filesystem_backend"
-    """A shared filesystem has no versioned, conditional delete; it keeps everything."""
+    """A shared filesystem offers no versioned, conditional delete."""
     UNVERSIONED = "versioning_not_enabled"
     VERSIONING_UNKNOWN = "versioning_unreadable"
     CANNOT_LIST = "cannot_list"

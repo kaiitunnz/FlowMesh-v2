@@ -1,16 +1,16 @@
 """The root's content reclamation service: backfill, then periodic audit sweeps.
 
-It runs on its own thread, reading and writing only the control store's reclamation
-keys and the bindings it backfills, and listing the shared store; it takes no runtime
-lock and has no part in the event path. It starts once the root holds its epoch, marks
-the protection hooks live, backfills whatever the marker's generation has not yet
-read, and then sweeps on an interval. A later root starting, or moving the generation
-on, ends it.
+It runs on its own thread, off the event path, reading and writing the control store's
+reclamation keys and the bindings it backfills, and listing the shared store. It starts
+once the root holds its epoch, marks the protection hooks live, backfills whatever the
+marker's generation has not yet read, and then sweeps on an interval. A later root
+starting, or moving the generation on, ends it.
 """
 
 import logging
 import threading
 from collections.abc import Callable
+from typing import Self
 
 from opentelemetry.metrics import Meter
 
@@ -56,7 +56,7 @@ class ReclamationService:
         logger: logging.Logger,
         meter: Meter | None = None,
         expand_trees: Callable[[threading.Event], None] | None = None,
-    ) -> "ReclamationService":
+    ) -> Self:
         coverage = CoverageStore(rds, FAMILIES)
         audit = AuditTrail(rds)
         return cls(

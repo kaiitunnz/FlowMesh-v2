@@ -150,6 +150,27 @@ def test_a_disowned_dispatch_returns_after_the_bound_and_frees_its_worker(
 
 
 @_live
+@pytest.mark.parametrize("dispatch", ["dsp-earlier", "dsp-later"])
+def test_a_started_dispatch_owing_a_refused_success_is_never_resolved_lost(
+    client: redis.Redis, dispatch: str
+) -> None:
+    runtime, monitor, _, _, task_id = _dispatched(client)
+    dispatch_id = runtime._tasks[task_id].internal.dispatch_id
+    runtime.mark_started(task_id, _WORKER, {}, "2026-10-17T00:00:00Z", dispatch_id)
+    # Its success is refused, so its worker idles, or runs another dispatch, while it
+    # reports the publication again.
+    _age(runtime, task_id, _PAST_BOUND_SEC * 10)
+    status = WorkerStatus.IDLE if dispatch == "dsp-earlier" else WorkerStatus.BUSY
+    for _ in range(3):
+        monitor._handle_worker_event(_heartbeat(status, dispatch))
+
+    record = runtime._tasks[task_id]
+    assert record.status == TaskStatus.DISPATCHED
+    assert record.internal.dispatch_id == dispatch_id
+    assert record.attempts == 0
+
+
+@_live
 def test_a_first_dispatch_disowned_with_no_earlier_one_resolves(
     client: redis.Redis,
 ) -> None:

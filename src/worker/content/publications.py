@@ -150,11 +150,6 @@ class PublicationOutbox:
         for dispatch_id in dispatches:
             remove_below(self._root / dispatch_id)
 
-    def owed(self) -> int:
-        """Return how many publications are still unanswered."""
-        with self._cv:
-            return sum(len(d.entries) for d in self._dispatches.values())
-
     def dispatch_of(self, task_id: str) -> str | None:
         """Return the dispatch owing a publication of ``task_id``, whose store access
         a re-store is written under."""

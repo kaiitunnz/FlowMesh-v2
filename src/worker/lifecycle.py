@@ -187,8 +187,6 @@ class Lifecycle:
             power_summary = self.power_monitor.summary()
         except Exception:
             power_summary = None
-        if (outbox := self.publications) is not None:
-            metrics["owed_publications"] = outbox.owed()
         if power_summary:
             metrics["power_summary"] = power_summary
             energy_total = power_summary.get("estimated_energy_kwh")

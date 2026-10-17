@@ -158,13 +158,12 @@ def test_a_report_is_repeated_until_committed_and_its_copies_go(rig) -> None:
     reference = _kept_store(outbox, ports).write(_SCOPE, b"result")
     outbox.reported("TASK_SUCCEEDED", "tsk-1", "dsp-1", _success(reference))
     outbox.end("dsp-1")
-    assert outbox.owed() == 1
     assert outbox.dispatch_of("tsk-1") == "dsp-1"
 
     _nudge(outbox, clock, RESEND_SEC + 1)
     ports.wait(lambda: len(ports.sent) == 1)
     outbox.answer(_answer(reference, PublicationDisposition.COMMITTED))
-    assert outbox.owed() == 0
+    assert outbox.dispatch_of("tsk-1") is None
     assert not (tmp_path / "outbox" / "dsp-1").exists()
     _nudge(outbox, clock, RESEND_SEC + 1)
     assert len(ports.sent) == 1
@@ -175,7 +174,7 @@ def test_a_rejected_report_ends_too(rig) -> None:
     reference = _kept_store(outbox, ports).write(_SCOPE, b"result")
     outbox.reported("TASK_SUCCEEDED", "tsk-1", "dsp-1", _success(reference))
     outbox.answer(_answer(reference, PublicationDisposition.REJECTED))
-    assert outbox.owed() == 0
+    assert outbox.dispatch_of("tsk-1") is None
 
 
 def test_a_committed_publications_copies_go_while_the_dispatch_runs(rig) -> None:
@@ -238,7 +237,7 @@ def test_a_rotating_run_keeps_only_the_checkpoints_still_unanswered(rig) -> None
 
     outbox.answer(_committed(published[-1][1]))
     assert _kept(tmp_path) == set()
-    assert outbox.owed() == 0
+    assert outbox.dispatch_of("tsk-1") is None
 
 
 def test_a_member_stored_again_for_an_unreported_checkpoint_outlives_its_last(
@@ -271,7 +270,7 @@ def test_a_missing_object_is_stored_again_from_its_copy_then_reported(rig) -> No
     _nudge(outbox, clock, 1.0)
     ports.wait(lambda: ports.uploaded and ports.sent)
     assert ports.uploaded == [("tsk-1", b"artifact bytes")]
-    assert outbox.owed() == 1
+    assert outbox.dispatch_of("tsk-1") == "dsp-1"
 
 
 def test_a_store_failure_while_restoring_is_retried(rig) -> None:
@@ -351,7 +350,7 @@ def test_an_object_with_no_intact_copy_fails_its_dispatch(rig, copy: str) -> Non
     assert (task_id, dispatch_id) == ("tsk-1", "dsp-1")
     assert error.startswith("publication_unrepairable")
     assert ports.upload_attempts == 0
-    assert outbox.owed() == 1
+    assert outbox.dispatch_of("tsk-1") == "dsp-1"
 
 
 def test_a_copy_that_fails_midway_leaves_nothing_kept(
@@ -433,7 +432,7 @@ def test_an_answer_about_another_version_is_ignored(rig) -> None:
     outbox.answer(
         _answer(reference_for(_SCOPE, b"other"), PublicationDisposition.COMMITTED)
     )
-    assert outbox.owed() == 1
+    assert outbox.dispatch_of("tsk-1") == "dsp-1"
 
 
 def test_a_new_registration_forgets_what_the_last_reported(rig) -> None:
@@ -441,7 +440,7 @@ def test_a_new_registration_forgets_what_the_last_reported(rig) -> None:
     reference = _kept_store(outbox, ports).write(_SCOPE, b"result")
     outbox.reported("TASK_SUCCEEDED", "tsk-1", "dsp-1", _success(reference))
     outbox.clear()
-    assert outbox.owed() == 0
+    assert outbox.dispatch_of("tsk-1") is None
     assert not (tmp_path / "outbox" / "dsp-1").exists()
 
 
@@ -449,4 +448,4 @@ def test_a_report_naming_nothing_stored_is_not_owed(rig) -> None:
     outbox, _, _, _ = rig
     outbox.reported("TASK_SUCCEEDED", "tsk-1", "dsp-1", {"value": 1})
     outbox.reported("TASK_UPDATE", "tsk-1", "dsp-1", {"progress": 0.5})
-    assert outbox.owed() == 0
+    assert outbox.dispatch_of("tsk-1") is None

@@ -17,6 +17,7 @@ import time
 from collections import OrderedDict, deque
 from collections.abc import Callable, Hashable
 from enum import StrEnum
+from typing import NamedTuple
 
 # How many publications run at once.
 THREADS = 4
@@ -34,6 +35,15 @@ class Admission(StrEnum):
     """The same publication is already held; the held one answers."""
     BUSY = "busy"
     """The lane is full; the publication waits for its turn and is offered again."""
+
+
+class LaneDepth(NamedTuple):
+    held: int
+    waiting: int
+    reserved: int
+
+
+LANE_STATES = LaneDepth._fields
 
 
 class PublicationLane:
@@ -57,7 +67,7 @@ class PublicationLane:
         self._logger = logger or logging.getLogger("publication-lane")
         self._clock = clock
         self._cv = threading.Condition()
-        self._held: dict[Hashable, Callable[[], None] | None] = {}
+        self._held: dict[Hashable, Callable[[], None]] = {}
         self._queue: deque[Hashable] = deque()
         # The publications waiting for a slot, oldest first within each workflow, with
         # when each was last offered, and the workflows in the order their turns come.
@@ -108,11 +118,11 @@ class PublicationLane:
             self._grant()
             return Admission.BUSY
 
-    def depth(self) -> tuple[int, int, int]:
+    def depth(self) -> LaneDepth:
         """Return how many publications are held, waiting and reserved."""
         with self._cv:
             waiting = sum(len(keys) for keys in self._waiting.values())
-            return len(self._held), waiting, len(self._reserved)
+            return LaneDepth(len(self._held), waiting, len(self._reserved))
 
     def _free(self) -> int:
         return self._capacity - len(self._held) - len(self._reserved)
@@ -177,8 +187,7 @@ class PublicationLane:
                 key = self._queue.popleft()
                 run = self._held[key]
             try:
-                if run is not None:
-                    run()
+                run()
             except Exception:
                 self._logger.exception("A publication failed unexpectedly")
             finally:
@@ -188,4 +197,4 @@ class PublicationLane:
                     self._grant()
 
 
-__all__ = ["Admission", "PublicationLane"]
+__all__ = ["LANE_STATES", "Admission", "LaneDepth", "PublicationLane"]

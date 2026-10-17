@@ -8,6 +8,7 @@ from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from opentelemetry.sdk.resources import Resource
 
+from server.reclamation.lane import LaneDepth
 from server.resident import (
     ClaimCredit,
     ReplicaIncarnation,
@@ -116,6 +117,28 @@ def test_sample_once_with_no_stores_emits_queue_depth_only():
     points = _datapoints(reader)
     assert "flowmesh.resident.replica_count" not in points
     assert points["flowmesh.resident.queue_depth"][0][0] == 5
+
+
+def test_sample_once_emits_the_publication_lane_depth_per_state():
+    reader, meter = _meter_with_reader()
+    sampler = build_fleet_sampler(
+        meter,
+        stores=None,
+        runtime=_fake_runtime(0),
+        node_id=lambda: "nde-1",
+        interval_sec=1.0,
+        enabled=True,
+        publication_lane=lambda: LaneDepth(held=2, waiting=5, reserved=1),
+    )
+
+    sampler._sample_once()
+
+    points = _datapoints(reader)["flowmesh.content.publication_lane"]
+    assert {attrs["state"]: value for value, attrs in points} == {
+        "held": 2,
+        "waiting": 5,
+        "reserved": 1,
+    }
 
 
 def test_disabled_sampler_never_starts_a_task():

@@ -1,16 +1,13 @@
 """Taking worker publications off the task-event consumer.
 
-A report naming objects its worker stored is a publication. The consumer only receives
-it: a report that can bind nothing new, as a stale one or one about a settling task, is
-applied as it arrives and answered from what its task already binds, while any other is
-handed to the publication lane and the consumer moves on, so a publication waiting on
-the store or the control store never holds up the event stream. Its worker reports it
-again until it hears it is committed or rejected.
+A report naming objects its worker stored is a publication. A report that can bind
+nothing new, as a stale one or one about a settling task, is applied as it arrives and
+answered from what its task already binds; any other goes to the publication lane, off
+the event stream. Its worker reports it again until it is committed or rejected.
 
 On the lane, every object the publication names is held against retirement first, then
-the report is applied as the consumer would apply it, in a transition of its own that
-re-reads everything, and the answer and the release of the holds go out once that
-transition is durable.
+the report is applied in a transition of its own that re-reads everything, and the
+answer and the release of the holds go out once that transition is durable.
 """
 
 import heapq
@@ -31,7 +28,7 @@ from shared.tasks.publication import (
 )
 
 from ..reclamation.epoch import EpochFenced
-from ..reclamation.lane import Admission, PublicationLane
+from ..reclamation.lane import Admission, LaneDepth, PublicationLane
 from ..reclamation.publications import Holds, PublicationHolds, assertion_of
 from ..reclamation.trees import TreeStatus
 from ..task.runtime import TaskRuntime
@@ -39,6 +36,18 @@ from ..task.runtime.commits import TransitionNotDurable
 
 # The longest a finish the stores could not take waits before it is tried again.
 _FINISH_RETRY_MAX_SEC = 60.0
+
+
+def artifacts_unaccepted(event: TaskEvent, reason: str | None) -> TaskEvent:
+    """Return the failure a success settles as when its publications cannot all be
+    bound."""
+    return event.model_copy(
+        update={
+            "type": "TASK_FAILED",
+            "error": f"artifacts_unaccepted: {reason}",
+            "retryable": False,
+        }
+    )
 
 
 class PublicationIntake:
@@ -60,9 +69,10 @@ class PublicationIntake:
         self._lane = lane or PublicationLane(logger=self._logger)
         self._finisher = TreeFinisher(runtime, holds, self._logger)
 
-    @property
-    def lane(self) -> PublicationLane:
-        return self._lane
+    def depth(self) -> LaneDepth:
+        """Return how many publications the lane holds, keeps waiting and reserves
+        a slot for."""
+        return self._lane.depth()
 
     def start(self) -> None:
         self._lane.start()
@@ -163,13 +173,7 @@ class PublicationIntake:
     ) -> None:
         """Fail a success naming a tree that is not one, as a success whose
         publications cannot all be bound fails, and answer it once that is durable."""
-        failed = event.model_copy(
-            update={
-                "type": "TASK_FAILED",
-                "error": f"artifacts_unaccepted: {reason}",
-                "retryable": False,
-            }
-        )
+        failed = artifacts_unaccepted(event, reason)
         try:
             with (
                 self._runtime.event_tail(event.task_id),
@@ -381,4 +385,4 @@ class _Finish:
     backoff: float = 1.0
 
 
-__all__ = ["PublicationIntake", "TreeFinisher"]
+__all__ = ["PublicationIntake", "TreeFinisher", "artifacts_unaccepted"]

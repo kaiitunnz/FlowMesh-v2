@@ -340,6 +340,9 @@ if IS_ROOT_NODE:
         interval_sec=config.telemetry.resource_sample_sec,
         enabled=config.telemetry.metrics_enabled
         and config.telemetry.emits(TelemetryLevel.COARSE),
+        publication_lane=lambda: (
+            EVENT_MONITOR.publication_lane_depth() if EVENT_MONITOR else None
+        ),
     )
 
     FABRIC_TOOL_BROKER = FabricToolBroker.build(

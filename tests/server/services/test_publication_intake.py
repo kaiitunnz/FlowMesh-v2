@@ -58,10 +58,6 @@ class _Answers:
             assert self.cv.wait_for(lambda: len(self.answers) >= count, timeout=5)
             return list(self.answers)
 
-    def none_within(self, seconds: float) -> None:
-        with self.cv:
-            assert not self.cv.wait_for(lambda: bool(self.answers), timeout=seconds)
-
 
 class _Backed:
     """A store check that answers once released."""
@@ -106,7 +102,34 @@ class _Rig:
             self.runtime, holds, self.monitor._apply_publication
         )
         self.monitor._publications = self.intake
+        self.steps = threading.Condition()
+        self.published = self.finished = 0
+        self._count(self.intake, "_publish", "published")
+        self._count(self.intake._finisher, "_finish", "finished")
         self.intake.start()
+
+    def _count(self, owner: Any, method: str, counter: str) -> None:
+        """Count each time ``owner``'s ``method`` returns."""
+        run = getattr(owner, method)
+
+        def counted(*args: Any) -> None:
+            try:
+                run(*args)
+            finally:
+                with self.steps:
+                    setattr(self, counter, getattr(self, counter) + 1)
+                    self.steps.notify_all()
+
+        setattr(owner, method, counted)
+
+    def wait_steps(self, published: int = 0, finished: int = 0) -> None:
+        """Wait until the lane has run ``published`` publications and the finisher
+        ``finished`` jobs."""
+        with self.steps:
+            assert self.steps.wait_for(
+                lambda: self.published >= published and self.finished >= finished,
+                timeout=5,
+            )
 
     def success(self, dispatch_id: str = "dsp-1") -> TaskEvent:
         record = self.runtime.get_record(self.task_id)
@@ -129,11 +152,8 @@ class _Rig:
 
     def released(self, scope: str) -> bool:
         """Wait for the finisher to end the publication's holds."""
-        for _ in range(250):
-            if not self.pins(scope):
-                return True
-            threading.Event().wait(0.02)
-        return False
+        with self.steps:
+            return self.steps.wait_for(lambda: not self.pins(scope), timeout=5)
 
     def pins(self, scope: str) -> dict[str, Any]:
         return cast(dict[str, Any], self.raw.hgetall(reclaim_pins_key(scope)))
@@ -212,6 +232,29 @@ def test_a_stale_success_is_rejected_where_it_arrives(rig) -> None:
     assert r.status() == TaskStatus.DISPATCHED
 
 
+def test_a_success_reported_after_its_worker_failed_the_dispatch_is_rejected(
+    rig,
+) -> None:
+    r = rig()
+    event = r.success()
+    failed = TaskEvent(
+        type="TASK_FAILED",
+        task_id=r.task_id,
+        worker_id="wkr-1",
+        dispatch_id="dsp-1",
+        error="the copy of a stored object is gone",
+        retryable=True,
+        ambiguous=True,
+    )
+    _consume(r.monitor, failed)
+    assert r.status() != TaskStatus.DISPATCHED
+
+    _consume(r.monitor, event)
+    [answer] = r.answers.wait()
+    assert answer.disposition is PublicationDisposition.REJECTED
+    assert r.status() != TaskStatus.DONE
+
+
 def test_a_resent_success_after_its_commit_is_answered_committed_again(rig) -> None:
     r = rig()
     event = r.success()
@@ -228,7 +271,8 @@ def test_a_held_commit_answers_and_releases_only_once_durable(rig) -> None:
     scope, digest = r.scope_and_digest(event)
     r.store.down.add(r.workflow_id)
     _consume(r.monitor, event)
-    r.answers.none_within(0.3)
+    r.wait_steps(published=1)
+    assert r.answers.answers == []
     # The binding is not durable, so the hold stays.
     assert digest in r.pins(scope)
 
@@ -325,15 +369,12 @@ def test_a_staged_tree_with_a_member_being_retired_is_expanded_once_it_ends(
     # Accepted pending: the upload has not stored the member yet.
     assert answer.disposition is PublicationDisposition.COMMITTED
     assert r.runtime._expanding.get(r.task_id) == {manifest.content_digest}
-    threading.Event().wait(0.3)
+    r.wait_steps(published=1, finished=1)
     protected = reclaim_protected_key(scope)
     assert not r.raw.sismember(protected, member.digest)
 
     r.raw.hdel(reclaim_deleting_key(scope), member.digest)
-    for _ in range(150):
-        if r.raw.sismember(protected, member.digest):
-            break
-        threading.Event().wait(0.02)
+    r.wait_steps(published=1, finished=2)
     assert r.raw.sismember(protected, member.digest)
     assert record is not None and not r.runtime._expanding.get(r.task_id)
 
