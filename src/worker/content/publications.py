@@ -31,12 +31,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, BinaryIO
 
-from shared.content import ContentReference
+from shared.content import ContentReference, StoreRefusal
 from shared.content.reference import OCTET_STREAM
 from shared.content.store import STREAM_CHUNK_BYTES, FabricObjectStore
 from shared.content.tree import TREE_MEDIA_TYPE, TreeManifestError, iter_members
 from shared.tasks.publication import (
-    BUSY_REASON,
     Publication,
     PublicationAnswer,
     PublicationDisposition,
@@ -366,17 +365,17 @@ class PublicationOutbox:
                     doomed = self._release_locked(
                         publication.dispatch_id, dispatch, entry.names
                     )
-                case PublicationDisposition.RETRY:
-                    entry.due = now + (
-                        BUSY_SEC * (1 + random.random())  # nosec B311 - jitter only
-                        if answer.reason == BUSY_REASON
-                        else self._backoff(entry)
-                    )
-                case PublicationDisposition.REMATERIALIZE:
-                    entry.restore = tuple(answer.digests)
-                    entry.due = now + self._backoff(entry)
-                case PublicationDisposition.RETRY_RETIREMENT:
-                    entry.due = now + self._backoff(entry)
+                case PublicationDisposition.REFUSED:
+                    match answer.refusal:
+                        case StoreRefusal.BUSY:
+                            entry.due = now + BUSY_SEC * (
+                                1 + random.random()  # nosec B311 - jitter only
+                            )
+                        case StoreRefusal.REMATERIALIZE:
+                            entry.restore = tuple(answer.digests)
+                            entry.due = now + self._backoff(entry)
+                        case _:
+                            entry.due = now + self._backoff(entry)
             self._cv.notify_all()
         _remove(doomed)
 

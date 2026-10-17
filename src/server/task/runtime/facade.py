@@ -20,7 +20,7 @@ from server.telemetry.tracing import (
     ControlPlaneTracer,
     format_traceparent,
 )
-from shared.content import ContentReference, HeldCopy
+from shared.content import ContentReference, HeldCopy, StoreRefusal
 from shared.harness import (
     AgentEpisodeDispatch,
     BoundaryEventKind,
@@ -4257,15 +4257,15 @@ class TaskRuntime:
         assert upload is not None
         match verdict.standing:
             case StagedStanding.RETIRING:
-                disposition = UploadDisposition.RETRY_RETIREMENT
+                refusal = StoreRefusal.RETRY_RETIREMENT
             case StagedStanding.MISSING:
-                disposition = UploadDisposition.REMATERIALIZE
+                refusal = StoreRefusal.REMATERIALIZE
             case _:
                 return
         self._logger.info(
             "Upload of %s waits on retired objects (%s): %s",
             record.task_id,
-            disposition.value,
+            refusal.value,
             ", ".join(verdict.digests),
         )
         self._file_locked(
@@ -4275,7 +4275,8 @@ class TaskRuntime:
                 UploadSettled(
                     task_id=record.task_id,
                     dispatch_id=upload.dispatch_id,
-                    disposition=disposition,
+                    disposition=UploadDisposition.REFUSED,
+                    refusal=refusal,
                     digests=list(verdict.digests),
                 ),
             ),

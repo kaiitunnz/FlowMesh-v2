@@ -8,6 +8,7 @@ from shared.content import (
     ContentReference,
     ContentStoreError,
     FabricObjectStore,
+    StoreRefusal,
     reference_for,
 )
 from shared.outcome import FinalizingContentStore, OutcomeManifest
@@ -114,7 +115,7 @@ class _RefusingIndex(_Index):
     ) -> OutcomeManifest:
         self.records += 1
         if self.refusals:
-            raise FinalizationRefusedError(self.refusals.pop(0))
+            raise FinalizationRefusedError(StoreRefusal(self.refusals.pop(0)))
         return super().record(scope, idempotency_key, content)
 
 

@@ -9,11 +9,10 @@ from typing import Any
 
 import pytest
 
-from shared.content import ContentReference, reference_for
+from shared.content import ContentReference, StoreRefusal, reference_for
 from shared.content.filesystem import SharedFilesystemObjectStore
 from shared.tasks.artifact_binding import ArtifactBinding, step_revision
 from shared.tasks.publication import (
-    BUSY_REASON,
     CHECKPOINT_FIELD,
     Publication,
     PublicationAnswer,
@@ -108,7 +107,7 @@ def _success(reference: ContentReference) -> dict[str, Any]:
 
 def _answer(
     reference: ContentReference,
-    disposition: PublicationDisposition,
+    answer: PublicationDisposition | StoreRefusal,
     digests: list[str] | None = None,
     reason: str | None = None,
 ) -> PublicationAnswer:
@@ -118,7 +117,12 @@ def _answer(
     assert publication is not None
     return PublicationAnswer(
         publication=publication,
-        disposition=disposition,
+        disposition=(
+            PublicationDisposition.REFUSED
+            if isinstance(answer, StoreRefusal)
+            else answer
+        ),
+        refusal=answer if isinstance(answer, StoreRefusal) else None,
         digests=digests or [],
         reason=reason,
     )
@@ -260,7 +264,7 @@ def test_a_missing_object_is_stored_again_from_its_copy_then_reported(rig) -> No
     outbox.answer(
         _answer(
             reference,
-            PublicationDisposition.REMATERIALIZE,
+            StoreRefusal.REMATERIALIZE,
             [reference.content_digest],
         )
     )
@@ -276,9 +280,7 @@ def test_a_store_failure_while_restoring_is_retried(rig) -> None:
     outbox.reported("TASK_SUCCEEDED", "tsk-1", "dsp-1", _success(reference))
     ports.fail_upload = True
     outbox.answer(
-        _answer(
-            reference, PublicationDisposition.REMATERIALIZE, [reference.content_digest]
-        )
+        _answer(reference, StoreRefusal.REMATERIALIZE, [reference.content_digest])
     )
     _nudge(outbox, clock, 1.0)
     ports.wait(lambda: ports.upload_attempts == 1)
@@ -296,7 +298,7 @@ def test_a_retirement_is_waited_out_and_reported_again_storing_nothing(rig) -> N
     outbox.answer(
         _answer(
             reference,
-            PublicationDisposition.RETRY_RETIREMENT,
+            StoreRefusal.RETRY_RETIREMENT,
             [reference.content_digest],
         )
     )
@@ -314,7 +316,7 @@ def test_a_missing_object_is_stored_again_only_after_a_backoff(rig) -> None:
         outbox.answer(
             _answer(
                 reference,
-                PublicationDisposition.REMATERIALIZE,
+                StoreRefusal.REMATERIALIZE,
                 [reference.content_digest],
             )
         )
@@ -340,7 +342,7 @@ def test_an_object_with_no_intact_copy_fails_its_dispatch(rig, copy: str) -> Non
             kept.write_bytes(b"res")
     outbox.reported("TASK_SUCCEEDED", "tsk-1", "dsp-1", _success(reference))
     outbox.answer(
-        _answer(reference, PublicationDisposition.REMATERIALIZE, [named.content_digest])
+        _answer(reference, StoreRefusal.REMATERIALIZE, [named.content_digest])
     )
     _nudge(outbox, clock, 1.0)
 
@@ -419,7 +421,7 @@ def test_a_busy_lane_is_offered_again_shortly(rig) -> None:
     outbox, ports, clock, _ = rig
     reference = _kept_store(outbox, ports).write(_SCOPE, b"result")
     outbox.reported("TASK_SUCCEEDED", "tsk-1", "dsp-1", _success(reference))
-    outbox.answer(_answer(reference, PublicationDisposition.RETRY, reason=BUSY_REASON))
+    outbox.answer(_answer(reference, StoreRefusal.BUSY))
     _nudge(outbox, clock, 2 * BUSY_SEC + 0.1)
     ports.wait(lambda: len(ports.sent) == 1)
 

@@ -21,10 +21,9 @@ from server.reclamation.pins import Nonces, PinStore
 from server.reclamation.publications import PublicationHolds, assertion_of
 from server.reclamation.trees import TreeExpander, TreeStatus
 from server.task.results import ResultUnavailable, ResultUnreadable
-from shared.content import ContentReference, reference_for
+from shared.content import ContentReference, StoreRefusal, reference_for
 from shared.content.tree import TREE_MEDIA_TYPE, TreeManifest, TreeMember
 from shared.tasks.artifact_binding import ArtifactBinding, ArtifactKind
-from shared.tasks.publication import PublicationDisposition
 from tests.server.redis_helpers import fake_redis_client
 
 _SCOPE = "org-a"
@@ -167,7 +166,7 @@ def test_a_member_being_retired_refuses_the_tree_and_holds_nothing(rig) -> None:
     manifest = _tree(rig.store, members)
     rig.raw.hset(reclaim_deleting_key(_SCOPE), members[1200].digest, "{}")
     preparation = rig.holds.acquire(_success(manifest), _LOCATOR)
-    assert preparation.refusal is PublicationDisposition.RETRY_RETIREMENT
+    assert preparation.refusal is StoreRefusal.RETRY_RETIREMENT
     assert preparation.digests == (members[1200].digest,)
     assert rig.pinned() == set()
 
@@ -175,7 +174,7 @@ def test_a_member_being_retired_refuses_the_tree_and_holds_nothing(rig) -> None:
 def test_a_malformed_manifest_is_rejected_before_acceptance(rig) -> None:
     manifest = rig.store.put(b'{"schema":1,"members":[["../x","00",1]]}')
     preparation = rig.holds.acquire(_success(manifest), _LOCATOR)
-    assert preparation.refusal is PublicationDisposition.REJECTED
+    assert preparation.refusal is None
     assert preparation.malformed
     assert rig.pinned() == set()
 
@@ -184,7 +183,7 @@ def test_a_store_outage_asks_for_a_retry(rig) -> None:
     manifest = _tree(rig.store, _members(3))
     rig.store.down = True
     preparation = rig.holds.acquire(_success(manifest), _LOCATOR)
-    assert preparation.refusal is PublicationDisposition.RETRY
+    assert preparation.refusal is StoreRefusal.RETRY
     assert not preparation.malformed
 
 

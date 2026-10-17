@@ -18,14 +18,13 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from shared.content import ContentReference
+from shared.content import ContentReference, StoreRefusal
 from shared.content.tree import TreeMember
 from shared.tasks.artifact_binding import FINAL_REVISION, ArtifactBinding, ArtifactKind
 from shared.tasks.artifact_upload import ARTIFACTS_PENDING
 from shared.tasks.publication import (
     CHECKPOINT_FIELD,
     PREPARED_FIELD,
-    PublicationDisposition,
 )
 
 from ..clients.redis import REDIS_CONN_ERRORS
@@ -159,7 +158,7 @@ class Preparation:
     refused."""
 
     holds: Holds | None
-    refusal: PublicationDisposition | None = None
+    refusal: StoreRefusal | None = None
     reason: str | None = None
     digests: tuple[str, ...] = ()
     malformed: bool = False
@@ -192,9 +191,7 @@ class PublicationHolds:
         included, or none of them."""
         nonces = self._nonces()
         if nonces is None:
-            return Preparation(
-                None, PublicationDisposition.RETRY, "this root holds no epoch yet"
-            )
+            return Preparation(None, StoreRefusal.RETRY, "this root holds no epoch yet")
         holds = Holds(nonces.next(), {})
         try:
             through = self._unexpanded(assertion.tree_references(True))
@@ -207,7 +204,7 @@ class PublicationHolds:
             self._logger.warning("Holding a publication's objects failed: %s", exc)
             self._release_quietly(holds)
             return Preparation(
-                None, PublicationDisposition.RETRY, f"the control store failed: {exc}"
+                None, StoreRefusal.RETRY, f"the control store failed: {exc}"
             )
         if refused is not None:
             self._release_quietly(holds)
@@ -253,14 +250,14 @@ class PublicationHolds:
             case TreeStatus.MALFORMED:
                 return Preparation(
                     None,
-                    PublicationDisposition.REJECTED,
+                    None,
                     f"tree {manifest.content_digest} is malformed: {outcome.reason}",
                     (manifest.content_digest,),
                     malformed=True,
                 )
         return Preparation(
             None,
-            PublicationDisposition.RETRY,
+            StoreRefusal.RETRY,
             f"tree {manifest.content_digest} cannot be read now: {outcome.reason}",
         )
 
@@ -324,7 +321,7 @@ class PublicationHolds:
                 case Verdict.RETIRING:
                     return Preparation(
                         None,
-                        PublicationDisposition.RETRY_RETIREMENT,
+                        StoreRefusal.RETRY_RETIREMENT,
                         "a named object is being removed from the store",
                         acquisition.retiring,
                     )
@@ -333,7 +330,7 @@ class PublicationHolds:
                 if moved > VERIFY_ROUNDS:
                     return Preparation(
                         None,
-                        PublicationDisposition.RETRY,
+                        StoreRefusal.RETRY,
                         "a named object's removal kept moving while it was verified",
                     )
             missing: list[str] = []
@@ -346,13 +343,13 @@ class PublicationHolds:
                     case None:
                         return Preparation(
                             None,
-                            PublicationDisposition.RETRY,
+                            StoreRefusal.RETRY,
                             "the store cannot confirm a named object now",
                         )
             if missing:
                 return Preparation(
                     None,
-                    PublicationDisposition.REMATERIALIZE,
+                    StoreRefusal.REMATERIALIZE,
                     "a named object is not in the store",
                     tuple(missing),
                 )

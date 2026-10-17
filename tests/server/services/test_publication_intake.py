@@ -22,7 +22,7 @@ from server.reclamation.trees import TreeExpander
 from server.services.publications import PublicationIntake
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
-from shared.content import ContentReference
+from shared.content import ContentReference, StoreRefusal
 from shared.content.tree import TREE_MEDIA_TYPE, TreeManifest, TreeMember
 from shared.schemas.event import TaskEvent
 from shared.tasks.artifact_binding import ArtifactBinding, ArtifactKind
@@ -178,7 +178,7 @@ def test_a_retiring_object_is_refused_and_binds_nothing_until_resent(rig) -> Non
     r.raw.hset(reclaim_deleting_key(scope), digest, "{}")
     _consume(r.monitor, event)
     [refused] = r.answers.wait()
-    assert refused.disposition is PublicationDisposition.RETRY_RETIREMENT
+    assert refused.refusal is StoreRefusal.RETRY_RETIREMENT
     assert refused.digests == [digest]
     assert r.status() == TaskStatus.DISPATCHED
     assert r.pins(scope) == {}
@@ -197,7 +197,7 @@ def test_an_object_gone_from_the_store_is_asked_for_again(rig) -> None:
     r.raw.hset(reclaim_history_key(scope), digest, "1")
     _consume(r.monitor, event)
     [answer] = r.answers.wait()
-    assert answer.disposition is PublicationDisposition.REMATERIALIZE
+    assert answer.refusal is StoreRefusal.REMATERIALIZE
     assert answer.digests == [digest]
     assert r.status() == TaskStatus.DISPATCHED
 

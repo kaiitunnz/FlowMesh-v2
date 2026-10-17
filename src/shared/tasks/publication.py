@@ -4,10 +4,9 @@ control's answer to it.
 A worker reports a task's success, a checkpoint it published, or the request an input
 preparation materialized by naming the objects it stored. Control validates every named
 object before it binds any, and answers each report once its outcome is durable: a
-committed or rejected report ends the worker's duty to resend it, and a refusal tells
-the worker to store the named objects again from what it kept and report again. A
-report is identified by the publication it makes, so a resend of it is the same
-publication.
+committed or rejected report ends the worker's duty to resend it, and a refused one says
+what the worker does before it reports again. A report is identified by the publication
+it makes, so a resend of it is the same publication.
 """
 
 from enum import StrEnum
@@ -15,7 +14,7 @@ from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from shared.content import ContentReference
+from shared.content import ContentReference, StoreRefusal
 
 from .artifact_binding import ArtifactBinding
 
@@ -27,9 +26,6 @@ CHECKPOINT_FIELD = "artifact_published"
 # The success field carrying an input preparation's materialization.
 PREPARED_FIELD = "input_materialization"
 PREPARED_KEY = "prepared"
-# Why control asks a publication to come back shortly: the lane committing them is
-# full, and holds the next free place for it.
-BUSY_REASON = "the publication lane is full"
 
 
 class PublicationKind(StrEnum):
@@ -120,20 +116,13 @@ class PublicationDisposition(StrEnum):
     REJECTED = "rejected"
     """It binds nothing and never will, as when its dispatch no longer holds its task;
     nothing more is owed for it."""
-    RETRY = "retry"
-    """Control could not decide it now; report it again later."""
-    RETRY_RETIREMENT = "retry_retirement"
-    """A named object is being removed from the store; store it again once its removal
-    ends, then report again."""
-    REMATERIALIZE = "rematerialize"
-    """A named object is not in the store; store it again, then report again."""
+    REFUSED = "refused"
+    """It binds nothing now; its refusal says what the worker does before it reports
+    again."""
 
     @property
     def final(self) -> bool:
-        return self in (
-            PublicationDisposition.COMMITTED,
-            PublicationDisposition.REJECTED,
-        )
+        return self is not PublicationDisposition.REFUSED
 
 
 class PublicationAnswer(BaseModel):
@@ -141,9 +130,10 @@ class PublicationAnswer(BaseModel):
 
     publication: Publication
     disposition: PublicationDisposition
+    refusal: StoreRefusal | None = None
     reason: str | None = None
     digests: list[str] = []
-    """The objects a refusal concerns, which the worker stores again."""
+    """The objects a refusal concerns."""
 
 
 def _reference(raw: Any, field: str | None = None) -> str | None:
@@ -167,7 +157,6 @@ def _checkpoint(raw: Any) -> ArtifactBinding | None:
 
 
 __all__ = [
-    "BUSY_REASON",
     "CHECKPOINT_FIELD",
     "PREPARED_FIELD",
     "PREPARED_KEY",

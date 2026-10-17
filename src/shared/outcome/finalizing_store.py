@@ -21,6 +21,7 @@ from shared.content import (
     ContentReference,
     ContentStoreError,
     ScopedObjectStore,
+    StoreRefusal,
 )
 from shared.content.multipart import finalizing
 from shared.telemetry.propagation import inject_ambient_traceparent
@@ -33,17 +34,15 @@ _LOGGER = logging.getLogger(__name__)
 # How long a refused recording waits before it records again, doubling to the cap.
 _REFUSED_BACKOFF_SEC = 0.5
 _REFUSED_BACKOFF_CAP_SEC = 15.0
-_REMATERIALIZE = "rematerialize"
 
 
 class FinalizationRefusedError(ContentStoreError):
-    """Control did not record a finalization now; ``disposition`` says what next:
-    ``retry_retirement`` or ``retry`` to record again, ``rematerialize`` to write the
-    same bytes again first."""
+    """Control did not record a finalization now; ``refusal`` says what the producer
+    does before it records again."""
 
-    def __init__(self, disposition: str) -> None:
-        super().__init__(f"finalization not recorded: {disposition}")
-        self.disposition = disposition
+    def __init__(self, refusal: StoreRefusal) -> None:
+        super().__init__(f"finalization not recorded: {refusal.value}")
+        self.refusal = refusal
 
 
 class FinalizationIndexClient:
@@ -90,10 +89,8 @@ class FinalizationIndexClient:
         )
         if resp.status_code == 409:
             detail = resp.json().get("detail")
-            if isinstance(detail, dict) and isinstance(
-                disposition := detail.get("disposition"), str
-            ):
-                raise FinalizationRefusedError(disposition)
+            if isinstance(detail, dict) and detail.get("refusal") in set(StoreRefusal):
+                raise FinalizationRefusedError(StoreRefusal(detail["refusal"]))
         if resp.status_code >= 400:
             raise ContentStoreError(f"finalization failed: {resp.status_code}")
         return OutcomeManifest.model_validate_json(resp.content)
@@ -173,9 +170,9 @@ class FinalizingContentStore(FabricContentStore):
                 _LOGGER.info(
                     "Finalization %s not recorded (%s); recording again",
                     idempotency_key,
-                    refused.disposition,
+                    refused.refusal.value,
                 )
                 time.sleep(delay)
                 delay = min(delay * 2, _REFUSED_BACKOFF_CAP_SEC)
-                if refused.disposition == _REMATERIALIZE:
+                if refused.refusal is StoreRefusal.REMATERIALIZE:
                     content = self.write(scope, data, media_type=media_type)

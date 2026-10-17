@@ -27,7 +27,7 @@ from typing import BinaryIO
 
 from pydantic import ValidationError
 
-from shared.content import ContentReference, ContentStoreError
+from shared.content import ContentReference, ContentStoreError, StoreRefusal
 from shared.tasks.artifact_upload import UploadDisposition, UploadReport, UploadSettled
 
 from .custody import ArtifactCustody, StagedTask, UploadJournal
@@ -239,7 +239,7 @@ class ArtifactUploader:
     def _retry_locked(
         self, publication: _Publication, task: StagedTask, settled: UploadSettled
     ) -> None:
-        if settled.disposition is UploadDisposition.REMATERIALIZE:
+        if settled.refusal is StoreRefusal.REMATERIALIZE:
             again = [m for m in task.members if m.content_digest in settled.digests]
             if again:
                 self._logger.info(

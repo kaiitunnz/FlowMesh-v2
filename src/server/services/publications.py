@@ -21,10 +21,9 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from shared.content import ContentReference
+from shared.content import ContentReference, StoreRefusal
 from shared.schemas.event import TaskEvent
 from shared.tasks.publication import (
-    BUSY_REASON,
     Publication,
     PublicationAnswer,
     PublicationDisposition,
@@ -88,11 +87,7 @@ class PublicationIntake:
             lambda: self._publish(event, publication),
         )
         if admission is Admission.BUSY:
-            self._answer_now(
-                publication,
-                PublicationDisposition.RETRY,
-                BUSY_REASON,
-            )
+            self._refuse(publication, StoreRefusal.BUSY, "the publication lane is full")
 
     def _publish(self, event: TaskEvent, publication: Publication) -> None:
         locator = {
@@ -105,18 +100,21 @@ class PublicationIntake:
         preparation = self._holds.acquire(assertion, locator)
         if (holds := preparation.holds) is None:
             if preparation.malformed and event.type == "TASK_SUCCEEDED":
-                self._refuse_success(event, preparation.reason)
-            refusal = preparation.refusal or PublicationDisposition.RETRY
-            self._logger.info(
-                "Publication %s of %s refused (%s): %s",
-                publication.key,
-                event.task_id,
-                refusal.value,
-                preparation.reason,
-            )
-            self._answer_now(
+                self._refuse_success(event, publication, preparation.reason)
+                return
+            if preparation.refusal is None:
+                self._answer_now(
+                    PublicationAnswer(
+                        publication=publication,
+                        disposition=PublicationDisposition.REJECTED,
+                        reason=preparation.reason,
+                        digests=list(preparation.digests),
+                    )
+                )
+                return
+            self._refuse(
                 publication,
-                refusal,
+                preparation.refusal,
                 preparation.reason,
                 list(preparation.digests),
             )
@@ -159,9 +157,11 @@ class PublicationIntake:
                 event.task_id, publication, finish, staged, asserted
             )
 
-    def _refuse_success(self, event: TaskEvent, reason: str | None) -> None:
+    def _refuse_success(
+        self, event: TaskEvent, publication: Publication, reason: str | None
+    ) -> None:
         """Fail a success naming a tree that is not one, as a success whose
-        publications cannot all be bound fails."""
+        publications cannot all be bound fails, and answer it once that is durable."""
         failed = event.model_copy(
             update={
                 "type": "TASK_FAILED",
@@ -175,31 +175,50 @@ class PublicationIntake:
                 self._runtime.acknowledging(),
             ):
                 self._apply(failed)
+        except TransitionNotDurable:
+            pass
+        except EpochFenced:
+            return
         except Exception:
             self._logger.exception(
                 "Failing %s for a malformed tree failed; its worker reports it again",
                 event.task_id,
             )
+            return
+        self._runtime.answer_publication(event.task_id, publication)
 
-    def _answer_now(
+    def _refuse(
         self,
         publication: Publication,
-        disposition: PublicationDisposition,
+        refusal: StoreRefusal,
         reason: str | None,
         digests: list[str] | None = None,
     ) -> None:
-        try:
-            self._runtime.send_publication_answer(
-                PublicationAnswer(
-                    publication=publication,
-                    disposition=disposition,
-                    reason=reason,
-                    digests=digests or [],
-                )
+        self._logger.info(
+            "Publication %s of %s refused (%s): %s",
+            publication.key,
+            publication.dispatch_id,
+            refusal.value,
+            reason,
+        )
+        self._answer_now(
+            PublicationAnswer(
+                publication=publication,
+                disposition=PublicationDisposition.REFUSED,
+                refusal=refusal,
+                reason=reason,
+                digests=digests or [],
             )
+        )
+
+    def _answer_now(self, answer: PublicationAnswer) -> None:
+        try:
+            self._runtime.send_publication_answer(answer)
         except Exception as exc:
             # The worker reports it again either way.
-            self._logger.debug("Could not answer publication %s: %s", publication, exc)
+            self._logger.debug(
+                "Could not answer publication %s: %s", answer.publication, exc
+            )
 
 
 class TreeFinisher:

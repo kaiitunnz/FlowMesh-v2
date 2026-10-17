@@ -8,7 +8,12 @@ from typing import Any
 
 import pytest
 
-from shared.content import ContentReference, ContentUnavailable, reference_for
+from shared.content import (
+    ContentReference,
+    ContentUnavailable,
+    StoreRefusal,
+    reference_for,
+)
 from shared.tasks.artifact_upload import UploadDisposition, UploadReport, UploadSettled
 from worker.content.custody import ArtifactCustody, UploadJournal
 from worker.content.uploads import (
@@ -238,7 +243,8 @@ def test_an_answer_to_wait_stores_nothing_and_reports_again_later(tmp_path) -> N
         UploadSettled(
             task_id="tsk-1",
             dispatch_id="dsp-1",
-            disposition=UploadDisposition.RETRY_RETIREMENT,
+            disposition=UploadDisposition.REFUSED,
+            refusal=StoreRefusal.RETRY_RETIREMENT,
             digests=[digest],
         )
     )
@@ -268,7 +274,8 @@ def test_an_answer_to_store_again_stores_the_named_objects_then_reports(
         UploadSettled(
             task_id="tsk-1",
             dispatch_id="dsp-1",
-            disposition=UploadDisposition.REMATERIALIZE,
+            disposition=UploadDisposition.REFUSED,
+            refusal=StoreRefusal.REMATERIALIZE,
             digests=[digest],
         )
     )

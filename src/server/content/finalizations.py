@@ -14,9 +14,8 @@ the winner's: a re-drive that loses is handed the first binding and protects not
 import itertools
 import json
 from collections.abc import Callable
-from enum import StrEnum
 
-from shared.content import ContentReference
+from shared.content import ContentReference, StoreRefusal
 from shared.outcome import OutcomeManifest
 
 from ..clients.redis import (
@@ -87,23 +86,12 @@ return {'committed', ARGV[2]}
 _VERIFY_ROUNDS = 3
 
 
-class FinalizationDisposition(StrEnum):
-    """Why a finalization was not recorded, and what its producer does next."""
-
-    RETRY_RETIREMENT = "retry_retirement"
-    """The content is being retired; the producer waits and records again."""
-    REMATERIALIZE = "rematerialize"
-    """The content is gone; the producer writes the same bytes again and records."""
-    RETRY = "retry"
-    """The backing could not be verified for now; the producer records again."""
-
-
 class FinalizationRefused(Exception):
     """A finalization the index did not record, with what its producer does next."""
 
-    def __init__(self, disposition: FinalizationDisposition) -> None:
-        super().__init__(f"finalization not recorded: {disposition.value}")
-        self.disposition = disposition
+    def __init__(self, refusal: StoreRefusal) -> None:
+        super().__init__(f"finalization not recorded: {refusal.value}")
+        self.refusal = refusal
 
 
 class StaleRootEpoch(RuntimeError):
@@ -212,11 +200,11 @@ class FinalizationIndex:
                 case "fenced":
                     raise StaleRootEpoch("a later root holds the root epoch")
                 case "retiring":
-                    raise FinalizationRefused(FinalizationDisposition.RETRY_RETIREMENT)
+                    raise FinalizationRefused(StoreRefusal.RETRY_RETIREMENT)
             present = self.verify(content) if self.verify is not None else None
             if present is False:
-                raise FinalizationRefused(FinalizationDisposition.REMATERIALIZE)
+                raise FinalizationRefused(StoreRefusal.REMATERIALIZE)
             if present is None:
-                raise FinalizationRefused(FinalizationDisposition.RETRY)
+                raise FinalizationRefused(StoreRefusal.RETRY)
             verified = str(reply[1])
-        raise FinalizationRefused(FinalizationDisposition.RETRY)
+        raise FinalizationRefused(StoreRefusal.RETRY)

@@ -22,10 +22,9 @@ from server.reclamation.publications import (
     assertion_of,
 )
 from server.reclamation.trees import TreeExpander, TreeStatus
-from shared.content import ContentReference, reference_for
+from shared.content import ContentReference, StoreRefusal, reference_for
 from shared.content.tree import TREE_MEDIA_TYPE, TreeManifest, TreeMember
 from shared.tasks.artifact_binding import ArtifactBinding, ArtifactKind
-from shared.tasks.publication import PublicationDisposition
 from tests.server.redis_helpers import fake_redis_client
 
 _SCOPE = "org-a"
@@ -183,7 +182,7 @@ def test_an_object_being_retired_refuses_and_holds_nothing(raw) -> None:
     preparation = _holds(raw).acquire(
         assertion_of("TASK_SUCCEEDED", _SUCCESS), _LOCATOR
     )
-    assert preparation.refusal is PublicationDisposition.RETRY_RETIREMENT
+    assert preparation.refusal is StoreRefusal.RETRY_RETIREMENT
     assert preparation.digests == (FILE.content_digest,)
     assert raw.hgetall(reclaim_pins_key(_SCOPE)) == {}
 
@@ -201,12 +200,12 @@ def test_a_staged_file_being_retired_is_still_accepted(raw) -> None:
     ("backed", "refusal"),
     [
         (True, None),
-        (False, PublicationDisposition.REMATERIALIZE),
-        (None, PublicationDisposition.RETRY),
+        (False, StoreRefusal.REMATERIALIZE),
+        (None, StoreRefusal.RETRY),
     ],
 )
 def test_an_object_retired_before_is_verified_in_the_store(
-    raw, backed: bool | None, refusal: PublicationDisposition | None
+    raw, backed: bool | None, refusal: StoreRefusal | None
 ) -> None:
     raw.hset(reclaim_history_key(_SCOPE), RESULT.content_digest, "3")
     check = _Backed(backed)
@@ -219,7 +218,7 @@ def test_an_object_retired_before_is_verified_in_the_store(
         assert RESULT.content_digest in raw.hgetall(reclaim_pins_key(_SCOPE))
     else:
         assert raw.hgetall(reclaim_pins_key(_SCOPE)) == {}
-    if refusal is PublicationDisposition.REMATERIALIZE:
+    if refusal is StoreRefusal.REMATERIALIZE:
         assert preparation.digests == (RESULT.content_digest,)
 
 
@@ -231,7 +230,7 @@ def test_a_refusal_in_one_scope_releases_the_holds_of_another(raw) -> None:
         "child_result_references": {"tsk-2": other.model_dump(mode="json")},
     }
     preparation = _holds(raw).acquire(assertion_of("TASK_SUCCEEDED", payload), _LOCATOR)
-    assert preparation.refusal is PublicationDisposition.RETRY_RETIREMENT
+    assert preparation.refusal is StoreRefusal.RETRY_RETIREMENT
     assert raw.hgetall(reclaim_pins_key(_SCOPE)) == {}
 
 
@@ -244,7 +243,7 @@ def test_a_root_without_an_epoch_asks_for_a_retry(raw) -> None:
         TreeExpander(client, _open, _stored_size),
     )
     preparation = holds.acquire(assertion_of("TASK_SUCCEEDED", _SUCCESS), _LOCATOR)
-    assert preparation.refusal is PublicationDisposition.RETRY
+    assert preparation.refusal is StoreRefusal.RETRY
 
 
 def _children(count: int) -> dict[str, Any]:
@@ -290,7 +289,7 @@ def test_a_retirement_that_keeps_moving_bounds_the_verification(raw) -> None:
         ),
         _LOCATOR,
     )
-    assert preparation.refusal is PublicationDisposition.RETRY
+    assert preparation.refusal is StoreRefusal.RETRY
     assert len(check.asked) == VERIFY_ROUNDS + 1
     assert raw.hgetall(reclaim_pins_key(_SCOPE)) == {}
 
@@ -351,7 +350,7 @@ def test_a_release_the_control_store_drops_stays_owed_until_repaid(raw) -> None:
     holds = _holds(raw, pins=pins)
     pins.release_error = _DOWN
     preparation = holds.acquire(_refused_in_another_scope(raw), _LOCATOR)
-    assert preparation.refusal is PublicationDisposition.RETRY_RETIREMENT
+    assert preparation.refusal is StoreRefusal.RETRY_RETIREMENT
     assert RESULT.content_digest in raw.hgetall(reclaim_pins_key(_SCOPE))
     assert holds.repay() == 1
     pins.release_error = None
@@ -403,5 +402,5 @@ def test_an_acquisition_that_fails_midway_releases_what_it_held(
         ),
         _LOCATOR,
     )
-    assert preparation.refusal is PublicationDisposition.RETRY
+    assert preparation.refusal is StoreRefusal.RETRY
     assert raw.hgetall(reclaim_pins_key(_SCOPE)) == {}

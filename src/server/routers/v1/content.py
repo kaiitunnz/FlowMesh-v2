@@ -96,7 +96,7 @@ async def put_finalization(
     except FinalizationRefused as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail={"disposition": exc.disposition.value},
+            detail={"refusal": exc.refusal.value},
         ) from exc
     except StaleRootEpoch as exc:
         raise HTTPException(

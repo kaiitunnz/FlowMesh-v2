@@ -10,6 +10,8 @@ from enum import StrEnum
 
 from pydantic import BaseModel, Field
 
+from shared.content.refusal import StoreRefusal
+
 # The success-payload flag marking the final artifacts it reports, its merged
 # children's included, as staged rather than stored.
 ARTIFACTS_PENDING = "artifacts_pending"
@@ -51,12 +53,9 @@ class UploadDisposition(StrEnum):
     LOST = "lost"
     # No accepted upload matches the report, so nothing is owed for it.
     REJECTED = "rejected"
-    # Objects it names are being removed from the store: store nothing, and report the
-    # upload again later.
-    RETRY_RETIREMENT = "retry_retirement"
-    # Objects it names are no longer in the store: store them again from custody, then
-    # report the upload again.
-    REMATERIALIZE = "rematerialize"
+    # It cannot settle durable now; its refusal says what the worker does before it
+    # reports the upload again.
+    REFUSED = "refused"
 
     @property
     def settled(self) -> bool:
@@ -66,8 +65,7 @@ class UploadDisposition(StrEnum):
 _OWED = frozenset(
     {
         UploadDisposition.PENDING,
-        UploadDisposition.RETRY_RETIREMENT,
-        UploadDisposition.REMATERIALIZE,
+        UploadDisposition.REFUSED,
     }
 )
 
@@ -78,5 +76,6 @@ class UploadSettled(BaseModel):
     task_id: str
     dispatch_id: str
     disposition: UploadDisposition
+    refusal: StoreRefusal | None = None
     digests: list[str] = Field(default_factory=list)
-    """The objects a retirement answer is about."""
+    """The objects a refusal concerns."""

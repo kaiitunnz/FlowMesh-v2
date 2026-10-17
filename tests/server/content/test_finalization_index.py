@@ -13,11 +13,10 @@ from server.clients.redis import (
 )
 from server.content import FinalizationIndex
 from server.content.finalizations import (
-    FinalizationDisposition,
     FinalizationRefused,
     StaleRootEpoch,
 )
-from shared.content import ContentReference, reference_for
+from shared.content import ContentReference, StoreRefusal, reference_for
 from tests.server.redis_helpers import fake_redis_client
 
 _SCOPE = "tenant-a"
@@ -78,25 +77,25 @@ def test_content_being_retired_is_refused_and_nothing_is_bound(server, raw) -> N
     raw.hset(reclaim_deleting_key(_SCOPE), reference.content_digest, "{}")
     with pytest.raises(FinalizationRefused) as refused:
         _index(server).record(_SCOPE, "idm-1", reference)
-    assert refused.value.disposition is FinalizationDisposition.RETRY_RETIREMENT
+    assert refused.value.refusal is StoreRefusal.RETRY_RETIREMENT
     assert _index(server).find(_SCOPE, "idm-1") is None
 
 
 @pytest.mark.parametrize(
-    ("present", "disposition"),
+    ("present", "refusal"),
     [
-        (False, FinalizationDisposition.REMATERIALIZE),
-        (None, FinalizationDisposition.RETRY),
+        (False, StoreRefusal.REMATERIALIZE),
+        (None, StoreRefusal.RETRY),
     ],
 )
 def test_a_retired_identity_binds_only_on_a_verified_backing(
-    server, raw, present: bool | None, disposition: FinalizationDisposition
+    server, raw, present: bool | None, refusal: StoreRefusal
 ) -> None:
     reference = reference_for(_SCOPE, b"retired once")
     raw.hset(reclaim_history_key(_SCOPE), reference.content_digest, "4")
     with pytest.raises(FinalizationRefused) as refused:
         _index(server, verify=lambda _: present).record(_SCOPE, "idm-1", reference)
-    assert refused.value.disposition is disposition
+    assert refused.value.refusal is refusal
     assert _index(server).find(_SCOPE, "idm-1") is None
 
 

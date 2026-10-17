@@ -129,4 +129,4 @@ def test_a_refused_finalization_answers_its_disposition() -> None:
     raw.hset(reclaim_history_key("local"), _CONTENT.content_digest, "1")
     resp = _bind(client, "idm-9")
     assert resp.status_code == 409
-    assert resp.json()["detail"] == {"disposition": "rematerialize"}
+    assert resp.json()["detail"] == {"refusal": "rematerialize"}

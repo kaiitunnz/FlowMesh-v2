@@ -34,6 +34,7 @@ from shared.content import (
     TREE_MEDIA_TYPE,
     ContentReference,
     ContentUnavailable,
+    StoreRefusal,
     TreeManifest,
     TreeMember,
 )
@@ -898,7 +899,7 @@ def test_a_staged_file_being_retired_waits_then_is_stored_again_before_it_settle
 
     # Taken as its own while the same object was being removed: it waits.
     setup.report(UploadReport.UPLOADED)
-    assert _last(setup).disposition is UploadDisposition.RETRY_RETIREMENT
+    assert _last(setup).refusal is StoreRefusal.RETRY_RETIREMENT
     assert _last(setup).digests == [digest]
     upload = setup.record(setup.train).internal.artifact_upload
     assert upload is not None and upload.pending
@@ -907,7 +908,7 @@ def test_a_staged_file_being_retired_waits_then_is_stored_again_before_it_settle
     raw.hdel(reclaim_deleting_key("org"), digest)
     raw.hset(reclaim_history_key("org"), digest, "1")
     setup.report(UploadReport.UPLOADED)
-    assert _last(setup).disposition is UploadDisposition.REMATERIALIZE
+    assert _last(setup).refusal is StoreRefusal.REMATERIALIZE
     assert _last(setup).digests == [digest]
 
     setup.reader.store.write("org", data)
@@ -941,7 +942,7 @@ def test_a_receipt_ahead_of_its_success_is_checked_when_reported_again() -> None
     assert setup.workers.answers(setup.train) == [UploadDisposition.PENDING]
 
     setup.report(UploadReport.UPLOADED)
-    assert _last(setup).disposition is UploadDisposition.RETRY_RETIREMENT
+    assert _last(setup).refusal is StoreRefusal.RETRY_RETIREMENT
 
 
 def test_an_upload_settled_from_the_store_waits_while_an_object_is_retiring() -> None:
@@ -987,7 +988,7 @@ def test_a_staged_tree_with_members_retired_before_checks_them_on_the_next_repor
     assert upload is not None and upload.pending
 
     setup.report(UploadReport.UPLOADED)
-    assert _last(setup).disposition is UploadDisposition.REMATERIALIZE
+    assert _last(setup).refusal is StoreRefusal.REMATERIALIZE
     assert _last(setup).digests == [member.content_digest]
     setup.reader.store.write("org", b"weights")
     setup.report(UploadReport.UPLOADED)
