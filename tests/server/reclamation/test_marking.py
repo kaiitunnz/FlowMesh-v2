@@ -11,6 +11,7 @@ from typing import Any
 
 import fakeredis
 import pytest
+from redis.exceptions import NoPermissionError
 from pydantic import BaseModel
 
 import server.clients.redis as redis_module
@@ -18,6 +19,7 @@ import server.reclamation.marking as marking
 from server.clients.redis import (
     content_finalization_key,
     task_artifacts_key,
+    task_state_key,
     workflow_ds_key,
     workflow_history_key,
     workflow_sources_key,
@@ -359,18 +361,18 @@ def test_an_undecodable_finalization_leaves_only_its_scope_incomplete(
     assert result.gap(_A) == ""
 
 
-def test_a_task_state_whose_source_is_gone_leaves_its_scope_incomplete(
+def test_a_task_state_is_marked_without_reading_its_stored_source(
     fx: _Fixture,
 ) -> None:
-    record = _task_record("tsk-1", _ref(b"result", _B), _B)
+    result_ref = _ref(b"result", _B)
+    record = _task_record("tsk-1", result_ref, _B)
     WorkflowRegistry(fx.rds).save_task_states([PersistedTask(record=record)])
     fx.raw.delete(workflow_sources_key("wfl-tasks"))
 
     result = fx.run()
 
-    assert result.faults == {_B: 1} and result.unattributed == 0
-    assert result.gap(_B)
-    assert result.gap(_A) == ""
+    assert result.complete and result.gap(_B) == ""
+    assert result.mark.binds(_B, result_ref.content_digest)
 
 
 def test_a_set_stop_ends_the_pass_incomplete(fx: _Fixture) -> None:
@@ -652,3 +654,76 @@ def test_a_tree_a_catalog_binding_names_twice_is_listed_once() -> None:
     found = marking.artifact_field("final/model", binding.model_dump_json())
 
     assert found.trees == [tree]
+
+
+def test_a_control_store_naming_no_server_identity_leaves_the_pass_incomplete(
+    fx: _Fixture,
+) -> None:
+    _seed_everything(fx)
+    restart_fake_server(fx.server, "")
+
+    result = fx.run()
+
+    assert not result.complete
+    assert "no server identity" in result.gap(_A)
+    assert "no server identity" in result.gap(_B)
+
+
+def test_a_server_identity_the_store_refuses_leaves_the_pass_incomplete(
+    fx: _Fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_everything(fx)
+
+    def refused() -> str:
+        raise NoPermissionError("this user has no permissions to run 'info'")
+
+    monkeypatch.setattr(fx.rds.sync, "server_identity", refused)
+
+    result = fx.run()
+
+    assert not result.complete
+    assert "cannot be read" in result.gap(_A) and "cannot be read" in result.gap(_B)
+
+
+@pytest.mark.parametrize("digest", ["not-hex", "a" * 62])
+def test_a_reference_naming_no_content_digest_leaves_only_its_scope_incomplete(
+    fx: _Fixture, digest: str
+) -> None:
+    good = _ref(b"kept", _B)
+    fx.raw.set(
+        content_finalization_key(_B, "idm-9"),
+        OutcomeManifest(
+            content=_ref(b"bad", _B).model_copy(update={"content_digest": digest}),
+            idempotency_key="idm-9",
+        ).model_dump_json(),
+    )
+    fx.raw.set(
+        content_finalization_key(_B, "idm-8"),
+        OutcomeManifest(content=good, idempotency_key="idm-8").model_dump_json(),
+    )
+    tree = _ref(b"tree", _B, TREE_MEDIA_TYPE).model_copy(
+        update={"content_digest": digest}
+    )
+    fx.raw.set(
+        content_finalization_key(_B, "idm-7"),
+        OutcomeManifest(content=tree, idempotency_key="idm-7").model_dump_json(),
+    )
+    _seed_everything(fx)
+
+    result = fx.run()
+
+    assert result.complete and result.unattributed == 0
+    assert result.faults[_B] == 2 and result.gap(_A) == ""
+    assert result.mark.binds(_B, good.content_digest)
+    assert all(t.content_digest != digest for t in result.tree_references())
+
+
+def test_a_wrong_typed_owner_key_leaves_its_fault_unattributed(
+    fx: _Fixture,
+) -> None:
+    fx.raw.sadd(task_state_key("tsk-1"), "not a string")
+    fx.raw.hset(task_artifacts_key("tsk-1"), "final/x", "not a binding")
+
+    result = fx.run()
+
+    assert result.complete and result.unattributed >= 1

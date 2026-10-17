@@ -73,7 +73,7 @@ def test_an_expanded_tree_is_never_read_again() -> None:
 
     for _ in range(3):
         assert closures.expand(_tree(manifest), _pacer()) is Expansion.EXPANDED
-        closures.compact()
+        closures.compact(_pacer())
 
     assert opener.reads == 1
 
@@ -86,7 +86,7 @@ def test_a_manifest_failing_verification_marks_no_member() -> None:
     tree = _tree(manifest)
 
     assert closures.expand(tree, _pacer()) is Expansion.MALFORMED
-    closures.compact()
+    closures.compact(_pacer())
     assert closures.expand(tree, _pacer()) is Expansion.MALFORMED
 
     assert not any(closures.mark.binds(_A, m.digest) for m in members)
@@ -160,6 +160,6 @@ def test_the_closures_count_the_trees_they_settle_in_their_size() -> None:
     by = {_tree(m).content_digest: m for m in manifests}
     for manifest in manifests:
         closures.expand(_tree(manifest), _pacer())
-    closures.compact()
+    closures.compact(_pacer())
 
     assert closures.nbytes == closures.mark.nbytes + 20 * 32

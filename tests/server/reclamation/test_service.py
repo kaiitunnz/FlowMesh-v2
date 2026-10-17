@@ -4,12 +4,13 @@ once, and lists the store against both; it runs until stopped on its own thread.
 import logging
 import threading
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, cast
 
 import fakeredis
 import pytest
+from redis.exceptions import NoPermissionError
 
-from server.clients.redis import task_artifacts_key
+from server.clients.redis import CONTENT_AUDIT_KEY, task_artifacts_key
 from server.reclamation.audit import AuditTrail
 from server.reclamation.closures import TreeClosures
 from server.reclamation.collector import AuditCollector
@@ -17,6 +18,7 @@ from server.reclamation.marking import Marker
 from server.reclamation.service import ContentAuditService, start_content_audit
 from server.reclamation.store_admin import StoreAdmin
 from server.registries.artifacts import artifact_field
+from server.task.results import ResultUnavailable
 from shared.content import (
     BACKEND_FILESYSTEM,
     ContentReference,
@@ -156,6 +158,44 @@ def test_a_malformed_tree_leaves_its_scope_incomplete(fx) -> None:
         assert not scope.complete and "cannot be read as a tree" in scope.gap
         assert scope.objects == 2 and scope.unbound == 0
     assert len(fx.opened) == 1
+
+
+def test_an_unavailable_tree_is_opened_once_per_sweep(fx) -> None:
+    binding = fx.tree("first", b"manifest bytes")
+    second = binding.model_copy(update={"name": "second"})
+    fx.bind(binding, second)
+    fx.manifests.clear()
+
+    def unavailable(reference: ContentReference) -> Iterator[bytes]:
+        fx.opened.append(reference.content_digest)
+        raise ResultUnavailable("store down")
+        yield b""
+
+    fx.service._closures._open = unavailable
+
+    for sweeps in (1, 2):
+        result = fx.service.sweep(threading.Event())
+        (scope,) = result.scopes
+        assert not scope.complete and "unavailable" in scope.gap
+        assert len(fx.opened) == sweeps
+
+
+def test_a_sweep_whose_server_identity_is_refused_still_reports(
+    fx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed(fx)
+
+    def refused() -> str:
+        raise NoPermissionError("this user has no permissions to run 'info'")
+
+    monkeypatch.setattr(fx.rds.sync, "server_identity", refused)
+
+    result = fx.service.sweep(threading.Event())
+
+    assert result.scopes and not any(scope.complete for scope in result.scopes)
+    assert "cannot be read" in result.scopes[0].gap
+    entries = cast(list[Any], fx.raw.xrange(CONTENT_AUDIT_KEY))
+    assert any(fields["kind"] == "sweep" for _, fields in entries)
 
 
 def test_a_complete_pass_sizes_the_next_mark(

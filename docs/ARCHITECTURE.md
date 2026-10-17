@@ -511,8 +511,10 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   only store whose listing of them is complete. It reports to the log, to metrics (see
   [`TELEMETRY.md`](TELEMETRY.md)) and to the capped `ct:audit` stream in the control
   store. A filesystem store is not audited. The audit may count an unbound object as
-  bound, never the reverse, reads each bound tree's manifest once per root, and takes at
-  most a tenth of the root's interpreter time while it runs.
+  bound, never the reverse, reads each bound tree's manifest once per root, again each
+  audit while the store cannot serve it, and takes at most a tenth of the root's interpreter time while it
+  runs. It reads the control store's `INFO`, so a control-store user the deployment
+  denies `INFO` leaves every scope incomplete.
 - **Store access.** A worker reaches the store only under a `csg-`
   `ContentStoreAccessGrant` the control plane mints for one dispatched task in one
   authorization scope, bound to the worker incarnation running it and expiring shortly

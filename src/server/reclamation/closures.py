@@ -87,7 +87,7 @@ class TreeClosures:
                 if pacer.tick():
                     return Expansion.STOPPED
         except TreeManifestError as exc:
-            self._malformed[scope].add(tree.content_digest)
+            self._settle(self._malformed[scope], tree, pacer)
             self._logger.error(
                 "Content audit cannot read bound tree %s in scope %s: %s",
                 tree.content_digest,
@@ -96,7 +96,7 @@ class TreeClosures:
             )
             return Expansion.MALFORMED
         except ResultUnreadable as exc:
-            self._malformed[scope].add(tree.content_digest)
+            self._settle(self._malformed[scope], tree, pacer)
             self._logger.error(
                 "Content audit finds bound tree %s in scope %s unreadable: %s",
                 tree.content_digest,
@@ -112,14 +112,21 @@ class TreeClosures:
         self._mark.add_all(
             scope, zip(words[0::2], words[1::2], strict=True), len(words) // 2
         )
-        self._expanded[scope].add(tree.content_digest)
+        self._settle(self._expanded[scope], tree, pacer)
         return Expansion.EXPANDED
 
-    def compact(self) -> None:
-        """Pack the trees settled since the last compaction."""
+    @staticmethod
+    def _settle(settled: DigestSet, tree: ContentReference, pacer: Pacer) -> None:
+        settled.add(tree.content_digest)
+        if settled.full:
+            settled.compact(pacer.tick)
+
+    def compact(self, pacer: Pacer) -> None:
+        """Pack the trees settled since the last compaction, ticking ``pacer`` as it
+        merges."""
         for settled in (self._expanded, self._malformed):
             for digests in settled.values():
-                digests.compact()
+                digests.compact(pacer.tick)
 
 
 __all__ = ["READS_PER_PAUSE", "Expansion", "OpenContent", "TreeClosures"]

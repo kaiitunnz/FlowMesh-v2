@@ -11,9 +11,10 @@ it grows a layer of twice the capacity at half the error rate, so the whole stay
 the target.
 """
 
-import hashlib
+import heapq
 import math
-from collections.abc import Iterable, Mapping
+import re
+from collections.abc import Callable, Iterable, Mapping
 
 # The target false-positive rate, and the least capacity a scope's first layer holds.
 FALSE_POSITIVE_RATE = 0.01
@@ -22,17 +23,24 @@ MIN_CAPACITY = 1024
 _LN2_SQUARED = math.log(2) ** 2
 
 
-def digest_words(digest: str) -> tuple[int, int]:
-    """The two words a digest's bit positions derive from.
+_CONTENT_DIGEST = re.compile(r"[0-9a-f]{64}")
 
-    A hex SHA-256 digest supplies them directly; anything else is hashed first.
-    """
-    try:
-        raw = bytes.fromhex(digest)
-    except ValueError:
-        raw = b""
-    if len(raw) < 16:
-        raw = hashlib.sha256(digest.encode()).digest()
+
+def is_content_digest(digest: str) -> bool:
+    """Whether ``digest`` is a SHA-256 content digest in lowercase hex."""
+    return _CONTENT_DIGEST.fullmatch(digest) is not None
+
+
+def digest_bytes(digest: str) -> bytes:
+    """The 32 bytes of a content digest; raises ``ValueError`` for anything else."""
+    if not is_content_digest(digest):
+        raise ValueError(f"not a content digest: {digest!r}")
+    return bytes.fromhex(digest)
+
+
+def digest_words(digest: str) -> tuple[int, int]:
+    """The two words a content digest's bit positions derive from."""
+    raw = digest_bytes(digest)
     return int.from_bytes(raw[:8], "little"), int.from_bytes(raw[8:16], "little") | 1
 
 
@@ -149,35 +157,30 @@ class Mark:
 
 
 _DIGEST_BYTES = 32
-
-
-def _digest_bytes(digest: str) -> bytes:
-    try:
-        raw = bytes.fromhex(digest)
-    except ValueError:
-        raw = b""
-    return (
-        raw if len(raw) == _DIGEST_BYTES else hashlib.sha256(digest.encode()).digest()
-    )
+# The most digests a set holds unpacked before a caller should compact it, and the
+# records merged between ticks of a compaction's pacer.
+PENDING_LIMIT = 65536
+_MERGED_PER_TICK = 4096
 
 
 class DigestSet:
     """An exact set of content digests, packed 32 bytes each.
 
     Digests added since the last ``compact`` wait in a small set; ``compact`` merges
-    them into one sorted run that lookups search.
+    them into one sorted run that lookups search, and ``full`` says when enough wait
+    that it should.
     """
 
     def __init__(self) -> None:
-        self._sorted = b""
+        self._sorted = bytearray()
         self._pending: set[bytes] = set()
 
     def add(self, digest: str) -> None:
-        if (raw := _digest_bytes(digest)) not in self:
+        if (raw := digest_bytes(digest)) not in self:
             self._pending.add(raw)
 
     def __contains__(self, item: str | bytes) -> bool:
-        raw = item if isinstance(item, bytes) else _digest_bytes(item)
+        raw = item if isinstance(item, bytes) else digest_bytes(item)
         if raw in self._pending:
             return True
         low, high = 0, len(self._sorted) // _DIGEST_BYTES
@@ -193,14 +196,31 @@ class DigestSet:
                 high = middle
         return False
 
-    def compact(self) -> None:
+    @property
+    def full(self) -> bool:
+        return len(self._pending) >= PENDING_LIMIT
+
+    def compact(self, tick: Callable[[], object] | None = None) -> None:
+        """Merge the waiting digests into the sorted run, calling ``tick`` between
+        stretches of the merge."""
         if not self._pending:
             return
-        records = [
-            self._sorted[at : at + _DIGEST_BYTES]
-            for at in range(0, len(self._sorted), _DIGEST_BYTES)
-        ]
-        self._sorted = b"".join(sorted([*records, *self._pending]))
+        packed = self._sorted
+        merged = bytearray()
+        for count, record in enumerate(
+            heapq.merge(
+                (
+                    packed[at : at + _DIGEST_BYTES]
+                    for at in range(0, len(packed), _DIGEST_BYTES)
+                ),
+                sorted(self._pending),
+            ),
+            1,
+        ):
+            merged += record
+            if tick is not None and count % _MERGED_PER_TICK == 0:
+                tick()
+        self._sorted = merged
         self._pending.clear()
 
     def __len__(self) -> int:
@@ -214,8 +234,11 @@ class DigestSet:
 __all__ = [
     "FALSE_POSITIVE_RATE",
     "MIN_CAPACITY",
+    "PENDING_LIMIT",
     "DigestSet",
     "Mark",
     "ScopeMark",
+    "digest_bytes",
     "digest_words",
+    "is_content_digest",
 ]

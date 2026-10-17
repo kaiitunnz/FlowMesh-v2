@@ -9,18 +9,18 @@ store against the mark.
 import logging
 import threading
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from typing import Self
 
 from opentelemetry.metrics import Meter
 
-from shared.content import ContentReference, ObjectStoreConfig
+from shared.content import ObjectStoreConfig
 
 from ..clients.redis import RedisClient
 from .audit import AuditTrail
 from .closures import READS_PER_PAUSE, Expansion, OpenContent, TreeClosures
 from .collector import SWEEP_INTERVAL_SEC, AuditCollector, SweepAudit
-from .marking import Marker
+from .marking import Marker, MarkPass
 from .pacing import DUTY, MIN_PAUSE_SEC, Pacer
 from .store_admin import Eligible, Ineligible, StoreAdmin, uploads_listing_complete
 
@@ -96,16 +96,14 @@ class ContentAuditService:
                 marked = self._marker.run(stop, self._capacities)
                 if marked.complete:
                     self._capacities = marked.mark.counts()
-                tree_gaps = self._expand(marked.tree_references(), stop)
+                tree_gaps = self._expand(marked, stop)
                 return self._collector.sweep(
                     eligible, marked, self._closures, tree_gaps, started, stop
                 )
 
-    def _expand(
-        self, trees: Iterable[ContentReference], stop: threading.Event
-    ) -> dict[str, str]:
-        """Read each bound tree not yet read; returns why each scope's trees are not
-        all known."""
+    def _expand(self, marked: MarkPass, stop: threading.Event) -> dict[str, str]:
+        """Read each tree ``marked`` binds that no earlier sweep read; returns why each
+        scope's trees are not all known."""
         pacer = Pacer(
             stop,
             self._reads_per_pause,
@@ -113,21 +111,26 @@ class ContentAuditService:
             min_pause_sec=self._min_pause,
         )
         gaps: dict[str, str] = {}
-        for tree in trees:
+        unavailable: set[tuple[str, str]] = set()
+        for tree in marked.tree_references():
+            scope, digest = tree.authorization_scope, tree.content_digest
             if pacer.tick():
-                gaps.setdefault(tree.authorization_scope, "the sweep stopped")
+                gaps.update(dict.fromkeys(marked.tree_scopes(), "the sweep stopped"))
+                break
+            if (scope, digest) in unavailable:
                 continue
             match self._closures.expand(tree, pacer):
                 case Expansion.EXPANDED:
                     continue
                 case Expansion.MALFORMED:
-                    why = f"bound tree {tree.content_digest} cannot be read as a tree"
+                    why = f"bound tree {digest} cannot be read as a tree"
                 case Expansion.UNAVAILABLE:
-                    why = f"bound tree {tree.content_digest} is unavailable now"
+                    unavailable.add((scope, digest))
+                    why = f"bound tree {digest} is unavailable now"
                 case Expansion.STOPPED:
                     why = "the sweep stopped"
-            gaps.setdefault(tree.authorization_scope, why)
-        self._closures.compact()
+            gaps.setdefault(scope, why)
+        self._closures.compact(pacer)
         return gaps
 
 

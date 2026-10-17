@@ -29,7 +29,7 @@ from fnmatch import translate
 from typing import Any, Self
 
 from pydantic import BaseModel, ValidationError
-from redis.exceptions import ResponseError
+from redis.exceptions import RedisError, ResponseError
 
 from shared.content import ContentReference, DigestAlgorithm
 from shared.content.tree import TREE_MEDIA_TYPE
@@ -45,7 +45,6 @@ from ..clients.redis import (
     workflow_ds_key,
     workflow_history_key,
     workflow_key,
-    workflow_sources_key,
 )
 from ..orchestration.ledger_layout import HISTORIES, KEYED, KEYED_TEXTS, META, SETS
 from ..registries.task_states import PersistedTask, load_context
@@ -58,7 +57,7 @@ from ..task.history import (
     output_index_field,
     output_member_field,
 )
-from .mark import Mark
+from .mark import Mark, digest_bytes, is_content_digest
 from .pacing import DUTY, MIN_PAUSE_SEC, Pacer
 from .references import model_bears, references_of
 
@@ -309,7 +308,7 @@ class MarkPass:
     _trees: dict[str, bytearray] = field(default_factory=lambda: defaultdict(bytearray))
 
     def add_tree(self, tree: ContentReference) -> None:
-        self._trees[tree.authorization_scope] += bytes.fromhex(
+        self._trees[tree.authorization_scope] += digest_bytes(
             tree.content_digest
         ) + tree.size_bytes.to_bytes(8, "big")
 
@@ -325,6 +324,10 @@ class MarkPass:
                     size_bytes=int.from_bytes(record[32:], "big"),
                     media_type=TREE_MEDIA_TYPE,
                 )
+
+    def tree_scopes(self) -> Iterable[str]:
+        """Every scope the pass found a bound tree in."""
+        return self._trees.keys()
 
     @property
     def trees_nbytes(self) -> int:
@@ -344,6 +347,22 @@ class MarkPass:
         return ""
 
 
+class _BlankSources(Mapping[str, str]):
+    """Stored sources that answer every digest with a blank source."""
+
+    def __getitem__(self, digest: str) -> str:
+        return ""
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(())
+
+    def __len__(self) -> int:
+        return 0
+
+
+_BLANK_SOURCE_CONTEXT = load_context(_BlankSources())
+
+
 class _Stopped(Exception):
     pass
 
@@ -355,7 +374,6 @@ class _Pass:
     def __init__(self, result: MarkPass, pacer: Pacer) -> None:
         self.result = result
         self.pacer = pacer
-        self.sources: dict[str, dict[str, str]] = defaultdict(dict)
         self.task_scopes: dict[str, str | None] = {}
         self.workflow_scopes: dict[str, str | None] = {}
 
@@ -413,7 +431,9 @@ class Marker:
                 min_pause_sec=self._min_pause,
             ),
         )
-        identity = self._rds.sync.server_identity()
+        identity = self._identity(result)
+        if result.interrupted:
+            return result
         try:
             cursor = 0
             while True:
@@ -439,13 +459,31 @@ class Marker:
         result.seconds = time.monotonic() - started
         return result
 
+    def _identity(self, result: MarkPass) -> str:
+        """The control store's server identity; one it cannot vouch by leaves
+        ``result`` interrupted."""
+        try:
+            identity = self._rds.sync.server_identity()
+        except RedisError as exc:
+            self._interrupt(
+                result, f"the control store's server identity cannot be read: {exc}"
+            )
+            return ""
+        if not identity.partition(":")[0]:
+            self._interrupt(result, "the control store reports no server identity")
+        return identity
+
     def _check_identity(self, identity: str, result: MarkPass) -> None:
-        if result.interrupted or self._rds.sync.server_identity() == identity:
+        if result.interrupted or self._identity(result) == identity:
             return
-        result.interrupted = (
-            "the control store restarted or another server took over mid-pass"
+        self._interrupt(
+            result, "the control store restarted or another server took over mid-pass"
         )
-        self._logger.warning("Content audit pass is incomplete: %s", result.interrupted)
+
+    def _interrupt(self, result: MarkPass, why: str) -> None:
+        if not result.interrupted:
+            result.interrupted = why
+            self._logger.warning("Content audit pass is incomplete: %s", why)
 
     def _get_many(self, keys: Sequence[str]) -> list[Any]:
         """Each key's value, or the error reading it raised."""
@@ -453,28 +491,6 @@ class Marker:
             for key in keys:
                 pipe.get(key)
             return pipe.execute(raise_on_error=False)
-
-    def _load_sources(self, wanted: Mapping[str, set[str]], state: _Pass) -> None:
-        """Read the stored sources the pass has not read yet that task states name."""
-        missing = [
-            (workflow_id, sorted(digests - state.sources[workflow_id].keys()))
-            for workflow_id, digests in wanted.items()
-        ]
-        missing = [
-            (workflow_id, digests) for workflow_id, digests in missing if digests
-        ]
-        if not missing:
-            return
-        with self._rds.sync.control_pipeline(transaction=False) as pipe:
-            for workflow_id, digests in missing:
-                pipe.hmget(workflow_sources_key(workflow_id), digests)
-            replies = pipe.execute()
-        for (workflow_id, digests), texts in zip(missing, replies, strict=True):
-            state.sources[workflow_id].update(
-                (digest, text)
-                for digest, text in zip(digests, texts, strict=True)
-                if text is not None
-            )
 
     def _task_scope(self, task_id: str, state: _Pass) -> str | None:
         if task_id not in state.task_scopes:
@@ -506,11 +522,14 @@ class Marker:
 
     def _key_scope(self, key: str, state: _Pass) -> str | None:
         """The scope of the task or workflow ``key`` belongs to, when it can be read."""
-        match _owner(key):
-            case ("task", task_id):
-                return self._task_scope(task_id, state)
-            case ("workflow", workflow_id):
-                return self._workflow_scope(workflow_id, state)
+        try:
+            match _owner(key):
+                case ("task", task_id):
+                    return self._task_scope(task_id, state)
+                case ("workflow", workflow_id):
+                    return self._workflow_scope(workflow_id, state)
+        except RedisError:
+            pass
         return None
 
     def _fault(self, key: str, label: str, exc: Exception, state: _Pass) -> None:
@@ -528,14 +547,26 @@ class Marker:
         )
         state.tick()
 
-    def _add(self, found: Found, state: _Pass) -> None:
+    def _add(self, key: str, found: Found, state: _Pass) -> None:
         for reference in found.references:
-            state.result.mark.add(
-                reference.authorization_scope, reference.content_digest
-            )
+            if self._checked(key, reference, state):
+                state.result.mark.add(
+                    reference.authorization_scope, reference.content_digest
+                )
         for tree in found.trees:
-            state.result.add_tree(tree)
+            if is_content_digest(tree.content_digest):
+                state.result.add_tree(tree)
+            elif tree not in found.references:
+                self._checked(key, tree, state)
         state.tick()
+
+    def _checked(self, key: str, reference: ContentReference, state: _Pass) -> bool:
+        """Whether ``reference`` names a content digest, faulting its scope if not."""
+        if is_content_digest(reference.content_digest):
+            return True
+        why = f"{reference.content_digest!r} is not a content digest"
+        self._fault(key, key, Undecodable(why, reference.authorization_scope), state)
+        return False
 
     def _hashes(
         self,
@@ -565,7 +596,7 @@ class Marker:
                     except Undecodable as exc:
                         self._fault(key, f"{key} field {name!r}", exc, state)
                         continue
-                    self._add(found, state)
+                    self._add(key, found, state)
                 if cursor == 0:
                     break
                 state.pause()
@@ -574,40 +605,22 @@ class Marker:
                 self._check_identity(identity, state.result)
 
     def _tasks(self, family: Family, keys: Sequence[str], state: _Pass) -> None:
-        """Decode task states or blueprints, which load under their workflow's stored
-        sources."""
-        loaded: list[tuple[str, str, Any]] = []
-        wanted: dict[str, set[str]] = defaultdict(set)
+        """Decode task states or blueprints. Their workflow source binds no content,
+        so they load with a blank one rather than the stored source."""
+        model: type[BaseModel] = (
+            TaskBlueprints if family is Family.BLUEPRINTS else PersistedTask
+        )
         for key, raw in zip(keys, self._get_many(keys), strict=True):
             if raw is None:
                 continue
             try:
                 if isinstance(raw, Exception):
                     raise raw
-                data = json.loads(raw)
-                records = data["tasks"] if family is Family.BLUEPRINTS else [data]
-                workflow_id = _workflow_of(records, key)
+                value = model.model_validate_json(raw, context=_BLANK_SOURCE_CONTEXT)
             except Exception as exc:
                 self._fault(key, key, exc, state)
                 continue
-            loaded.append((key, workflow_id, data))
-            for record in records:
-                if isinstance(digest := record.get("source_digest"), str):
-                    wanted[workflow_id].add(digest)
-            state.tick()
-        self._load_sources(wanted, state)
-        model: type[BaseModel] = (
-            TaskBlueprints if family is Family.BLUEPRINTS else PersistedTask
-        )
-        for key, workflow_id, data in loaded:
-            try:
-                value = model.model_validate(
-                    data, context=load_context(state.sources[workflow_id])
-                )
-            except ValidationError as exc:
-                self._fault(key, key, exc, state)
-                continue
-            self._add(Found.of(value), state)
+            self._add(key, Found.of(value), state)
 
     def _finalizations(self, keys: Sequence[str], state: _Pass) -> None:
         for key, raw in zip(keys, self._get_many(keys), strict=True):
@@ -620,22 +633,7 @@ class Marker:
             except Undecodable as exc:
                 self._fault(key, key, exc, state)
                 continue
-            self._add(found, state)
-
-
-def _workflow_of(records: Sequence[Any], key: str) -> str:
-    """The workflow the decoded task states of ``key`` belong to."""
-    if not records:
-        prefix = workflow_blueprints_key("\0").partition("\0")
-        if key.startswith(prefix[0]) and key.endswith(prefix[2]):
-            return key[len(prefix[0]) : len(key) - len(prefix[2])]
-        raise ValueError("a task state names no workflow")
-    workflow_ids = {record["record"]["workflow_id"] for record in records}
-    if len(workflow_ids) != 1 or not isinstance(
-        workflow_id := next(iter(workflow_ids)), str
-    ):
-        raise ValueError("task states name no single workflow")
-    return workflow_id
+            self._add(key, found, state)
 
 
 __all__ = [

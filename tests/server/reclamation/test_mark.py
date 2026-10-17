@@ -3,6 +3,10 @@ target false-positive rate, at its capacity hint and after growing past it."""
 
 import hashlib
 
+import pytest
+
+import server.reclamation.mark as mark_module
+
 from server.reclamation.mark import (
     FALSE_POSITIVE_RATE,
     MIN_CAPACITY,
@@ -10,6 +14,7 @@ from server.reclamation.mark import (
     Mark,
     ScopeMark,
     digest_words,
+    is_content_digest,
 )
 
 
@@ -48,14 +53,13 @@ def test_a_mark_grown_far_past_a_tiny_hint_stays_near_the_target() -> None:
     assert _false_positive_rate(mark) < 2 * FALSE_POSITIVE_RATE
 
 
-def test_a_digest_that_is_not_hex_is_marked_too() -> None:
-    mark = ScopeMark()
-    mark.add("not-hex")
-    mark.add("ab")
-
-    assert "not-hex" in mark and "ab" in mark
-    assert "not-hex-either" not in mark
-    assert digest_words("not-hex") != digest_words("ab")
+@pytest.mark.parametrize("digest", ["not-hex", "ab", "A" * 64, "a" * 62, "a" * 66])
+def test_only_a_lowercase_hex_sha256_digest_is_a_content_digest(digest: str) -> None:
+    assert not is_content_digest(digest)
+    with pytest.raises(ValueError):
+        ScopeMark().add(digest)
+    with pytest.raises(ValueError):
+        DigestSet().add(digest)
 
 
 def test_words_and_digests_name_the_same_entry() -> None:
@@ -116,3 +120,25 @@ def test_a_digest_set_holds_exactly_what_was_added_across_compactions() -> None:
     held.compact()
     assert all(digest in held for digest in digests)
     assert len(held) == 2000 and held.nbytes == 2000 * 32
+
+
+def test_a_digest_set_fills_at_its_limit_and_compacts_with_ticks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(mark_module, "PENDING_LIMIT", 3)
+    held = DigestSet()
+    digests = _digests("d", 10_000)
+    for digest in digests[:2]:
+        held.add(digest)
+    assert not held.full
+    held.add(digests[2])
+    assert held.full
+    held.compact()
+    for digest in digests[3:]:
+        held.add(digest)
+    ticks: list[None] = []
+
+    held.compact(lambda: ticks.append(None))
+
+    assert ticks and not held.full
+    assert all(digest in held for digest in digests) and len(held) == 10_000
