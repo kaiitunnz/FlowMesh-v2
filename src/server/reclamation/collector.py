@@ -112,7 +112,10 @@ class SweepAudit:
 
     @property
     def incomplete(self) -> int:
-        return sum(1 for scope in self.scopes if not scope.complete)
+        """Scopes the sweep could not complete, counting any it may have missed as
+        one."""
+        missed = 1 if self.error else 0
+        return missed + sum(1 for scope in self.scopes if not scope.complete)
 
 
 class AuditCollector:
@@ -172,8 +175,9 @@ class AuditCollector:
         self._open_upload_bytes = meter.create_gauge(
             "flowmesh.content.audit.open_upload_bytes",
             unit="By",
-            description="Bytes of parts open multipart uploads held at the last "
-            "audit, where the store's listing of them is complete.",
+            description="Bytes of parts the open multipart uploads it sized held at "
+            "the last audit, at most the first 1000, where the store's listing of "
+            "them is complete.",
         )
         self._uploads_known = meter.create_gauge(
             "flowmesh.content.audit.open_uploads_known",
@@ -184,8 +188,8 @@ class AuditCollector:
         self._incomplete = meter.create_gauge(
             "flowmesh.content.audit.incomplete_scopes",
             unit="{scope}",
-            description="Scopes whose coverage the last audit could not complete, so "
-            "it reported no unbound count for them.",
+            description="Scopes the last audit could not complete, reported without "
+            "an unbound count, plus one when it may have missed a scope.",
         )
         self._eligible = meter.create_gauge(
             "flowmesh.content.audit.eligible",
@@ -197,6 +201,12 @@ class AuditCollector:
             unit="By",
             description="Bytes the last audit's mark held, bound trees' members "
             "included.",
+        )
+        self._completed_at = meter.create_gauge(
+            "flowmesh.content.audit.completed_at",
+            unit="s",
+            description="When the last eligible audit finished, in seconds since the "
+            "epoch; the other gauges keep what it found until the next one.",
         )
         self._sweep_seconds = meter.create_gauge(
             "flowmesh.content.audit.sweep_seconds",
@@ -271,6 +281,7 @@ class AuditCollector:
             for page in admin.scopes(eligibility.listing):
                 scopes.update(page)
                 if pacer.tick():
+                    result.error = "the audit stopped before it found every scope"
                     break
         except Exception as exc:
             result.error = f"the store's scopes could not be listed: {exc}"
@@ -399,6 +410,7 @@ class AuditCollector:
         self._incomplete.set(result.incomplete)
         self._mark_bytes.set(result.mark_bytes)
         self._sweep_seconds.set(result.seconds)
+        self._completed_at.set(time.time())
         uploads = result.uploads or UploadAudit()
         self._uploads_known.set(1 if uploads.known else 0)
         if uploads.known:

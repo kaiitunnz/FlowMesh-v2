@@ -323,8 +323,22 @@ def test_a_sweep_that_cannot_find_the_scopes_still_reports(
 
     assert [s.scope for s in result.scopes] == [_A]
     assert "SlowDown" in result.error
+    assert result.incomplete == 1 and fx.gauges()["incomplete_scopes"] == 1
     (sweep,) = fx.audit("sweep")
     assert "SlowDown" in sweep["error"]
+
+
+def test_an_eligible_sweep_dates_its_gauges_and_an_ineligible_one_does_not(
+    fx,
+) -> None:
+    before = time.time()
+    fx.sweep()
+    assert before <= fx.gauges()["completed_at"] <= time.time()
+
+    fx.s3.fail.add("list_multipart_uploads")
+    fx.sweep()
+
+    assert fx.gauges() == {"eligible": 0}
 
 
 class _Waits(threading.Event):

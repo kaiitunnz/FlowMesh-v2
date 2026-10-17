@@ -122,7 +122,9 @@ A deployment with resident capacity disabled reports queue depth alone.
 
 With `CONTENT_AUDIT_ENABLED` the root also reports what its last content-store
 audit found, as gauges set once per audit. "Recent" means modified at or after an hour
-before the audit's mark started.
+before the audit's mark started. An audit of a store it cannot list sets only
+`eligible`, so the other gauges keep what the last eligible audit found, and
+`completed_at` dates it.
 
 | Gauge | Unit | Value |
 |-------|------|-------|
@@ -130,13 +132,14 @@ before the audit's mark started.
 | `flowmesh.content.audit.unbound_bytes` | `By` | Their bytes |
 | `flowmesh.content.audit.recent_unbound` | `{object}` | Stored objects unbound at scan, modified within the recent window |
 | `flowmesh.content.audit.recent_unbound_bytes` | `By` | Their bytes |
-| `flowmesh.content.audit.incomplete_scopes` | `{scope}` | Scopes with a binding or tree the audit could not read, reported without an unbound count |
+| `flowmesh.content.audit.incomplete_scopes` | `{scope}` | Scopes the audit could not complete, reported without an unbound count, plus one when it may have missed a scope |
 | `flowmesh.content.audit.open_uploads` | `{upload}` | Multipart uploads the store holds open, set only where its listing of them is complete |
-| `flowmesh.content.audit.open_upload_bytes` | `By` | Bytes of their parts, set likewise |
+| `flowmesh.content.audit.open_upload_bytes` | `By` | Bytes of the parts of the first 1,000 of them, set likewise |
 | `flowmesh.content.audit.open_uploads_known` | `1` | `1` when the store's listing of open uploads is complete, else `0` |
 | `flowmesh.content.audit.eligible` | `1` | `1` when the store can be audited, else `0` |
 | `flowmesh.content.audit.mark_bytes` | `By` | Memory the audit's mark holds |
 | `flowmesh.content.audit.sweep_seconds` | `s` | How long the last audit took |
+| `flowmesh.content.audit.completed_at` | `s` | When the last eligible audit finished, in seconds since the epoch |
 
 `GET /api/v1/system/metrics` is unchanged.
 
