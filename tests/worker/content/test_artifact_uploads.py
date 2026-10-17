@@ -32,7 +32,6 @@ class _Ports:
 
     def __init__(self) -> None:
         self.stored: list[tuple[str, str, bytes]] = []
-        self.successes: list[tuple[str, str]] = []
         self.reports: list[tuple[str, str, UploadReport, str | None]] = []
         self.outage = 0
         self.attempts = 0
@@ -66,11 +65,6 @@ class _Ports:
             return reference.model_copy(update={"size_bytes": 1})
         return reference
 
-    def resend(self, task_id: str, dispatch_id: str, metadata: dict[str, Any]) -> None:
-        with self.cv:
-            self.successes.append((task_id, dispatch_id))
-            self.cv.notify_all()
-
     def report(
         self, task_id: str, dispatch_id: str, report: UploadReport, error: str | None
     ) -> None:
@@ -100,7 +94,6 @@ def _uploader(
         alias,
         identity=lambda: (worker_id, 1),
         upload=ports.upload,
-        resend_success=ports.resend,
         report=ports.report,
         **kwargs,
     )
@@ -196,7 +189,7 @@ def test_unanswered_reports_are_sent_again_on_a_pace(tmp_path) -> None:
     ports.wait(lambda: len(ports.reports) == 1)
 
     _nudge(uploader, clock, RESEND_SEC + 1)
-    ports.wait(lambda: len(ports.reports) == 2 and ports.successes)
+    ports.wait(lambda: len(ports.reports) == 2)
 
     uploader.settle(_settled(UploadDisposition.DURABLE))
     _nudge(uploader, clock, RESEND_SEC + 1)

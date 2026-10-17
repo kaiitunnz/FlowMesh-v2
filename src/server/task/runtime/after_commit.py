@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from shared.schemas.command import InterruptMessage, RevokeMessage
 from shared.tasks.artifact_upload import UploadSettled
+from shared.tasks.publication import PublicationAnswer
 from shared.tools.contract import AgentModelTurnProposal
 
 from ..models import TaskRecord, TaskStatus
@@ -92,6 +93,21 @@ class UploadAck:
 
 
 @dataclass(frozen=True)
+class AnswerPublication:
+    """Tell the worker where one of its publications stands."""
+
+    worker_id: str
+    answer: PublicationAnswer
+
+
+@dataclass(frozen=True)
+class ReleaseHolds:
+    """Release the holds a publication took on the objects its commit binds."""
+
+    release: Callable[[], None]
+
+
+@dataclass(frozen=True)
 class TransferMultipart:
     """Move the multipart uploads a dispatch owns in a scope to the upload obligation
     its success left owed."""
@@ -111,6 +127,8 @@ type AfterCommit = (
     | AuthorizeTurn
     | UploadAck
     | TransferMultipart
+    | AnswerPublication
+    | ReleaseHolds
 )
 
 

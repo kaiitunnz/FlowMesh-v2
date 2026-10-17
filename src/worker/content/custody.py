@@ -127,7 +127,7 @@ class UploadJournal(BaseModel):
     alias: str
     worker_id: str
     incarnation: int
-    # The task the dispatch ran and the success it reported, re-sent until accepted.
+    # The task the dispatch ran and the success it reported.
     task_id: str
     success: dict[str, Any] = Field(default_factory=dict)
     tasks: dict[str, StagedTask] = Field(default_factory=dict)

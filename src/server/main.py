@@ -67,6 +67,8 @@ from .network.reverse_relay import (
 from .network.service import NetworkPlane
 from .orchestration.telemetry import build_workflow_span_emitter
 from .reclamation.multipart import MultipartRegistrations, MultipartStore
+from .reclamation.pins import PinStore
+from .reclamation.publications import PublicationHolds
 from .reclamation.service import start_reclamation
 from .registries import WorkerRegistry, WorkflowRegistry
 from .registries.node import NodeRegistry
@@ -488,6 +490,12 @@ if IS_ROOT_NODE:
         ),
         content_authority=CONTENT_AUTHORITY,
         content_access=CONTENT_ACCESS,
+        publication_holds=PublicationHolds(
+            PinStore(REDIS_CLIENT),
+            lambda: RUNTIME.nonces if RUNTIME else None,
+            RESULT_READER.backed,
+            logger,
+        ),
         multipart=MultipartRegistrations(
             MULTIPART_STORE, RUNTIME.multipart_owner, WORKER_REGISTRY, logger
         ),

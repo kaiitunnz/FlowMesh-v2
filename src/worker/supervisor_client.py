@@ -373,21 +373,21 @@ class SupervisorClient:
         )
         self._send_event(event)
 
-    def resend_task_succeeded(
-        self, task_id: str, dispatch_id: str, metadata: dict[str, Any]
+    def resend_task_event(
+        self, event_type: str, task_id: str, dispatch_id: str, payload: dict[str, Any]
     ) -> None:
-        """Report a dispatch's success again, after the task has left this worker.
+        """Report a dispatch's event again, as after its task has left this worker.
 
         It is repeated until control answers, so it is dropped while the stream is
         down.
         """
         self._offer_event(
             TaskEvent(
-                type="TASK_SUCCEEDED",
+                type=event_type,
                 worker_id=self.worker_id,
                 task_id=task_id,
                 dispatch_id=dispatch_id,
-                payload=metadata,
+                payload=payload,
             )
         )
 

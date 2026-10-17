@@ -28,6 +28,7 @@ from .supervisor_client import SupervisorClient
 
 if TYPE_CHECKING:
     from .content import WorkerContentPlane
+    from .content.publications import PublicationOutbox
     from .content.uploads import ArtifactUploader
     from .model_turn import ResponsesFacade
 
@@ -68,6 +69,9 @@ class Lifecycle:
         # The uploads of artifacts a success announced before the store had them,
         # owed until control settles each.
         self.artifact_uploads: ArtifactUploader | None = None
+        # The publications this registration reported and control has not answered for
+        # good, with copies of what they name.
+        self.publications: PublicationOutbox | None = None
         # The loopback endpoints this worker's executors published for relaying, and
         # the lane that serves relayed SSH connections against them.
         self.ssh_endpoints = SshEndpointRegistry()
@@ -114,6 +118,11 @@ class Lifecycle:
                 if (uploads := self.artifact_uploads) is not None
                 else None
             )
+            or (
+                outbox.dispatch_of(task_id)
+                if (outbox := self.publications) is not None
+                else None
+            )
         )
 
     def set_abandon_handler(self, abandon: Callable[[str | None], None]) -> None:
@@ -131,6 +140,8 @@ class Lifecycle:
         self.resident_requests.clear()
         if (uploads := self.artifact_uploads) is not None:
             uploads.rebind()
+        if (outbox := self.publications) is not None:
+            outbox.clear()
         if (plane := self.content_plane) is not None:
             plane.rebind(self.client.worker_id, self.client.incarnation)
 
@@ -176,6 +187,8 @@ class Lifecycle:
             power_summary = self.power_monitor.summary()
         except Exception:
             power_summary = None
+        if (outbox := self.publications) is not None:
+            metrics["owed_publications"] = outbox.owed()
         if power_summary:
             metrics["power_summary"] = power_summary
             energy_total = power_summary.get("estimated_energy_kwh")
@@ -365,10 +378,12 @@ class Lifecycle:
 
     def set_succeeded(self, task_id: str, metadata: dict[str, Any] | None = None):
         self._flush_holding()
+        dispatch_id = self.client.dispatch_id(task_id)
         try:
             self.client.task_succeeded(task_id, metadata=metadata)
         except Exception:
             pass
+        self._owe_publication("TASK_SUCCEEDED", task_id, dispatch_id, metadata)
 
     def set_cancelled(self, task_id: str, metadata: dict[str, Any] | None = None):
         self._flush_holding()
@@ -388,10 +403,24 @@ class Lifecycle:
             logger.warning("could not send the content holding", exc_info=True)
 
     def notify_task_update(self, task_id: str, payload: dict[str, Any]) -> None:
+        dispatch_id = self.client.dispatch_id(task_id)
         try:
             self.client.task_update(task_id, payload)
         except Exception:
             pass
+        self._owe_publication("TASK_UPDATE", task_id, dispatch_id, payload)
+
+    def _owe_publication(
+        self,
+        event_type: str,
+        task_id: str,
+        dispatch_id: str | None,
+        payload: dict[str, Any] | None,
+    ) -> None:
+        """Repeat a report naming stored objects until control answers it, whether or
+        not this first send of it got out."""
+        if (outbox := self.publications) is not None and payload:
+            outbox.reported(event_type, task_id, dispatch_id, payload)
 
     def notify_task_started(
         self,
@@ -429,15 +458,19 @@ class Lifecycle:
         self,
         plane: "WorkerContentPlane | None",
         uploads: "ArtifactUploader | None" = None,
+        publications: "PublicationOutbox | None" = None,
     ) -> None:
-        """Own the worker's content plane, and the artifact uploads it carries, from
-        here to shutdown."""
+        """Own the worker's content plane, and the artifact uploads and publications
+        it carries, from here to shutdown."""
         self.content_plane = plane
         self.artifact_uploads = uploads
+        self.publications = publications
         if plane is not None:
             plane.start()
         if uploads is not None:
             uploads.start()
+        if publications is not None:
+            publications.start()
 
     def start_ssh_relay(self, lane: SshRelayLane) -> None:
         """Own the worker's SSH relay lane from here to shutdown."""
@@ -466,6 +499,14 @@ class Lifecycle:
             try:
                 remaining = left()
                 self.artifact_uploads.stop(10.0 if remaining is None else remaining)
+            except Exception:
+                pass
+        if self.publications is not None:
+            try:
+                remaining = left()
+                self.publications.stop(
+                    2.0 if remaining is None else min(2.0, remaining)
+                )
             except Exception:
                 pass
         if self.content_plane is not None:

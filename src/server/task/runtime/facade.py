@@ -67,6 +67,13 @@ from shared.tasks.artifact_upload import (
     UploadSettled,
 )
 from shared.tasks.credentials import set_spec_values
+from shared.tasks.publication import (
+    PUBLICATION_FRAME_KIND,
+    Publication,
+    PublicationAnswer,
+    PublicationDisposition,
+    PublicationKind,
+)
 from shared.tasks.result_binding import ResultBinding, ResultElementRef
 from shared.tasks.specs import ModelBindingMode, TaskSpecBase
 from shared.telemetry.config import TelemetryConfig
@@ -104,6 +111,7 @@ from ...orchestration.tool_dispatch import (
     ToolOutcomeStatus,
 )
 from ...reclamation.multipart import MultipartOwner, MultipartStore
+from ...reclamation.pins import Nonces
 from ...registries.history import HistoryPublication, StoredTask
 from ...registries.worker import Worker, WorkerRegistry
 from ...registries.workflow import (
@@ -209,12 +217,14 @@ from . import (
 from .after_commit import (
     AfterCommit,
     AfterCommitActions,
+    AnswerPublication,
     AuthorizeTurn,
     CreditRelease,
     Interrupt,
     Issue,
     Purge,
     Reap,
+    ReleaseHolds,
     Revoke,
     Settled,
     TransferMultipart,
@@ -647,6 +657,7 @@ class TaskRuntime:
         self._committer.on_fenced = self._on_fenced
         # What stops this root once a later root took the epoch; the server wires it.
         self.on_fenced: Callable[[], None] | None = None
+        self._nonces: Nonces | None = None
         self._occurrences = OccurrenceMaterializer(
             self._tasks, self._original_deps, self._committer
         )
@@ -1069,6 +1080,11 @@ class TaskRuntime:
         """The root epoch this runtime commits asserted state under."""
         return self._committer.epoch
 
+    @property
+    def nonces(self) -> Nonces | None:
+        """The acquisition nonces of the root epoch this runtime holds."""
+        return self._nonces
+
     def _on_fenced(self, exc: Exception) -> None:
         if self.on_fenced is not None:
             self.on_fenced()
@@ -1076,16 +1092,19 @@ class TaskRuntime:
     async def claim_root_epoch_async(self) -> int:
         """Take a new root epoch for this runtime's guarded commits."""
         epoch = await self._workflow_registry.claim_root_epoch_async()
-        with self._lock:
-            self._committer.epoch = epoch
+        self._hold_epoch(epoch)
         return epoch
 
     def claim_root_epoch(self) -> int:
         """Take a new root epoch as ``claim_root_epoch_async`` does."""
         epoch = self._workflow_registry.claim_root_epoch()
+        self._hold_epoch(epoch)
+        return epoch
+
+    def _hold_epoch(self, epoch: int) -> None:
         with self._lock:
             self._committer.epoch = epoch
-        return epoch
+            self._nonces = Nonces(epoch)
 
     def _scratch_runtime(self) -> "TaskRuntime":
         """A runtime over the same store that restores workflows and delivers
@@ -2092,6 +2111,10 @@ class TaskRuntime:
                     self._multipart.transfer(
                         scope, dispatch_id, MultipartOwner.upload(dispatch_id)
                     )
+            case AnswerPublication(answer=answer):
+                self.send_publication_answer(answer)
+            case ReleaseHolds(release=release):
+                release()
         return True
 
     def send_upload_settled(self, worker_id: str, settled: UploadSettled) -> None:
@@ -5362,6 +5385,103 @@ class TaskRuntime:
             return record is not None and self._fence.holds_dispatch_locked(
                 record, worker_id, dispatch_id
             )
+
+    def binding_workflow(
+        self, task_id: str, worker_id: str, dispatch_id: str | None
+    ) -> str | None:
+        """Return the workflow of a task whose report from ``worker_id`` may bind what
+        it names: its dispatch holds the task, which is still running. None when the
+        report binds nothing new, as when it is stale or its task is settling.
+
+        It reads only; the report's own handling records an early dispatch.
+        """
+        with self._lock:
+            record = self._reported_record_locked(task_id)
+            if (
+                record is None
+                or record.status in SETTLING_TASK_STATUSES
+                or not self._fence.holds_dispatch_locked(record, worker_id, dispatch_id)
+            ):
+                return None
+            return record.workflow_id
+
+    def assert_publication(self, task_id: str) -> None:
+        """Commit the task's workflow under the root epoch until a write carrying what
+        the publication about to apply binds lands."""
+        with self._lock:
+            if (record := self._tasks.get(task_id)) is not None:
+                self._committer.assert_locked(record.workflow_id)
+
+    def answer_publication(
+        self,
+        task_id: str,
+        publication: Publication,
+        release: Callable[[], None] | None = None,
+    ) -> None:
+        """Answer a publication from what its task's state now binds, and release its
+        holds, once that state is durable."""
+        with self._transition():
+            record = self._tasks.get(task_id)
+            disposition, reason = self._publication_standing_locked(record, publication)
+            answer = AnswerPublication(
+                publication.registration,
+                PublicationAnswer(
+                    publication=publication, disposition=disposition, reason=reason
+                ),
+            )
+            self._file_locked(
+                task_id, answer, ReleaseHolds(release) if release is not None else None
+            )
+
+    def _publication_standing_locked(
+        self, record: TaskRecord | None, publication: Publication
+    ) -> tuple[PublicationDisposition, str | None]:
+        if record is None:
+            return PublicationDisposition.REJECTED, "the task is not held"
+        match publication.kind:
+            case PublicationKind.RESULT:
+                bound = record.internal.result_reference
+                if record.status == TaskStatus.DONE and (
+                    bound is not None and bound.content_digest == publication.candidate
+                ):
+                    return PublicationDisposition.COMMITTED, None
+            case PublicationKind.CHECKPOINT:
+                revision, _, name = publication.key.partition("/")
+                binding = record.internal.runtime.artifacts.get((revision, name))
+                if binding is not None and (
+                    binding.reference.content_digest == publication.candidate
+                ):
+                    return PublicationDisposition.COMMITTED, None
+            case PublicationKind.PREPARED:
+                engine = self._engines.get(record.workflow_id)
+                standing = engine.input_resolution(record.task_id) if engine else None
+                if (
+                    standing is not None
+                    and standing.reference is not None
+                    and standing.reference.content_digest == publication.candidate
+                ):
+                    return PublicationDisposition.COMMITTED, None
+        return PublicationDisposition.REJECTED, f"the task is {record.status}"
+
+    def send_publication_answer(self, answer: PublicationAnswer) -> None:
+        """Tell a worker where a publication stands now; an unregistered worker hears
+        nothing."""
+        worker = self._worker_registry.get_worker(answer.publication.registration)
+        if worker is None:
+            return
+        self._worker_registry.publish_mediated_op(
+            worker,
+            MediatedOpMessage(
+                worker_id=worker.id,
+                frame_kind=PUBLICATION_FRAME_KIND,
+                payload=answer.model_dump(mode="json"),
+            ),
+        )
+
+    def file_hold_release(self, task_id: str, release: Callable[[], None]) -> None:
+        """Release a publication's holds once its task's workflow is durable."""
+        with self._transition():
+            self._file_locked(task_id, ReleaseHolds(release))
 
     def begin_publish(
         self,

@@ -363,7 +363,6 @@ def _run_staged(
         "w1",
         identity=lambda: ("wrk-test", 1),
         upload=MagicMock(),
-        resend_success=MagicMock(),
         report=MagicMock(),
     )
     lifecycle = MagicMock()
@@ -375,6 +374,7 @@ def _run_staged(
     lifecycle.client.next_mediated_op.side_effect = no_mediated_op
     lifecycle.content_plane = _Plane(store)
     lifecycle.artifact_uploads = uploads
+    lifecycle.publications = None
     owed_at_success: list[list[UploadJournal]] = []
     lifecycle.set_succeeded.side_effect = lambda *_, **__: owed_at_success.append(
         list(custody.journals())
