@@ -142,26 +142,26 @@ class AuditCollector:
         self._unbound = meter.create_gauge(
             "flowmesh.content.audit.unbound",
             unit="{object}",
-            description="Stored content objects no binding named at the last audit, "
-            "past the recent window.",
+            description="Stored objects unbound at scan, modified before the recent "
+            "window.",
         )
         self._unbound_bytes = meter.create_gauge(
             "flowmesh.content.audit.unbound_bytes",
             unit="By",
-            description="Bytes of stored content objects no binding named at the last "
-            "audit, past the recent window.",
+            description="Bytes of stored objects unbound at scan, modified before the "
+            "recent window.",
         )
         self._recent_unbound = meter.create_gauge(
             "flowmesh.content.audit.recent_unbound",
             unit="{object}",
-            description="Stored content objects no binding named at the last audit, "
-            "modified at or after an hour before its mark started.",
+            description="Stored objects unbound at scan, modified within the recent "
+            "window.",
         )
         self._recent_unbound_bytes = meter.create_gauge(
             "flowmesh.content.audit.recent_unbound_bytes",
             unit="By",
-            description="Bytes of stored content objects no binding named at the last "
-            "audit, modified at or after an hour before its mark started.",
+            description="Bytes of stored objects unbound at scan, modified within the "
+            "recent window.",
         )
         self._open_uploads = meter.create_gauge(
             "flowmesh.content.audit.open_uploads",
