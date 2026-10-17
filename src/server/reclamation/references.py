@@ -7,6 +7,7 @@ decision as dotted paths, the inventory a test pins every reference-bearing fiel
 against.
 """
 
+import threading
 import types
 import typing
 from collections.abc import Iterable, Iterator, Mapping
@@ -48,28 +49,70 @@ def _members(annotation: Any) -> list[tuple[str, Any]]:
     return []
 
 
-_IN_PROGRESS: set[type] = set()
+_BEARING: dict[type[BaseModel], bool] = {}
+_BEARING_LOCK = threading.Lock()
 
 
-@cache
-def _model_bears(model: type[BaseModel]) -> bool:
-    """Whether any field of ``model`` can hold a reference; a model reached again
-    while it is being decided contributes nothing new."""
-    _IN_PROGRESS.add(model)
-    try:
-        return any(_bears(info.annotation) for info in model.model_fields.values())
-    finally:
-        _IN_PROGRESS.discard(model)
-
-
-def _bears(annotation: Any) -> bool:
+def _scan(annotation: Any, models: set[type[BaseModel]]) -> bool:
+    """Whether ``annotation`` holds a reference other than through a model, adding
+    each model it holds a value of to ``models``."""
     annotation = _unwrap(annotation)
     if isinstance(annotation, type):
         if issubclass(annotation, ContentReference):
             return True
         if issubclass(annotation, BaseModel):
-            return annotation not in _IN_PROGRESS and _model_bears(annotation)
-    return any(_bears(arg) for _, arg in _members(annotation))
+            models.add(annotation)
+            return False
+    direct = False
+    for _, arg in _members(annotation):
+        direct = _scan(arg, models) or direct
+    return direct
+
+
+def _decide(root: type[BaseModel]) -> dict[type[BaseModel], bool]:
+    """Decide every model reachable from ``root`` and not decided yet: a model bears
+    references when one is reachable from its fields, through any cycle."""
+    direct: dict[type[BaseModel], bool] = {}
+    nested: dict[type[BaseModel], set[type[BaseModel]]] = {}
+    pending = [root]
+    while pending:
+        model = pending.pop()
+        if model in nested or model in _BEARING:
+            continue
+        reached: set[type[BaseModel]] = set()
+        direct[model] = False
+        for info in model.model_fields.values():
+            direct[model] = _scan(info.annotation, reached) or direct[model]
+        nested[model] = reached
+        pending.extend(reached)
+    bearing = {
+        model
+        for model, reached in nested.items()
+        if direct[model] or any(_BEARING.get(other, False) for other in reached)
+    }
+    grew = True
+    while grew:
+        grew = False
+        for model, reached in nested.items():
+            if model not in bearing and not bearing.isdisjoint(reached):
+                bearing.add(model)
+                grew = True
+    return {model: model in bearing for model in nested}
+
+
+def _model_bears(model: type[BaseModel]) -> bool:
+    """Whether any field of ``model`` can hold a reference."""
+    if (known := _BEARING.get(model)) is not None:
+        return known
+    with _BEARING_LOCK:
+        if model not in _BEARING:
+            _BEARING.update(_decide(model))
+        return _BEARING[model]
+
+
+def _bears(annotation: Any) -> bool:
+    models: set[type[BaseModel]] = set()
+    return _scan(annotation, models) or any(_model_bears(m) for m in models)
 
 
 @cache
