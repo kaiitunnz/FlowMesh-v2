@@ -130,6 +130,7 @@ from ..artifact_durability import (
     ArtifactUpload,
     EarlyUploadReceipt,
     UploadStateUnavailable,
+    binding_key,
     lost_read,
 )
 from ..credentials import (
@@ -659,6 +660,12 @@ class TaskRuntime:
         # What stops this root once a later root took the epoch; the server wires it.
         self.on_fenced: Callable[[], None] | None = None
         self._nonces: Nonces | None = None
+        # The staged trees of each task whose members are still being protected, the
+        # upload settlements that wait for them, and the artifacts a tree that turned
+        # out not to be one loses.
+        self._expanding: dict[str, set[str]] = {}
+        self._deferred_settles: dict[str, dict[str, ArtifactLoss]] = {}
+        self._expansion_losses: dict[str, dict[str, ArtifactLoss]] = {}
         self._occurrences = OccurrenceMaterializer(
             self._tasks, self._original_deps, self._committer
         )
@@ -4184,7 +4191,14 @@ class TaskRuntime:
     def _settle_upload_locked(
         self, record: TaskRecord, lost: dict[str, ArtifactLoss]
     ) -> None:
-        """Settle a task's owed upload, durable or with what it lost, and act on it."""
+        """Settle a task's owed upload, durable or with what it lost, and act on it.
+
+        While a tree it uploads is still being expanded, the settlement waits for it.
+        """
+        if self._expanding.get(record.task_id):
+            self._deferred_settles[record.task_id] = lost
+            return
+        lost = {**lost, **self._expansion_losses.pop(record.task_id, {})}
         record_internal = record.internal
         upload = record_internal.artifact_upload
         assert upload is not None and upload.pending
@@ -5447,13 +5461,28 @@ class TaskRuntime:
         self,
         task_id: str,
         publication: Publication,
-        release: Callable[[], None] | None = None,
+        finish: Callable[[frozenset[str]], None] | None = None,
+        staged_trees: Collection[str] = (),
     ) -> None:
-        """Answer a publication from what its task's state now binds, and release its
-        holds, once that state is durable."""
+        """Answer a publication from what its task's state now binds, and finish its
+        holds, once that state is durable.
+
+        ``finish`` hears the tree manifests the task's catalog binds when the
+        publication is committed, and none otherwise. Of the ``staged_trees`` it binds,
+        each holds the task's upload short of durable until its members are protected.
+        """
         with self._transition():
             record = self._tasks.get(task_id)
             disposition, reason = self._publication_standing_locked(record, publication)
+            bound: frozenset[str] = frozenset()
+            if record is not None and disposition is PublicationDisposition.COMMITTED:
+                bound = frozenset(
+                    binding.reference.content_digest
+                    for binding in record.internal.runtime.artifacts.values()
+                    if binding.kind is not ArtifactKind.FILE
+                )
+                if expanding := bound.intersection(staged_trees):
+                    self._expanding.setdefault(task_id, set()).update(expanding)
             answer = AnswerPublication(
                 publication.registration,
                 PublicationAnswer(
@@ -5461,8 +5490,63 @@ class TaskRuntime:
                 ),
             )
             self._file_locked(
-                task_id, answer, ReleaseHolds(release) if release is not None else None
+                task_id,
+                answer,
+                (ReleaseHolds(lambda: finish(bound)) if finish is not None else None),
             )
+
+    def expanding_trees(self, task_id: str, manifests: Collection[str]) -> None:
+        """Hold the task's upload short of durable until each of ``manifests`` is
+        expanded."""
+        with self._lock:
+            if manifests:
+                self._expanding.setdefault(task_id, set()).update(manifests)
+
+    def staged_trees(self) -> list[tuple[str, ContentReference]]:
+        """Return each tree of a task whose upload is still owed, by task."""
+        with self._lock:
+            return [
+                (record.task_id, binding.reference)
+                for record in self._tasks.values()
+                if (upload := record.internal.artifact_upload) is not None
+                and upload.pending
+                for binding in record.internal.runtime.artifacts.values()
+                if binding.kind is ArtifactKind.TREE
+                and binding.revision == FINAL_REVISION
+            ]
+
+    def tree_expanded(
+        self, task_id: str, manifest: str, failure: str | None = None
+    ) -> None:
+        """Record that a staged tree's members are protected, or that its stored
+        manifest is not a tree, which loses the artifacts it backs; settles an
+        upload that waited for it."""
+        with self._transition():
+            waiting = self._expanding.get(task_id)
+            if waiting is not None:
+                waiting.discard(manifest)
+            record = self._tasks.get(task_id)
+            if failure is not None and record is not None:
+                losses = self._expansion_losses.setdefault(task_id, {})
+                for binding in record.internal.runtime.artifacts.values():
+                    if (
+                        binding.kind is not ArtifactKind.FILE
+                        and binding.reference.content_digest == manifest
+                    ):
+                        losses[binding_key(binding)] = ArtifactLoss(
+                            message=f"its tree manifest is not a tree: {failure}"
+                        )
+            if waiting:
+                return
+            self._expanding.pop(task_id, None)
+            deferred = self._deferred_settles.pop(task_id, None)
+            if (
+                deferred is not None
+                and record is not None
+                and (upload := record.internal.artifact_upload) is not None
+                and upload.pending
+            ):
+                self._settle_upload_locked(record, deferred)
 
     def _publication_standing_locked(
         self, record: TaskRecord | None, publication: Publication

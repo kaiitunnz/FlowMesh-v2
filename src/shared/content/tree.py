@@ -8,8 +8,9 @@ one way — so the same files always name the same tree.
 """
 
 import bisect
+import codecs
 import json
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from operator import attrgetter
 from typing import Self
@@ -120,6 +121,73 @@ class TreeManifest:
         return manifest
 
 
+_PREFIX = f'{{"schema":{_SCHEMA},"members":['
+_DECODER = json.JSONDecoder()
+
+
+def iter_members(chunks: Iterable[bytes]) -> Iterator[TreeMember]:
+    """Yield the members of a manifest's canonical encoding as its bytes stream in,
+    refusing what ``TreeManifest.decode`` refuses, holding one window of text and one
+    member at a time.
+
+    Only the encoding ``TreeManifest.encode`` writes is read; a caller verifying the
+    bytes by digest learns of a corrupt manifest only once the stream ends, so it acts
+    on no member as settled before then.
+    """
+    text = codecs.getincrementaldecoder("utf-8")()
+    buffer = ""
+    pos = 0
+    started = ended = False
+    previous: str | None = None
+    for chunk in chunks:
+        buffer = buffer[pos:] + text.decode(chunk)
+        pos = 0
+        if not started:
+            if len(buffer) < len(_PREFIX):
+                continue
+            if not buffer.startswith(_PREFIX):
+                raise TreeManifestError("tree manifest has an unknown schema")
+            pos, started = len(_PREFIX), True
+        while not ended:
+            if pos >= len(buffer):
+                break
+            if buffer[pos] == "]":
+                if previous is None and buffer[pos - 1] == ",":
+                    raise TreeManifestError("malformed tree member list")
+                ended = True
+                pos += 1
+                break
+            if previous is not None:
+                if buffer[pos] != ",":
+                    raise TreeManifestError("malformed tree member list")
+                if pos + 1 >= len(buffer):
+                    break
+                start = pos + 1
+            else:
+                start = pos
+            try:
+                entry, end = _DECODER.raw_decode(buffer, start)
+            except json.JSONDecodeError:
+                # An entry the window cuts off completes with the next chunk.
+                break
+            match entry:
+                case [str() as path, str() as digest, int() as size]:
+                    member = TreeMember(path, digest, size)
+                case _:
+                    raise TreeManifestError(f"malformed tree member {entry!r}")
+            _check_member(member)
+            if previous is not None and path <= previous:
+                raise TreeManifestError(
+                    f"tree member {path!r} is repeated or out of path order"
+                )
+            previous = path
+            pos = end
+            yield member
+    buffer = buffer[pos:] + text.decode(b"", final=True)
+    if not started or not ended or buffer != "}":
+        raise TreeManifestError("tree manifest is truncated or has trailing bytes")
+
+
 def _check_member(member: TreeMember) -> None:
     if not is_member_path(member.path):
         raise TreeManifestError(f"tree member path {member.path!r} is not plain")
@@ -135,4 +203,5 @@ __all__ = [
     "TreeManifestError",
     "TreeMember",
     "is_member_path",
+    "iter_members",
 ]

@@ -30,8 +30,6 @@ from shared.content.reference import OCTET_STREAM
 from shared.content.store import STREAM_CHUNK_BYTES, FabricObjectStore
 from shared.tasks.publication import (
     BUSY_REASON,
-    CHECKPOINT_FIELD,
-    PREPARED_FIELD,
     Publication,
     PublicationAnswer,
     PublicationDisposition,
@@ -65,7 +63,6 @@ class _Entry:
     event_type: str
     task_id: str
     payload: dict[str, Any]
-    named: set[str]
     due: float
     backoff: float = _RETRY_MIN_SEC
     # Objects control asked to be stored again before the next report.
@@ -77,36 +74,6 @@ class _Dispatch:
     entries: dict[tuple[str, str], _Entry] = field(default_factory=dict)
     kept: dict[str, dict[str, Any]] = field(default_factory=dict)
     ended: bool = False
-
-
-def named_digests(event_type: str, payload: dict[str, Any]) -> set[str]:
-    """Return the digests of the objects a report names."""
-    named: set[str] = set()
-
-    def add(raw: Any) -> None:
-        if isinstance(raw, dict) and isinstance(raw.get("content_digest"), str):
-            named.add(raw["content_digest"])
-
-    def add_bindings(raw: Any) -> None:
-        for item in raw if isinstance(raw, list) else ():
-            if isinstance(item, dict):
-                add(item.get("reference"))
-
-    if event_type == "TASK_UPDATE":
-        add_bindings(payload.get(CHECKPOINT_FIELD))
-        return named
-    if isinstance(prepared := payload.get(PREPARED_FIELD), dict):
-        add(prepared.get("reference"))
-        return named
-    add(payload.get("result_reference"))
-    children = payload.get("child_result_references")
-    for raw in children.values() if isinstance(children, dict) else ():
-        add(raw)
-    add_bindings(payload.get("artifacts"))
-    child_artifacts = payload.get("child_artifacts")
-    for raw in child_artifacts.values() if isinstance(child_artifacts, dict) else ():
-        add_bindings(raw)
-    return named
 
 
 class PublicationOutbox:
@@ -267,7 +234,6 @@ class PublicationOutbox:
                 event_type,
                 task_id,
                 payload,
-                named_digests(event_type, payload),
                 self._clock() + RESEND_SEC,
             )
             self._cv.notify_all()
@@ -379,7 +345,7 @@ class PublicationOutbox:
             kept = dict(dispatch.kept) if dispatch is not None else {}
         for digest in entry.restore:
             facts = kept.get(digest)
-            if facts is None or digest not in entry.named:
+            if facts is None:
                 self._logger.error(
                     "Publication %s of %s names %s, which this worker did not keep",
                     entry.publication.key,
@@ -494,4 +460,4 @@ class _KeepingStore(FabricObjectStore):
         return self._inner.open_range(reference, start, length, chunk_bytes=chunk_bytes)
 
 
-__all__ = ["PUBLICATIONS_DIR", "PublicationOutbox", "named_digests"]
+__all__ = ["PUBLICATIONS_DIR", "PublicationOutbox"]

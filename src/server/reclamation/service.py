@@ -35,7 +35,9 @@ class ReclamationService:
         logger: logging.Logger,
         *,
         interval_sec: float = SWEEP_INTERVAL_SEC,
+        expand_trees: Callable[[threading.Event], None] | None = None,
     ) -> None:
+        self._expand_trees = expand_trees
         self._epoch = epoch
         self._backfill = backfill
         self._collector = collector
@@ -51,6 +53,7 @@ class ReclamationService:
         epoch: Callable[[], int | None],
         logger: logging.Logger,
         meter: Meter | None = None,
+        expand_trees: Callable[[threading.Event], None] | None = None,
     ) -> "ReclamationService":
         coverage = CoverageStore(rds, FAMILIES)
         audit = AuditTrail(rds)
@@ -62,6 +65,7 @@ class ReclamationService:
             ),
             coverage,
             logger,
+            expand_trees=expand_trees,
         )
 
     def run(self, stop: threading.Event) -> None:
@@ -92,6 +96,8 @@ class ReclamationService:
                 )
                 return
             try:
+                if self._expand_trees is not None:
+                    self._expand_trees(stop)
                 self._collector.sweep(stop)
             except Exception:
                 self._logger.warning(
@@ -110,11 +116,15 @@ def start_reclamation(
     logger: logging.Logger,
     stop: threading.Event,
     meter: Meter | None = None,
+    expand_trees: Callable[[threading.Event], None] | None = None,
 ) -> threading.Thread | None:
-    """Start the reclamation service's thread when ``enabled``; returns it, or None."""
+    """Start the reclamation service's thread when ``enabled``; returns it, or None.
+
+    ``expand_trees`` protects the members of bound trees before each sweep.
+    """
     if not enabled:
         return None
-    service = ReclamationService.build(rds, store, epoch, logger, meter)
+    service = ReclamationService.build(rds, store, epoch, logger, meter, expand_trees)
     thread = threading.Thread(
         target=service.run, args=(stop,), name="content-reclamation", daemon=True
     )

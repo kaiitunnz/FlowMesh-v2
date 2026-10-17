@@ -837,3 +837,34 @@ def test_unregistering_a_workflow_drops_its_owed_uploads(use_async: bool) -> Non
         setup.registry.unregister_workflows(setup.workflow_id)
 
     assert not raw_control(setup.registry).exists(uploads)
+
+
+def test_an_upload_waits_for_its_staged_tree_to_be_expanded() -> None:
+    setup = _dispatched()
+    tree = setup.tree(stored=True)
+    setup.succeed([tree])
+    setup.runtime.expanding_trees(setup.train, [tree.reference.content_digest])
+    setup.report(UploadReport.UPLOADED)
+    assert setup.status()[1] == 1
+    assert setup.workers.answers(setup.train) == [UploadDisposition.PENDING]
+
+    setup.runtime.tree_expanded(setup.train, tree.reference.content_digest)
+    assert setup.status()[1] == 0
+    upload = setup.record(setup.train).internal.artifact_upload
+    assert upload is not None and upload.state is ArtifactDurability.DURABLE
+
+
+def test_a_staged_tree_that_is_not_one_is_lost_and_its_task_stays_done() -> None:
+    setup = _dispatched()
+    tree = setup.tree(stored=True)
+    setup.succeed([tree])
+    setup.runtime.expanding_trees(setup.train, [tree.reference.content_digest])
+    setup.runtime.tree_expanded(
+        setup.train, tree.reference.content_digest, "malformed member list"
+    )
+    setup.report(UploadReport.UPLOADED)
+    record = setup.record(setup.train)
+    assert record.status == TaskStatus.DONE
+    upload = record.internal.artifact_upload
+    assert upload is not None and upload.state is ArtifactDurability.LOST
+    assert "artifact_lost" in (setup.status()[2] or "")

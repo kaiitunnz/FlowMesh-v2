@@ -12,11 +12,13 @@ import logging
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any
 
 from pydantic import ValidationError
 
 from shared.content import ContentReference
+from shared.content.tree import TreeMember
 from shared.tasks.artifact_binding import ArtifactBinding, ArtifactKind
 from shared.tasks.artifact_upload import ARTIFACTS_PENDING
 from shared.tasks.publication import (
@@ -26,6 +28,7 @@ from shared.tasks.publication import (
 )
 
 from .pins import AcquireMode, Nonces, PinStore, Verdict
+from .trees import TreeExpander, TreeOutcome, TreeStatus
 
 # How many times one publication re-verifies objects whose retirement revision moved
 # while it verified them.
@@ -45,6 +48,9 @@ class Assertion:
     manifests: dict[str, set[str]] = field(default_factory=lambda: defaultdict(set))
     """Tree manifests whose members are protected once the tree is expanded."""
     references: dict[tuple[str, str], ContentReference] = field(default_factory=dict)
+    trees: dict[tuple[str, str], bool] = field(default_factory=dict)
+    """Each tree manifest, and whether its members are stored before the report
+    (write-through) rather than uploaded after it."""
 
     def add(self, reference: ContentReference, mode: AcquireMode) -> None:
         scope, digest = reference.authorization_scope, reference.content_digest
@@ -61,7 +67,16 @@ class Assertion:
         # after it.
         self.add(binding.reference, AcquireMode.BIND)
         reference = binding.reference
-        self.manifests[reference.authorization_scope].add(reference.content_digest)
+        key = (reference.authorization_scope, reference.content_digest)
+        self.manifests[key[0]].add(key[1])
+        self.trees[key] = self.trees.get(key, False) or not staged
+
+    def tree_references(self, written_through: bool) -> list[ContentReference]:
+        return [
+            self.references[key]
+            for key, through in sorted(self.trees.items())
+            if through is written_through
+        ]
 
     def __bool__(self) -> bool:
         return bool(self.references)
@@ -84,6 +99,12 @@ def _bindings(raw: Any) -> list[ArtifactBinding]:
         except ValidationError:
             continue
     return bindings
+
+
+def _reference_in(
+    references: dict[tuple[str, str], ContentReference], scope: str, digest: str
+) -> ContentReference:
+    return references[(scope, digest)]
 
 
 def assertion_of(event_type: str, payload: dict[str, Any]) -> Assertion:
@@ -121,9 +142,13 @@ class Holds:
 
     nonce: str
     held: dict[str, tuple[str, ...]]
+    trees: list[ContentReference] = field(default_factory=list)
+    """Write-through trees whose members this acquisition holds."""
+    staged: list[ContentReference] = field(default_factory=list)
+    """Trees whose members are protected once their binding is durable."""
 
     def __bool__(self) -> bool:
-        return any(self.held.values())
+        return any(self.held.values()) or bool(self.trees) or bool(self.staged)
 
 
 @dataclass(frozen=True)
@@ -135,10 +160,13 @@ class Preparation:
     refusal: PublicationDisposition | None = None
     reason: str | None = None
     digests: tuple[str, ...] = ()
+    malformed: bool = False
+    """It names a tree whose stored manifest is not a well-formed tree."""
 
 
 class PublicationHolds:
-    """Holds a publication's objects for the commit binding them."""
+    """Holds a publication's objects for the commit binding them, and protects the
+    members of the trees it binds once that commit is durable."""
 
     def __init__(
         self,
@@ -146,14 +174,17 @@ class PublicationHolds:
         nonces: Callable[[], Nonces | None],
         backed: Backed,
         logger: logging.Logger | None = None,
+        trees: TreeExpander | None = None,
     ) -> None:
         self._pins = pins
         self._nonces = nonces
         self._backed = backed
         self._logger = logger or logging.getLogger("publication-holds")
+        self._trees = trees
 
     def acquire(self, assertion: Assertion, locator: dict[str, Any]) -> Preparation:
-        """Hold every object ``assertion`` names, or none of them."""
+        """Hold every object ``assertion`` names, write-through trees' members
+        included, or none of them."""
         nonces = self._nonces()
         if nonces is None:
             return Preparation(
@@ -161,17 +192,72 @@ class PublicationHolds:
             )
         holds = Holds(nonces.next(), {})
         try:
+            through = self._unexpanded(assertion.tree_references(True))
+            holds.staged.extend(assertion.tree_references(False))
             refused = self._acquire(assertion, locator, holds)
+            for manifest in through if refused is None else ():
+                if (refused := self._hold_tree(manifest, locator, holds)) is not None:
+                    break
         except Exception as exc:
             self._logger.warning("Holding a publication's objects failed: %s", exc)
-            self.release(holds)
+            self._release_quietly(holds)
             return Preparation(
                 None, PublicationDisposition.RETRY, f"the control store failed: {exc}"
             )
         if refused is not None:
-            self.release(holds)
+            self._release_quietly(holds)
             return refused
         return Preparation(holds)
+
+    def _unexpanded(self, manifests: list[ContentReference]) -> list[ContentReference]:
+        """Return the manifests whose members are not already protected."""
+        if not manifests or self._trees is None:
+            return []
+        expanded = self._trees.expanded(manifests)
+        return [m for m in manifests if m.content_digest not in expanded]
+
+    def _hold_tree(
+        self, manifest: ContentReference, locator: dict[str, Any], holds: Holds
+    ) -> Preparation | None:
+        assert self._trees is not None
+        holds.trees.append(manifest)
+        refusal: list[Preparation] = []
+
+        def hold_page(scope: str, members: list[TreeMember]) -> TreeOutcome | None:
+            references = {m.digest: m.reference(scope) for m in members}
+            refused = self._acquire_scope(
+                references.__getitem__,
+                scope,
+                list(references),
+                AcquireMode.BIND,
+                [],
+                locator,
+                holds,
+            )
+            if refused is None:
+                return None
+            refusal.append(refused)
+            return TreeOutcome(TreeStatus.REFUSED)
+
+        outcome = self._trees.hold(manifest, hold_page)
+        match outcome.status:
+            case TreeStatus.DONE:
+                return None
+            case TreeStatus.REFUSED:
+                return refusal[0]
+            case TreeStatus.MALFORMED:
+                return Preparation(
+                    None,
+                    PublicationDisposition.REJECTED,
+                    f"tree {manifest.content_digest} is malformed: {outcome.reason}",
+                    (manifest.content_digest,),
+                    malformed=True,
+                )
+        return Preparation(
+            None,
+            PublicationDisposition.RETRY,
+            f"tree {manifest.content_digest} cannot be read now: {outcome.reason}",
+        )
 
     def _acquire(
         self, assertion: Assertion, locator: dict[str, Any], holds: Holds
@@ -191,7 +277,7 @@ class PublicationHolds:
                 )
                 if (
                     refused := self._acquire_scope(
-                        assertion,
+                        partial(_reference_in, assertion.references, scope),
                         scope,
                         sorted(digests),
                         mode,
@@ -205,7 +291,7 @@ class PublicationHolds:
 
     def _acquire_scope(
         self,
-        assertion: Assertion,
+        reference_of: Callable[[str], ContentReference],
         scope: str,
         digests: list[str],
         mode: AcquireMode,
@@ -231,7 +317,7 @@ class PublicationHolds:
                     )
             missing: list[str] = []
             for digest, revision in acquisition.unverified.items():
-                match self._backed(assertion.references[(scope, digest)]):
+                match self._backed(reference_of(digest)):
                     case True:
                         verified[digest] = revision
                     case False:
@@ -256,10 +342,87 @@ class PublicationHolds:
         )
 
     def release(self, holds: Holds) -> None:
-        """Release exactly ``holds``; raises while the control store is unreachable."""
+        """Release exactly ``holds``; raises while either store is unreachable."""
+        for manifest in holds.trees:
+            assert self._trees is not None
+            outcome = self._trees.release(manifest, holds.nonce, self._pins.release)
+            if outcome.status is TreeStatus.UNAVAILABLE:
+                raise ConnectionError(outcome.reason)
         for scope, digests in holds.held.items():
             if digests:
                 self._pins.release(scope, digests, holds.nonce)
+
+    def _release_quietly(self, holds: Holds) -> None:
+        try:
+            self.release(holds)
+        except Exception as exc:
+            # An earlier root's holds are released by the next one; this root's
+            # stay until it is replaced.
+            self._logger.warning("Could not release a refused publication: %s", exc)
+
+    def finish(
+        self, holds: Holds, bound: frozenset[str], locator: dict[str, Any]
+    ) -> list[tuple[ContentReference, TreeOutcome]]:
+        """Protect the members of each tree the durable commit bound and end every
+        hold; returns the trees that did not finish, which raises nothing.
+
+        A write-through tree's held members are protected; a staged tree is read and
+        its members protected now. A tree the commit did not bind has its holds
+        released instead.
+        """
+        unfinished: list[tuple[ContentReference, TreeOutcome]] = []
+        assert self._trees is not None or not (holds.trees or holds.staged)
+        for manifest in holds.trees:
+            assert self._trees is not None
+            outcome = (
+                self._trees.promote(manifest, holds.nonce)
+                if manifest.content_digest in bound
+                else self._trees.release(manifest, holds.nonce, self._pins.release)
+            )
+            if outcome.status is not TreeStatus.DONE:
+                unfinished.append((manifest, outcome))
+        for manifest in holds.staged:
+            if manifest.content_digest in bound:
+                outcome = self.expand(manifest, locator)
+                if outcome.status is not TreeStatus.DONE:
+                    unfinished.append((manifest, outcome))
+        if not any(o.status is TreeStatus.UNAVAILABLE for _, o in unfinished):
+            for scope, digests in holds.held.items():
+                if digests:
+                    self._pins.release(scope, digests, holds.nonce)
+        return unfinished
+
+    def expand(
+        self, manifest: ContentReference, locator: dict[str, Any]
+    ) -> TreeOutcome:
+        """Protect the members a bound tree names: hold them under the expansion's
+        own nonce while its manifest verifies, then protect what that held."""
+        assert self._trees is not None
+        nonces = self._nonces()
+        if nonces is None:
+            return TreeOutcome(TreeStatus.UNAVAILABLE, "this root holds no epoch yet")
+        nonce = nonces.next()
+        scope_holds = Holds(nonce, {})
+
+        def hold_page(scope: str, members: list[TreeMember]) -> TreeOutcome | None:
+            acquisition = self._pins.acquire(
+                scope, [m.digest for m in members], nonce, locator, AcquireMode.PENDING
+            )
+            scope_holds.held[scope] = scope_holds.held.get(scope, ()) + acquisition.held
+            return None
+
+        try:
+            outcome = self._trees.hold(manifest, hold_page)
+            if outcome.status is TreeStatus.DONE:
+                return self._trees.promote(manifest, nonce)
+        except OSError as exc:
+            outcome = TreeOutcome(TreeStatus.UNAVAILABLE, str(exc))
+        for scope, digests in scope_holds.held.items():
+            try:
+                self._pins.release(scope, digests, nonce)
+            except OSError:
+                break
+        return outcome
 
 
 __all__ = [

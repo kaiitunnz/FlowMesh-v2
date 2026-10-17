@@ -204,6 +204,16 @@ class ResultReader:
                 f"{reference.size_bytes}"
             )
 
+    def stored_size(self, reference: ContentReference) -> int | None:
+        """Return the size the store holds the reference's object at, or None when it
+        holds none; raises ``ResultUnavailable`` while the store cannot say."""
+        try:
+            return self._store.stored_size(reference)
+        except ContentUnavailable as exc:
+            raise ResultUnavailable(str(exc)) from exc
+        except ContentStoreError:
+            return None
+
     def backed(self, reference: ContentReference) -> bool | None:
         """Whether the store now holds the reference's object at its size; None when
         the store cannot say, as while it is unreachable or refuses the read."""

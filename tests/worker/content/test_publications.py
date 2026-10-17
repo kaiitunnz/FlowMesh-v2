@@ -19,7 +19,6 @@ from worker.content.publications import (
     BUSY_SEC,
     RESEND_SEC,
     PublicationOutbox,
-    named_digests,
 )
 
 _SCOPE = "org-a"
@@ -229,17 +228,3 @@ def test_a_report_naming_nothing_stored_is_not_owed(rig) -> None:
     outbox.reported("TASK_SUCCEEDED", "tsk-1", "dsp-1", {"value": 1})
     outbox.reported("TASK_UPDATE", "tsk-1", "dsp-1", {"progress": 0.5})
     assert outbox.owed() == 0
-
-
-def test_the_digests_a_report_names() -> None:
-    a, b, c = (reference_for(_SCOPE, data) for data in (b"a", b"b", b"c"))
-    payload = {
-        "result_reference": a.model_dump(mode="json"),
-        "child_result_references": {"tsk-2": b.model_dump(mode="json")},
-        "artifacts": [{"reference": c.model_dump(mode="json")}],
-    }
-    assert named_digests("TASK_SUCCEEDED", payload) == {
-        a.content_digest,
-        b.content_digest,
-        c.content_digest,
-    }

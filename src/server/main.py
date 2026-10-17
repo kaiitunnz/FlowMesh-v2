@@ -70,6 +70,7 @@ from .reclamation.multipart import MultipartRegistrations, MultipartStore
 from .reclamation.pins import PinStore
 from .reclamation.publications import PublicationHolds
 from .reclamation.service import start_reclamation
+from .reclamation.trees import TreeExpander
 from .registries import WorkerRegistry, WorkflowRegistry
 from .registries.node import NodeRegistry
 from .registries.resident import ResidentRegistry
@@ -186,6 +187,8 @@ PORT_FORWARD_SERVICE = None
 SSH_RELAY: SshRelayOrigin | None = None
 WATCHDOG = None
 EVENT_MONITOR = None
+TREE_EXPANDER: TreeExpander | None = None
+PUBLICATION_HOLDS: PublicationHolds | None = None
 WORKFLOW_SPAN_EMITTER = None
 LOG_ARCHIVER = None
 AGENT_MODEL_GATEWAY = None
@@ -469,6 +472,16 @@ if IS_ROOT_NODE:
     WORKFLOW_SPAN_EMITTER = build_workflow_span_emitter(SERVER_TRACER, config.telemetry)
     MULTIPART_STORE = MultipartStore(REDIS_CLIENT)
     RUNTIME.set_multipart_store(MULTIPART_STORE)
+    TREE_EXPANDER = TreeExpander(
+        REDIS_CLIENT, RESULT_READER.open, RESULT_READER.stored_size, logger
+    )
+    PUBLICATION_HOLDS = PublicationHolds(
+        PinStore(REDIS_CLIENT),
+        lambda: RUNTIME.nonces if RUNTIME else None,
+        RESULT_READER.backed,
+        logger,
+        TREE_EXPANDER,
+    )
     EVENT_MONITOR = EventMonitor(
         redis_client=REDIS_CLIENT.sync,
         logger=logger,
@@ -490,12 +503,7 @@ if IS_ROOT_NODE:
         ),
         content_authority=CONTENT_AUTHORITY,
         content_access=CONTENT_ACCESS,
-        publication_holds=PublicationHolds(
-            PinStore(REDIS_CLIENT),
-            lambda: RUNTIME.nonces if RUNTIME else None,
-            RESULT_READER.backed,
-            logger,
-        ),
+        publication_holds=PUBLICATION_HOLDS,
         multipart=MultipartRegistrations(
             MULTIPART_STORE, RUNTIME.multipart_owner, WORKER_REGISTRY, logger
         ),
@@ -587,6 +595,19 @@ def _release_earlier_holds(epoch: int) -> None:
         logger.info("Released %d hold(s) an earlier root left", released)
 
 
+def _expand_bound_trees(stop: threading.Event) -> None:
+    trees, holds = TREE_EXPANDER, PUBLICATION_HOLDS
+    if trees is None or holds is None:
+        return
+    waiting = trees.reconcile(
+        trees.scopes(),
+        lambda manifest: holds.expand(manifest, {"kind": "expansion"}),
+        stop.is_set,
+    )
+    if waiting:
+        logger.info("%d bound tree(s) wait to have their members protected", waiting)
+
+
 def _start_root_threads() -> None:
     """Start orchestrator background threads. Only called on root nodes."""
     assert DISPATCHER is not None
@@ -637,6 +658,7 @@ def _start_root_threads() -> None:
         logger,
         STOP_EVENT,
         SERVER_METER,
+        _expand_bound_trees,
     )
     if reclamation_thread is not None:
         BACKGROUND_THREADS.append(reclamation_thread)

@@ -13,14 +13,18 @@ from server.clients.redis import (
     reclaim_deleting_key,
     reclaim_history_key,
     reclaim_pins_key,
+    reclaim_protected_key,
 )
 from server.reclamation.pins import PinStore
 from server.reclamation.publications import PublicationHolds
+from server.reclamation.trees import TreeExpander
 from server.services.publications import PublicationIntake
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
 from shared.content import ContentReference
+from shared.content.tree import TREE_MEDIA_TYPE, TreeManifest, TreeMember
 from shared.schemas.event import TaskEvent
+from shared.tasks.artifact_binding import ArtifactBinding, ArtifactKind
 from shared.tasks.publication import PublicationAnswer, PublicationDisposition
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.redis_helpers import fake_redis_client
@@ -86,10 +90,13 @@ class _Rig:
         self.answers = _Answers()
         setattr(self.runtime, "send_publication_answer", self.answers)
         self.monitor, self.telemetry, _ = _monitor(self.runtime)
+        client = fake_redis_client(server)
+        reader = self.runtime._results
         holds = PublicationHolds(
-            PinStore(fake_redis_client(server)),
+            PinStore(client),
             lambda: self.runtime.nonces,
             self.backed,
+            trees=TreeExpander(client, reader.open, reader.stored_size),
         )
         self.intake = PublicationIntake(
             self.runtime, holds, self.monitor._apply_publication
@@ -115,6 +122,14 @@ class _Rig:
             (event.payload or {})["result_reference"]
         )
         return reference.authorization_scope, reference.content_digest
+
+    def released(self, scope: str) -> bool:
+        """Wait for the finisher to end the publication's holds."""
+        for _ in range(250):
+            if not self.pins(scope):
+                return True
+            threading.Event().wait(0.02)
+        return False
 
     def pins(self, scope: str) -> dict[str, Any]:
         return cast(dict[str, Any], self.raw.hgetall(reclaim_pins_key(scope)))
@@ -151,7 +166,7 @@ def test_a_success_commits_off_the_consumer_and_answers_once_durable(rig) -> Non
     assert r.status() == TaskStatus.DONE
     assert r.store.status(r.task_id) == TaskStatus.DONE
     scope, _ = r.scope_and_digest(event)
-    assert r.pins(scope) == {}
+    assert r.released(scope)
 
 
 def test_a_retiring_object_is_refused_and_binds_nothing_until_resent(rig) -> None:
@@ -217,7 +232,7 @@ def test_a_held_commit_answers_and_releases_only_once_durable(rig) -> None:
     r.runtime._retry_durability(r.workflow_id)
     [answer] = r.answers.wait()
     assert answer.disposition is PublicationDisposition.COMMITTED
-    assert r.pins(scope) == {}
+    assert r.released(scope)
 
 
 def test_a_cancel_while_the_objects_are_verified_settles_and_rejects(rig) -> None:
@@ -234,4 +249,55 @@ def test_a_cancel_while_the_objects_are_verified_settles_and_rejects(rig) -> Non
     [answer] = r.answers.wait()
     assert answer.disposition is PublicationDisposition.REJECTED
     assert r.status() in (TaskStatus.CANCELLED, TaskStatus.CANCELLING)
-    assert r.pins(scope) == {}
+    assert r.released(scope)
+
+
+def _with_tree(r: Any, manifest_bytes: bytes) -> tuple[TaskEvent, Any]:
+    record = r.runtime.get_record(r.task_id)
+    store = r.runtime._results.store
+    manifest = store.write(record.org_id, manifest_bytes, media_type=TREE_MEDIA_TYPE)
+    event = r.success()
+    payload = dict(event.payload or {})
+    payload["artifacts"] = [
+        ArtifactBinding(
+            name="model",
+            kind=ArtifactKind.TREE,
+            reference=manifest,
+            size_bytes=1,
+            files=1,
+        ).model_dump(mode="json")
+    ]
+    return event.model_copy(update={"payload": payload}), manifest
+
+
+def test_a_write_through_tree_protects_its_members_once_committed(rig) -> None:
+    r = rig()
+    record = r.runtime.get_record(r.task_id)
+    store = r.runtime._results.store
+    member = store.write(record.org_id, b"weights")
+    tree = TreeManifest.of(
+        [TreeMember("w.bin", member.content_digest, member.size_bytes)]
+    )
+    event, manifest = _with_tree(r, tree.encode())
+    _consume(r.monitor, event)
+    [answer] = r.answers.wait()
+    assert answer.disposition is PublicationDisposition.COMMITTED
+    scope = manifest.authorization_scope
+    protected = reclaim_protected_key(scope)
+    for _ in range(100):
+        if r.raw.sismember(protected, member.content_digest):
+            break
+        threading.Event().wait(0.02)
+    assert r.raw.sismember(protected, member.content_digest)
+    assert r.released(scope)
+
+
+def test_a_success_naming_a_malformed_tree_fails_unaccepted(rig) -> None:
+    r = rig()
+    event, _ = _with_tree(r, b'{"schema":1,"members":[["../x","00",1]]}')
+    _consume(r.monitor, event)
+    [answer] = r.answers.wait()
+    assert answer.disposition is PublicationDisposition.REJECTED
+    record = r.runtime.get_record(r.task_id)
+    assert record is not None and record.status == TaskStatus.FAILED
+    assert "artifacts_unaccepted" in (record.error or "")
