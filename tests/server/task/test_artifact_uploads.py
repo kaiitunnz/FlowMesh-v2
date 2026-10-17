@@ -14,12 +14,16 @@ import fakeredis
 import pytest
 
 from server.clients.redis import (
+    reclaim_deleting_key,
+    reclaim_history_key,
     task_state_key,
     workflow_sources_key,
     workflow_uploads_key,
     workflow_v2_key,
 )
 from server.config import OrchestrationConfig
+from server.reclamation.pins import PinStore
+from server.reclamation.retirement import StagedRetirement
 from server.registries.task_states import load_task_state
 from server.registries.workflow import WorkflowRegistry, WorkflowStatus
 from server.task.models import TaskRecord, TaskStatus
@@ -868,3 +872,123 @@ def test_a_staged_tree_that_is_not_one_is_lost_and_its_task_stays_done() -> None
     upload = record.internal.artifact_upload
     assert upload is not None and upload.state is ArtifactDurability.LOST
     assert "artifact_lost" in (setup.status()[2] or "")
+
+
+def _retirement(setup: _Setup) -> fakeredis.FakeRedis:
+    setup.runtime.set_staged_retirement(
+        StagedRetirement(PinStore(fake_redis_client(setup.server)), setup.reader.backed)
+    )
+    return fakeredis.FakeRedis(server=setup.server, decode_responses=True)
+
+
+def _last(setup: _Setup) -> UploadSettled:
+    return [s for _, s in setup.workers.sent if s.task_id == setup.train][-1]
+
+
+def test_a_staged_file_being_retired_waits_then_is_stored_again_before_it_settles() -> (
+    None
+):
+    setup = _dispatched()
+    raw = _retirement(setup)
+    data = b"weights"
+    staged = setup.file(data, "weights.bin", stored=False)
+    digest = staged.reference.content_digest
+    raw.hset(reclaim_deleting_key("org"), digest, "{}")
+    setup.succeed([staged])
+
+    # Taken as its own while the same object was being removed: it waits.
+    setup.report(UploadReport.UPLOADED)
+    assert _last(setup).disposition is UploadDisposition.RETRY_RETIREMENT
+    assert _last(setup).digests == [digest]
+    upload = setup.record(setup.train).internal.artifact_upload
+    assert upload is not None and upload.pending
+
+    # The removal ends and the object is gone: it is stored again.
+    raw.hdel(reclaim_deleting_key("org"), digest)
+    raw.hset(reclaim_history_key("org"), digest, "1")
+    setup.report(UploadReport.UPLOADED)
+    assert _last(setup).disposition is UploadDisposition.REMATERIALIZE
+    assert _last(setup).digests == [digest]
+
+    setup.reader.store.write("org", data)
+    setup.report(UploadReport.UPLOADED)
+    assert _last(setup).disposition is UploadDisposition.DURABLE
+    record = setup.record(setup.train)
+    assert record.status == TaskStatus.DONE and record.attempts == 0
+    assert record.internal.dispatch_id == "dsp-1"
+
+
+def test_a_staged_file_retired_before_and_stored_settles_at_once() -> None:
+    setup = _dispatched()
+    raw = _retirement(setup)
+    stored = setup.file(b"weights", "weights.bin", stored=True)
+    raw.hset(reclaim_history_key("org"), stored.reference.content_digest, "1")
+    setup.succeed([stored])
+
+    setup.report(UploadReport.UPLOADED)
+
+    assert _last(setup).disposition is UploadDisposition.DURABLE
+
+
+def test_a_receipt_ahead_of_its_success_is_checked_when_reported_again() -> None:
+    setup = _dispatched()
+    raw = _retirement(setup)
+    staged = setup.file(b"weights", "weights.bin", stored=True)
+    raw.hset(reclaim_deleting_key("org"), staged.reference.content_digest, "{}")
+
+    setup.report(UploadReport.UPLOADED)
+    setup.succeed([staged])
+    assert setup.workers.answers(setup.train) == [UploadDisposition.PENDING]
+
+    setup.report(UploadReport.UPLOADED)
+    assert _last(setup).disposition is UploadDisposition.RETRY_RETIREMENT
+
+
+def test_an_upload_settled_from_the_store_waits_while_an_object_is_retiring() -> None:
+    setup = _dispatched()
+    raw = _retirement(setup)
+    stored = setup.file(b"weights", "weights.bin", stored=True)
+    digest = stored.reference.content_digest
+    raw.hset(reclaim_deleting_key("org"), digest, "{}")
+    setup.succeed([stored])
+
+    setup.runtime.artifact_owner_lost("wkr-1")
+    setup.runtime._reconciler.check(setup.train)
+    upload = setup.record(setup.train).internal.artifact_upload
+    assert upload is not None and upload.pending
+
+    raw.hdel(reclaim_deleting_key("org"), digest)
+    setup.runtime._reconciler.check(setup.train)
+    upload = setup.record(setup.train).internal.artifact_upload
+    assert upload is not None and upload.state is ArtifactDurability.DURABLE
+
+
+def test_a_staged_tree_with_members_retired_before_checks_them_on_the_next_report() -> (
+    None
+):
+    setup = _dispatched()
+    _retirement(setup)
+    tree = setup.tree(stored=False)
+    setup.succeed([tree])
+    manifest = tree.reference.content_digest
+    setup.runtime.expanding_trees(setup.train, [manifest])
+    setup.report(UploadReport.UPLOADED)
+    member = ContentReference(
+        authorization_scope="org",
+        content_digest=hashlib.sha256(b"weights").hexdigest(),
+        size_bytes=len(b"weights"),
+    )
+    fakeredis.FakeRedis(server=setup.server).hset(
+        reclaim_history_key("org"), member.content_digest, "1"
+    )
+
+    setup.runtime.tree_expanded(setup.train, manifest, retired=[member])
+    upload = setup.record(setup.train).internal.artifact_upload
+    assert upload is not None and upload.pending
+
+    setup.report(UploadReport.UPLOADED)
+    assert _last(setup).disposition is UploadDisposition.REMATERIALIZE
+    assert _last(setup).digests == [member.content_digest]
+    setup.reader.store.write("org", b"weights")
+    setup.report(UploadReport.UPLOADED)
+    assert _last(setup).disposition is UploadDisposition.DURABLE

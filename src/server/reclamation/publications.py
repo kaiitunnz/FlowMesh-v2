@@ -394,7 +394,8 @@ class PublicationHolds:
         self, holds: Holds, bound: frozenset[str], locator: dict[str, Any]
     ) -> list[tuple[ContentReference, TreeOutcome]]:
         """Protect the members of each tree the durable commit bound and end every
-        hold; returns the trees that did not finish, which raises nothing.
+        hold; returns the trees that did not finish, and the staged trees that did
+        with members retired before, which raises nothing.
 
         A write-through tree's held members are protected; a staged tree is read and
         its members protected now. A tree the commit did not bind has its holds
@@ -416,7 +417,7 @@ class PublicationHolds:
         for manifest in holds.staged:
             if manifest.content_digest in bound:
                 outcome = self.expand(manifest, locator)
-                if outcome.status is not TreeStatus.DONE:
+                if outcome.status is not TreeStatus.DONE or outcome.retired:
                     unfinished.append((manifest, outcome))
         if not any(o.status is TreeStatus.UNAVAILABLE for _, o in unfinished):
             for scope, digests in holds.held.items():
@@ -425,21 +426,38 @@ class PublicationHolds:
         return unfinished
 
     def expand(
-        self, manifest: ContentReference, locator: dict[str, Any]
+        self, manifest: ContentReference, locator: dict[str, Any], staged: bool = True
     ) -> TreeOutcome:
         """Protect the members a bound tree names: hold them under the expansion's
-        own nonce while its manifest verifies, then protect what that held."""
+        own nonce while its manifest verifies, then protect what that held.
+
+        A member being retired stops the expansion: a ``staged`` tree, whose files may
+        still be uploading, waits for the retirement to end; any other tree's bytes
+        were stored when it was bound, so its scope is un-certified.
+        """
         assert self._trees is not None
         nonces = self._nonces()
         if nonces is None:
             return TreeOutcome(TreeStatus.UNAVAILABLE, "this root holds no epoch yet")
         self.repay()
         nonce = nonces.next()
+        retired: list[ContentReference] = []
 
         def hold_page(scope: str, members: list[TreeMember]) -> TreeOutcome | None:
-            self._pins.acquire(
-                scope, [m.digest for m in members], nonce, locator, AcquireMode.PENDING
+            acquisition = self._pins.acquire(
+                scope, [m.digest for m in members], nonce, locator, AcquireMode.MEMBER
             )
+            if acquisition.verdict is Verdict.RETIRING:
+                return TreeOutcome(
+                    TreeStatus.RETIRING,
+                    "a member is being removed from the store",
+                    retiring=acquisition.retiring,
+                )
+            if acquisition.retired:
+                by_digest = {m.digest: m for m in members}
+                retired.extend(
+                    by_digest[d].reference(scope) for d in acquisition.retired
+                )
             return None
 
         try:
@@ -447,8 +465,10 @@ class PublicationHolds:
             if outcome.status is TreeStatus.DONE:
                 promoted = self._trees.promote(manifest, nonce)
                 if promoted.status is TreeStatus.DONE:
-                    return promoted
+                    return TreeOutcome(TreeStatus.DONE, retired=tuple(retired))
                 outcome = promoted
+            elif outcome.status is TreeStatus.RETIRING and not staged:
+                self._trees.uncertify(manifest, outcome.retiring)
         except OSError as exc:
             outcome = TreeOutcome(TreeStatus.UNAVAILABLE, str(exc))
         try:

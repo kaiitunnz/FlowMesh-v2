@@ -8,7 +8,7 @@ answers each report, and the success itself, with the upload's settled state.
 
 from enum import StrEnum
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # The success-payload flag marking the final artifacts it reports, its merged
 # children's included, as staged rather than stored.
@@ -51,10 +51,25 @@ class UploadDisposition(StrEnum):
     LOST = "lost"
     # No accepted upload matches the report, so nothing is owed for it.
     REJECTED = "rejected"
+    # Objects it names are being removed from the store: store nothing, and report the
+    # upload again later.
+    RETRY_RETIREMENT = "retry_retirement"
+    # Objects it names are no longer in the store: store them again from custody, then
+    # report the upload again.
+    REMATERIALIZE = "rematerialize"
 
     @property
     def settled(self) -> bool:
-        return self is not UploadDisposition.PENDING
+        return self not in _OWED
+
+
+_OWED = frozenset(
+    {
+        UploadDisposition.PENDING,
+        UploadDisposition.RETRY_RETIREMENT,
+        UploadDisposition.REMATERIALIZE,
+    }
+)
 
 
 class UploadSettled(BaseModel):
@@ -63,3 +78,5 @@ class UploadSettled(BaseModel):
     task_id: str
     dispatch_id: str
     disposition: UploadDisposition
+    digests: list[str] = Field(default_factory=list)
+    """The objects a retirement answer is about."""

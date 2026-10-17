@@ -11,8 +11,10 @@ import pytest
 from server.clients.redis import (
     RECLAIM_SCOPES_KEY,
     reclaim_deleting_key,
+    reclaim_history_key,
     reclaim_pins_key,
     reclaim_protected_key,
+    reclaim_uncertified_key,
     reclaim_unexpanded_key,
 )
 from server.reclamation.pins import Nonces, PinStore
@@ -202,6 +204,7 @@ def test_a_staged_tree_is_expanded_once_its_binding_is_durable(rig) -> None:
     assert preparation.holds is not None
     # Members still to be uploaded are not held or read before the commit.
     assert rig.store.reads == 0
+    rig.raw.hdel(reclaim_deleting_key(_SCOPE), members[0].digest)
     rig.raw.sadd(reclaim_protected_key(_SCOPE), manifest.content_digest)
     assert (
         rig.holds.finish(
@@ -276,3 +279,74 @@ def test_reconciling_expands_bound_trees_and_drops_unbound_ones(rig) -> None:
     assert waiting == 1
     assert rig.unexpanded() == {held.content_digest}
     assert {m.digest for m in _members(3, "a")} <= rig.protected()
+
+
+def test_a_staged_tree_with_a_member_being_retired_waits_for_it(rig) -> None:
+    members = _members(600)
+    manifest = _tree(rig.store, members)
+    preparation = rig.holds.acquire(_success(manifest, staged=True), _LOCATOR)
+    assert preparation.holds is not None
+    rig.raw.sadd(reclaim_protected_key(_SCOPE), manifest.content_digest)
+    # Past the first page, so a page was held before the expansion stopped.
+    rig.raw.hset(reclaim_deleting_key(_SCOPE), members[400].digest, "{}")
+    bound = frozenset({manifest.content_digest})
+
+    ((tree, outcome),) = rig.holds.finish(preparation.holds, bound, _LOCATOR)
+    assert tree == manifest and outcome.status is TreeStatus.RETIRING
+    assert outcome.retiring == (members[400].digest,)
+    assert rig.pinned() == set()
+    assert rig.protected() == {manifest.content_digest}
+    assert rig.raw.scard(reclaim_uncertified_key(_SCOPE)) == 0
+
+    rig.raw.hdel(reclaim_deleting_key(_SCOPE), members[400].digest)
+    assert rig.holds.finish(preparation.holds, bound, _LOCATOR) == []
+    assert {m.digest for m in members} <= rig.protected()
+
+
+def test_a_bound_tree_with_a_member_being_retired_uncertifies_its_scope(rig) -> None:
+    members = _members(3)
+    manifest = _tree(rig.store, members)
+    rig.raw.sadd(reclaim_protected_key(_SCOPE), manifest.content_digest)
+    rig.raw.sadd(reclaim_unexpanded_key(_SCOPE), manifest.content_digest)
+    rig.raw.hset(reclaim_deleting_key(_SCOPE), members[1].digest, "{}")
+
+    outcome = rig.holds.expand(manifest, _LOCATOR, staged=False)
+    assert outcome.status is TreeStatus.RETIRING
+    assert rig.raw.smembers(reclaim_uncertified_key(_SCOPE)) == {
+        f"tree:{manifest.content_digest}"
+    }
+    assert rig.unexpanded() == {manifest.content_digest}
+
+    rig.raw.hdel(reclaim_deleting_key(_SCOPE), members[1].digest)
+    assert rig.holds.expand(manifest, _LOCATOR, staged=False).status is TreeStatus.DONE
+    assert rig.raw.scard(reclaim_uncertified_key(_SCOPE)) == 0
+    assert rig.unexpanded() == set()
+
+
+def test_an_expansion_reports_the_members_retired_before(rig) -> None:
+    members = _members(3)
+    manifest = _tree(rig.store, members)
+    rig.raw.sadd(reclaim_protected_key(_SCOPE), manifest.content_digest)
+    rig.raw.hset(reclaim_history_key(_SCOPE), members[2].digest, "1")
+
+    outcome = rig.holds.expand(manifest, _LOCATOR)
+
+    assert outcome.status is TreeStatus.DONE
+    assert outcome.retired == (members[2].reference(_SCOPE),)
+    assert {m.digest for m in members} <= rig.protected()
+
+
+def test_reconciling_leaves_a_tree_its_owed_upload_expands(rig) -> None:
+    manifest = _tree(rig.store, _members(3))
+    rig.raw.sadd(RECLAIM_SCOPES_KEY, _SCOPE)
+    rig.raw.sadd(reclaim_protected_key(_SCOPE), manifest.content_digest)
+    rig.raw.sadd(reclaim_unexpanded_key(_SCOPE), manifest.content_digest)
+
+    waiting = rig.trees.reconcile(
+        rig.trees.scopes(),
+        lambda m: rig.holds.expand(m, _LOCATOR, staged=False),
+        lambda: False,
+        {manifest.content_digest},
+    )
+
+    assert waiting == 1 and rig.store.reads == 0

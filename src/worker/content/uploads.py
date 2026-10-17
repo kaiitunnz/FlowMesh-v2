@@ -7,6 +7,10 @@ on a pace until control settles it, because the event helpers drop what they can
 send; the success itself is repeated by the publication outbox. Custody ends when
 control settles every task of the dispatch.
 
+Control may answer an upload report by asking it to wait, as while an object it names is
+being removed from the store, or to store named objects again; custody holds every
+object until the upload settles, so either is answered from it.
+
 Only the registration that staged a dispatch uploads it. Custody another registration
 left on the node, this worker's earlier one or another worker's, is evidence for
 control: it is reported as abandoned, and released once control says the upload settled.
@@ -38,6 +42,8 @@ EVIDENCE_SCAN_SEC = 600.0
 # an unexpected failure.
 _RETRY_MIN_SEC = 1.0
 _RETRY_MAX_SEC = 60.0
+# The first wait before reporting again an upload control asked to wait.
+_RETIREMENT_WAIT_SEC = 5.0
 
 type Identity = Callable[[], tuple[str, int]]
 type Upload = Callable[[str, str, Path, str], ContentReference]
@@ -60,6 +66,8 @@ class _Publication:
     due: dict[str, float] = field(default_factory=dict)
     # The tasks control rejected this dispatch's upload of.
     rejected: set[str] = field(default_factory=set)
+    # How long each task waits before reporting again, after control asked it to.
+    retirement_wait: dict[str, float] = field(default_factory=dict)
 
     @classmethod
     def of(cls, journal: UploadJournal, owned: bool) -> "_Publication":
@@ -189,7 +197,9 @@ class ArtifactUploader:
         """Take control's answer about one task's upload.
 
         A pending answer accepts the success; a report the task already has to make is
-        then made again at once, since the one before it may have been lost.
+        then made again at once, since the one before it may have been lost. An answer
+        to wait has the report made again later, and one to store objects again has
+        them stored from custody before it.
         """
         with self._cv:
             publication = self._publications.get(settled.dispatch_id)
@@ -208,6 +218,11 @@ class ArtifactUploader:
                     publication.due[task.task_id] = self._clock()
                 self._cv.notify_all()
                 return
+            if not settled.disposition.settled:
+                if publication.owned:
+                    self._retry_locked(publication, task, settled)
+                    self._cv.notify_all()
+                return
             task.settled = True
             if settled.disposition is UploadDisposition.REJECTED:
                 publication.rejected.add(task.task_id)
@@ -224,6 +239,32 @@ class ArtifactUploader:
             del self._publications[settled.dispatch_id]
             self._cv.notify_all()
         self._custody.release(journal.scope, journal.dispatch_id)
+
+    def _retry_locked(
+        self, publication: _Publication, task: StagedTask, settled: UploadSettled
+    ) -> None:
+        if settled.disposition is UploadDisposition.REMATERIALIZE:
+            again = [m for m in task.members if m.content_digest in settled.digests]
+            if again:
+                self._logger.info(
+                    "Storing %d object(s) of %s again, as control asked",
+                    len(again),
+                    task.task_id,
+                )
+                task.uploaded = False
+                publication.due.pop(task.task_id, None)
+                remaining = publication.remaining.setdefault(task.task_id, set())
+                for member in again:
+                    digest = member.content_digest
+                    remaining.add(digest)
+                    if digest not in publication.owners:
+                        publication.owners[digest] = set()
+                        publication.queue.append(member)
+                    publication.owners[digest].add(task.task_id)
+                return
+        wait = publication.retirement_wait.get(task.task_id, _RETIREMENT_WAIT_SEC)
+        publication.retirement_wait[task.task_id] = min(_RETRY_MAX_SEC, wait * 2)
+        publication.due[task.task_id] = self._clock() + wait
 
     def _releasable(self, publication: _Publication) -> bool:
         """Return whether a settled answer may end another registration's custody: its

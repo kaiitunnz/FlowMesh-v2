@@ -288,11 +288,16 @@ class TreeFinisher:
             self._retry(job, str(exc))
             return
         staged = {m.content_digest for m in job.holds.staged}
-        retry = False
+        retry: str | None = None
         failed: dict[str, str] = {}
+        retired: dict[str, tuple[ContentReference, ...]] = {}
         for manifest, outcome in unfinished:
             if outcome.status is TreeStatus.UNAVAILABLE:
-                retry = True
+                retry = "a store could not be read"
+            elif outcome.status is TreeStatus.RETIRING:
+                retry = f"a member of tree {manifest.content_digest} is being retired"
+            elif outcome.status is TreeStatus.DONE:
+                retired[manifest.content_digest] = outcome.retired
             elif manifest.content_digest in staged:
                 failed[manifest.content_digest] = outcome.reason or "malformed"
             else:
@@ -301,11 +306,13 @@ class TreeFinisher:
                     manifest.content_digest,
                     outcome.reason,
                 )
-        if retry:
-            self._retry(job, "a store could not be read")
+        if retry is not None:
+            self._retry(job, retry)
             return
         for digest in staged & job.bound:
-            self._runtime.tree_expanded(job.task_id, digest, failed.get(digest))
+            self._runtime.tree_expanded(
+                job.task_id, digest, failed.get(digest), retired.get(digest, ())
+            )
 
     def _retry(self, job: "_Finish", reason: str) -> None:
         self._logger.warning(

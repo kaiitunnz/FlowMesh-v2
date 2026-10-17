@@ -172,13 +172,23 @@ class StoreUncertain(Exception):
     """The store could not say whether an object is there."""
 
 
+class ObjectsRetiring(StoreUncertain):
+    """An object is being removed from the store, so whether it stays is not known
+    until its removal ends."""
+
+
+type Retiring = Callable[[list[ContentReference]], list[str]]
+
+
 def probe_upload(
     results: ResultReader,
     artifacts: Iterable[ArtifactBinding],
     stored: set[ContentReference] | None = None,
+    retiring: Retiring | None = None,
 ) -> dict[str, ArtifactLoss]:
     """Return the accepted artifacts missing from the store, each with why; raises
-    ``StoreUncertain`` when the store could not say.
+    ``StoreUncertain`` when the store could not say, and ``ObjectsRetiring`` when
+    ``retiring`` finds an object being removed from it.
 
     An archive views a tree and stands with it, so it is not checked on its own.
     ``stored`` holds the objects an earlier probe found, which are not asked again,
@@ -190,7 +200,13 @@ def probe_upload(
         if binding.kind is ArtifactKind.ARCHIVE:
             continue
         try:
-            for member in _objects(results, binding):
+            objects = list(_objects(results, binding))
+            if retiring is not None and (removing := retiring(objects)):
+                raise ObjectsRetiring(
+                    f"{len(removing)} object(s) of {binding.name} are being "
+                    f"removed from the store: {', '.join(removing[:5])}"
+                )
+            for member in objects:
                 if member in stored:
                     continue
                 results.verify_stored(member)
@@ -254,6 +270,9 @@ class UploadReconciler:
         self._stopped = False
         self._run_thread = run_thread
         self._thread: threading.Thread | None = None
+        self.retiring: Retiring | None = None
+        """Finds the objects being removed from the store, which keep an upload
+        owed."""
 
     def _ensure_thread(self) -> None:
         if not self._run_thread or self._thread is not None:
@@ -302,9 +321,12 @@ class UploadReconciler:
                 self._stored.pop(task_id, None)
                 return
             stored = self._stored.setdefault(task_id, set())
-            lost = probe_upload(self._results, check.artifacts, stored)
+            lost = probe_upload(self._results, check.artifacts, stored, self.retiring)
             self._settle(check, lost)
             self._stored.pop(task_id, None)
+        except ObjectsRetiring as exc:
+            self._logger.warning("Upload of %s stays owed: %s", task_id, exc)
+            self.request(task_id, delay=self._retry_sec)
         except StoreUncertain as exc:
             self._logger.warning(
                 "Upload of %s stays owed: the store could not be asked: %s",

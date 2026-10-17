@@ -69,6 +69,7 @@ from .orchestration.telemetry import build_workflow_span_emitter
 from .reclamation.multipart import MultipartRegistrations, MultipartStore
 from .reclamation.pins import PinStore
 from .reclamation.publications import PublicationHolds
+from .reclamation.retirement import StagedRetirement
 from .reclamation.service import start_reclamation
 from .reclamation.trees import TreeExpander
 from .registries import WorkerRegistry, WorkflowRegistry
@@ -475,8 +476,10 @@ if IS_ROOT_NODE:
     TREE_EXPANDER = TreeExpander(
         REDIS_CLIENT, RESULT_READER.open, RESULT_READER.stored_size, logger
     )
+    pins = PinStore(REDIS_CLIENT)
+    RUNTIME.set_staged_retirement(StagedRetirement(pins, RESULT_READER.backed))
     PUBLICATION_HOLDS = PublicationHolds(
-        PinStore(REDIS_CLIENT),
+        pins,
         lambda: RUNTIME.nonces if RUNTIME else None,
         RESULT_READER.backed,
         logger,
@@ -601,10 +604,16 @@ def _expand_bound_trees(stop: threading.Event) -> None:
         return
     if owed := holds.repay():
         logger.info("%d tree hold release(s) wait for the store", owed)
+    staged = (
+        {manifest.content_digest for _, manifest in RUNTIME.staged_trees()}
+        if RUNTIME is not None
+        else set()
+    )
     waiting = trees.reconcile(
         trees.scopes(),
-        lambda manifest: holds.expand(manifest, {"kind": "expansion"}),
+        lambda manifest: holds.expand(manifest, {"kind": "expansion"}, staged=False),
         stop.is_set,
+        staged,
     )
     if waiting:
         logger.info("%d bound tree(s) wait to have their members protected", waiting)

@@ -225,6 +225,65 @@ def test_a_pending_answer_has_a_lost_receipt_reported_again(
     uploader.stop(0.5)
 
 
+def test_an_answer_to_wait_stores_nothing_and_reports_again_later(tmp_path) -> None:
+    ports = _Ports()
+    clock = _Clock()
+    uploader = _uploader(tmp_path / "content", ports, clock)
+    uploader.start()
+    _stage(uploader, tmp_path, {"a.bin": b"alpha"})
+    ports.wait(lambda: len(ports.reports) == 1)
+    digest = reference_for("org", b"alpha").content_digest
+
+    uploader.settle(
+        UploadSettled(
+            task_id="tsk-1",
+            dispatch_id="dsp-1",
+            disposition=UploadDisposition.RETRY_RETIREMENT,
+            digests=[digest],
+        )
+    )
+    _nudge(uploader, clock, 1)
+    time.sleep(0.1)
+    assert len(ports.reports) == 1 and len(ports.stored) == 1
+
+    _nudge(uploader, clock, 5)
+    ports.wait(lambda: len(ports.reports) == 2)
+    assert ports.reports[1][2] is UploadReport.UPLOADED
+    assert len(ports.stored) == 1
+    uploader.stop(0.5)
+
+
+def test_an_answer_to_store_again_stores_the_named_objects_then_reports(
+    tmp_path,
+) -> None:
+    ports = _Ports()
+    clock = _Clock()
+    uploader = _uploader(tmp_path / "content", ports, clock)
+    uploader.start()
+    journal = _stage(uploader, tmp_path, {"a.bin": b"alpha", "b.bin": b"beta"})
+    ports.wait(lambda: len(ports.reports) == 1)
+    digest = reference_for("org", b"beta").content_digest
+
+    uploader.settle(
+        UploadSettled(
+            task_id="tsk-1",
+            dispatch_id="dsp-1",
+            disposition=UploadDisposition.REMATERIALIZE,
+            digests=[digest],
+        )
+    )
+
+    ports.wait(lambda: len(ports.reports) == 2)
+    assert [data for _, _, data in ports.stored] == [b"alpha", b"beta", b"beta"]
+    assert ports.stored_at_report[1][-1] == b"beta"
+    assert ports.reports[1][2] is UploadReport.UPLOADED
+    assert not journal.tasks["tsk-1"].settled
+    uploader.settle(_settled(UploadDisposition.DURABLE))
+    with uploader._cv:
+        assert not uploader._publications
+    uploader.stop(0.5)
+
+
 def test_a_store_outage_is_retried_and_never_reported_lost(tmp_path) -> None:
     ports = _Ports()
     ports.outage = 2

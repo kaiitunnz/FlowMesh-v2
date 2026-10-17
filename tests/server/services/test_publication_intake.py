@@ -3,6 +3,7 @@ lane holds what a report names before binding it, and the answer and the release
 the holds wait for the binding commit to be durable."""
 
 import asyncio
+import hashlib
 import threading
 from typing import Any, cast
 
@@ -25,6 +26,7 @@ from shared.content import ContentReference
 from shared.content.tree import TREE_MEDIA_TYPE, TreeManifest, TreeMember
 from shared.schemas.event import TaskEvent
 from shared.tasks.artifact_binding import ArtifactBinding, ArtifactKind
+from shared.tasks.artifact_upload import ARTIFACTS_PENDING
 from shared.tasks.publication import PublicationAnswer, PublicationDisposition
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.redis_helpers import fake_redis_client
@@ -301,3 +303,34 @@ def test_a_success_naming_a_malformed_tree_fails_unaccepted(rig) -> None:
     record = r.runtime.get_record(r.task_id)
     assert record is not None and record.status == TaskStatus.FAILED
     assert "artifacts_unaccepted" in (record.error or "")
+
+
+def test_a_staged_tree_with_a_member_being_retired_is_expanded_once_it_ends(
+    rig,
+) -> None:
+    r = rig()
+    record = r.runtime.get_record(r.task_id)
+    member = TreeMember("w.bin", hashlib.sha256(b"weights").hexdigest(), 7)
+    event, manifest = _with_tree(r, TreeManifest.of([member]).encode())
+    event = event.model_copy(
+        update={"payload": {**(event.payload or {}), ARTIFACTS_PENDING: True}}
+    )
+    scope = manifest.authorization_scope
+    r.raw.hset(reclaim_deleting_key(scope), member.digest, "{}")
+
+    _consume(r.monitor, event)
+    [answer] = r.answers.wait()
+    # Accepted pending: the upload has not stored the member yet.
+    assert answer.disposition is PublicationDisposition.COMMITTED
+    assert r.runtime._expanding.get(r.task_id) == {manifest.content_digest}
+    threading.Event().wait(0.3)
+    protected = reclaim_protected_key(scope)
+    assert not r.raw.sismember(protected, member.digest)
+
+    r.raw.hdel(reclaim_deleting_key(scope), member.digest)
+    for _ in range(150):
+        if r.raw.sismember(protected, member.digest):
+            break
+        threading.Event().wait(0.02)
+    assert r.raw.sismember(protected, member.digest)
+    assert record is not None and not r.runtime._expanding.get(r.task_id)

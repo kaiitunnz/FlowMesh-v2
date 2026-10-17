@@ -7,10 +7,15 @@ once its stream ends, so its members are first held under the expansion's own no
 and only those held are then protected, by a second read; a corrupt read can hold
 digests for a while but never protect one. Until a manifest's members are protected it
 stays in its scope's unexpanded set, which keeps the scope out of collection.
+
+A member being retired stops a staged tree's expansion until its retirement ends. A
+tree bound with its bytes already stored can have no member being retired, since a
+scope is certified before anything in it is retired; finding one un-certifies the
+scope.
 """
 
 import logging
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Set
 from dataclasses import dataclass
 from enum import StrEnum
 from itertools import batched
@@ -29,6 +34,7 @@ from ..clients.redis import (
     RedisClient,
     reclaim_pins_key,
     reclaim_protected_key,
+    reclaim_uncertified_key,
     reclaim_unexpanded_key,
 )
 from ..task.results import ResultUnavailable, ResultUnreadable
@@ -81,6 +87,8 @@ class TreeStatus(StrEnum):
     """The store or the control store could not be read now."""
     REFUSED = "refused"
     """A member's hold was refused."""
+    RETIRING = "retiring"
+    """A member is being retired; the expansion waits for its retirement to end."""
 
 
 @dataclass(frozen=True)
@@ -88,6 +96,15 @@ class TreeOutcome:
     status: TreeStatus
     reason: str | None = None
     refusal: Any = None
+    retiring: tuple[str, ...] = ()
+    """The members being retired."""
+    retired: tuple[ContentReference, ...] = ()
+    """Members retired before, whose current backing the upload's durability check
+    verifies."""
+
+
+def _broken_tree_marker(digest: str) -> str:
+    return f"tree:{digest}"
 
 
 class TreeExpander:
@@ -137,7 +154,13 @@ class TreeExpander:
                 self._rds.sync.eval(
                     _PROMOTE, len(keys), *keys, nonce, scope, *(m.digest for m in page)
                 )
-            self._rds.sync.srem(reclaim_unexpanded_key(scope), manifest.content_digest)
+            with self._rds.sync.control_pipeline(transaction=False) as pipe:
+                pipe.srem(reclaim_unexpanded_key(scope), manifest.content_digest)
+                pipe.srem(
+                    reclaim_uncertified_key(scope),
+                    _broken_tree_marker(manifest.content_digest),
+                )
+                pipe.execute()
         except (TreeManifestError, ResultUnreadable) as exc:
             return TreeOutcome(TreeStatus.MALFORMED, str(exc))
         except (ResultUnavailable, OSError) as exc:
@@ -159,6 +182,23 @@ class TreeExpander:
         except (ResultUnavailable, OSError) as exc:
             return TreeOutcome(TreeStatus.UNAVAILABLE, str(exc))
         return TreeOutcome(TreeStatus.DONE)
+
+    def uncertify(self, manifest: ContentReference, retiring: tuple[str, ...]) -> None:
+        """Keep a bound tree's scope out of collection after a member of it was found
+        being retired, until the tree expands."""
+        scope = manifest.authorization_scope
+        self._rds.sync.sadd(
+            reclaim_uncertified_key(scope), _broken_tree_marker(manifest.content_digest)
+        )
+        self._logger.error(
+            "Bound tree %s in scope %s has %d member(s) being retired, which no bound "
+            "content may be; its bytes may be lost, and the scope is no longer "
+            "collected: %s",
+            manifest.content_digest,
+            scope,
+            len(retiring),
+            ", ".join(retiring[:5]),
+        )
 
     def manifest_of(self, scope: str, digest: str) -> ContentReference | None:
         """Return the stored manifest ``digest`` names in ``scope``, sized by the
@@ -209,14 +249,22 @@ class TreeExpander:
         scopes: list[str],
         expand: Callable[[ContentReference], TreeOutcome],
         stop: Callable[[], bool],
+        owed: Set[str] = frozenset(),
     ) -> int:
         """Expand every bound manifest still waiting in ``scopes`` and drop each that
-        nothing binds or holds; returns how many still wait."""
+        nothing binds or holds; returns how many still wait.
+
+        A tree in ``owed`` is a staged tree whose upload is still owed, which its
+        publication expands; it is left waiting.
+        """
         waiting = 0
         for scope in scopes:
             for digest in self.unexpanded(scope):
                 if stop():
                     return waiting + 1
+                if digest in owed:
+                    waiting += 1
+                    continue
                 if self.settle_unbound(scope, digest):
                     continue
                 if not self._rds.sync.sismember(reclaim_protected_key(scope), digest):

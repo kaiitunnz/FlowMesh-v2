@@ -46,7 +46,7 @@ local out, refused = {}, false
 for i = 1, n do
   local d, expected = ARGV[4 + i], ARGV[4 + n + i]
   local verdict = 'A'
-  if mode == 'bind' and redis.call('HEXISTS', KEYS[3], d) == 1 then
+  if mode ~= 'pending' and redis.call('HEXISTS', KEYS[3], d) == 1 then
     verdict, refused = 'R', true
   elseif redis.call('SISMEMBER', KEYS[1], d) == 1 then
     verdict = 'P'
@@ -55,6 +55,8 @@ for i = 1, n do
     if rev and rev ~= expected then
       verdict, refused = 'N:' .. rev, true
     end
+  elseif mode == 'member' and redis.call('HEXISTS', KEYS[4], d) == 1 then
+    verdict = 'H'
   end
   out[i] = verdict
 end
@@ -115,6 +117,10 @@ class AcquireMode(StrEnum):
     PENDING = "pending"
     """The binding accepts bytes still to be uploaded: retirement does not refuse it,
     and the upload's durability check settles the backing later."""
+    MEMBER = "member"
+    """A bound tree's member, whose bytes may still be uploading: an identity being
+    retired refuses, and one retired before is held and reported, for the upload's
+    durability check to verify."""
 
 
 class Verdict(StrEnum):
@@ -136,6 +142,17 @@ class Acquisition:
     retiring: tuple[str, ...] = ()
     unverified: dict[str, str] = field(default_factory=dict)
     """Each identity whose backing needs verifying, with its retirement revision."""
+    retired: tuple[str, ...] = ()
+    """Held identities retired before, which a member acquisition reports."""
+
+
+class Retirement(StrEnum):
+    """Where an identity stands in its retirement, as read now."""
+
+    NONE = ""
+    RETIRING = "retiring"
+    RETIRED = "retired"
+    """Retired before and not being retired now; its current backing is unverified."""
 
 
 class Nonces:
@@ -188,6 +205,7 @@ class PinStore:
         verified = verified or {}
         encoded = json.dumps(locator, sort_keys=True, separators=(",", ":"))
         held: list[str] = []
+        retired: list[str] = []
         chunks = list(batched(ordered, CHUNK)) or [()]
         for index, chunk in enumerate(chunks):
             extra = manifests if index == len(chunks) - 1 else ()
@@ -218,7 +236,26 @@ class PinStore:
                     unverified=unverified,
                 )
             held.extend(d for d, v in zip(chunk, verdicts, strict=True) if v != "P")
-        return Acquisition(Verdict.ACQUIRED, nonce, held=tuple(held))
+            retired.extend(d for d, v in zip(chunk, verdicts, strict=True) if v == "H")
+        return Acquisition(
+            Verdict.ACQUIRED, nonce, held=tuple(held), retired=tuple(retired)
+        )
+
+    def retirement(self, scope: str, digests: Sequence[str]) -> dict[str, Retirement]:
+        """Return where each of ``digests`` stands in its retirement now."""
+        standing: dict[str, Retirement] = {}
+        for chunk in batched(digests, CHUNK):
+            with self._rds.sync.control_pipeline(transaction=False) as pipe:
+                pipe.hmget(reclaim_deleting_key(scope), list(chunk))
+                pipe.hmget(reclaim_history_key(scope), list(chunk))
+                deleting, history = pipe.execute()
+            for digest, retiring, retired in zip(chunk, deleting, history, strict=True):
+                standing[digest] = (
+                    Retirement.RETIRING
+                    if retiring is not None
+                    else Retirement.RETIRED if retired is not None else Retirement.NONE
+                )
+        return standing
 
     def release_older(self, epoch: int, page: int = CHUNK) -> int:
         """Release every hold an acquisition of an earlier root epoch took; returns
@@ -263,4 +300,12 @@ def _epoch_of(nonce: str) -> int:
     return int(head) if head.isdigit() else 0
 
 
-__all__ = ["AcquireMode", "Acquisition", "Nonces", "PinStore", "Verdict", "CHUNK"]
+__all__ = [
+    "AcquireMode",
+    "Acquisition",
+    "Nonces",
+    "PinStore",
+    "Retirement",
+    "Verdict",
+    "CHUNK",
+]

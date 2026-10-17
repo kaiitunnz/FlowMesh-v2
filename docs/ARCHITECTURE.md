@@ -508,7 +508,10 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   is committed or rejected, repeats the report until then, and stores an object again
   from its copy when control refuses it, so a refusal never runs a task, a provider
   call or an input resolution again; a worker lost before the commit loses its
-  dispatch as any lost worker does. A root takes a new epoch when it starts, a write
+  dispatch as any lost worker does. An artifact that uploads after its task's success
+  settles durable only once nothing it names is being removed from the store: its
+  worker waits while an object is, and stores again from its copy an object a removal
+  took. A root takes a new epoch when it starts, a write
   carrying a publication lands only under the epoch it was made in, and a root a
   later one has replaced stops. A worker registers each multipart upload's exact id
   with control before sending any part. With `CONTENT_RECLAMATION_ENABLED` (on by
