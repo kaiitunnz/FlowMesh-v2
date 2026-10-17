@@ -8,12 +8,7 @@ from typing import Any
 
 import pytest
 
-from shared.content import (
-    ContentReference,
-    ContentUnavailable,
-    StoreRefusal,
-    reference_for,
-)
+from shared.content import ContentReference, ContentUnavailable, reference_for
 from shared.tasks.artifact_upload import UploadDisposition, UploadReport, UploadSettled
 from worker.content.custody import ArtifactCustody, UploadJournal
 from worker.content.uploads import (
@@ -37,6 +32,7 @@ class _Ports:
 
     def __init__(self) -> None:
         self.stored: list[tuple[str, str, bytes]] = []
+        self.successes: list[tuple[str, str]] = []
         self.reports: list[tuple[str, str, UploadReport, str | None]] = []
         self.outage = 0
         self.attempts = 0
@@ -70,6 +66,11 @@ class _Ports:
             return reference.model_copy(update={"size_bytes": 1})
         return reference
 
+    def resend(self, task_id: str, dispatch_id: str, metadata: dict[str, Any]) -> None:
+        with self.cv:
+            self.successes.append((task_id, dispatch_id))
+            self.cv.notify_all()
+
     def report(
         self, task_id: str, dispatch_id: str, report: UploadReport, error: str | None
     ) -> None:
@@ -99,6 +100,7 @@ def _uploader(
         alias,
         identity=lambda: (worker_id, 1),
         upload=ports.upload,
+        resend_success=ports.resend,
         report=ports.report,
         **kwargs,
     )
@@ -130,7 +132,7 @@ def _stage(
     for name, data in files.items():
         _stage_file(uploader, journal, task_id, _write(tmp_path, name, data))
     if submit:
-        uploader.submit(journal, "tsk-1")
+        uploader.submit(journal, "tsk-1", {"artifacts_pending": True})
     return journal
 
 
@@ -142,34 +144,6 @@ def _nudge(uploader: ArtifactUploader, clock: _Clock, seconds: float) -> None:
     clock.now += seconds
     with uploader._cv:
         uploader._cv.notify_all()
-
-
-def _advance_until_idle(
-    uploader: ArtifactUploader,
-    clock: _Clock,
-    seconds: float,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Advance the clock, and return once the uploader has gone back to waiting with
-    nothing due at the advanced time.
-
-    The clock moves under the uploader's lock, so a step that reaches its wait at the
-    advanced time found nothing to send or store in that same step.
-    """
-    idle = threading.Event()
-    advanced_to = clock.now + seconds
-    wait_sec = uploader._wait_sec
-
-    def waiting() -> float:
-        if clock.now >= advanced_to:
-            idle.set()
-        return wait_sec()
-
-    monkeypatch.setattr(uploader, "_wait_sec", waiting)
-    with uploader._cv:
-        clock.now = advanced_to
-        uploader._cv.notify_all()
-    assert idle.wait(5.0), "the uploader never went back to waiting"
 
 
 def test_staged_artifacts_are_stored_then_reported_uploaded(tmp_path) -> None:
@@ -222,7 +196,7 @@ def test_unanswered_reports_are_sent_again_on_a_pace(tmp_path) -> None:
     ports.wait(lambda: len(ports.reports) == 1)
 
     _nudge(uploader, clock, RESEND_SEC + 1)
-    ports.wait(lambda: len(ports.reports) == 2)
+    ports.wait(lambda: len(ports.reports) == 2 and ports.successes)
 
     uploader.settle(_settled(UploadDisposition.DURABLE))
     _nudge(uploader, clock, RESEND_SEC + 1)
@@ -255,68 +229,6 @@ def test_a_pending_answer_has_a_lost_receipt_reported_again(
     ports.wait(lambda: ports.reports)
     expected = UploadReport.UNUPLOADABLE if unuploadable else UploadReport.UPLOADED
     assert ports.reports[0][2] is expected
-    uploader.stop(0.5)
-
-
-def test_an_answer_to_wait_stores_nothing_and_reports_again_later(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    ports = _Ports()
-    clock = _Clock()
-    uploader = _uploader(tmp_path / "content", ports, clock)
-    uploader.start()
-    _stage(uploader, tmp_path, {"a.bin": b"alpha"})
-    ports.wait(lambda: len(ports.reports) == 1)
-    digest = reference_for("org", b"alpha").content_digest
-
-    uploader.settle(
-        UploadSettled(
-            task_id="tsk-1",
-            dispatch_id="dsp-1",
-            disposition=UploadDisposition.REFUSED,
-            refusal=StoreRefusal.RETRY_RETIREMENT,
-            digests=[digest],
-        )
-    )
-    _advance_until_idle(uploader, clock, 1, monkeypatch)
-    assert len(ports.reports) == 1 and len(ports.stored) == 1
-
-    _nudge(uploader, clock, 5)
-    ports.wait(lambda: len(ports.reports) == 2)
-    assert ports.reports[1][2] is UploadReport.UPLOADED
-    assert len(ports.stored) == 1
-    uploader.stop(0.5)
-
-
-def test_an_answer_to_store_again_stores_the_named_objects_then_reports(
-    tmp_path,
-) -> None:
-    ports = _Ports()
-    clock = _Clock()
-    uploader = _uploader(tmp_path / "content", ports, clock)
-    uploader.start()
-    journal = _stage(uploader, tmp_path, {"a.bin": b"alpha", "b.bin": b"beta"})
-    ports.wait(lambda: len(ports.reports) == 1)
-    digest = reference_for("org", b"beta").content_digest
-
-    uploader.settle(
-        UploadSettled(
-            task_id="tsk-1",
-            dispatch_id="dsp-1",
-            disposition=UploadDisposition.REFUSED,
-            refusal=StoreRefusal.REMATERIALIZE,
-            digests=[digest],
-        )
-    )
-
-    ports.wait(lambda: len(ports.reports) == 2)
-    assert [data for _, _, data in ports.stored] == [b"alpha", b"beta", b"beta"]
-    assert ports.stored_at_report[1][-1] == b"beta"
-    assert ports.reports[1][2] is UploadReport.UPLOADED
-    assert not journal.tasks["tsk-1"].settled
-    uploader.settle(_settled(UploadDisposition.DURABLE))
-    with uploader._cv:
-        assert not uploader._publications
     uploader.stop(0.5)
 
 
@@ -371,7 +283,7 @@ def test_a_journal_that_cannot_be_written_reports_what_is_owed_unfinishable(
     journal = uploader.begin("dsp-1", "org")
     _stage(uploader, tmp_path, {"a.bin": b"alpha"}, journal=journal, submit=False)
     _stage(uploader, tmp_path, {"b.bin": b"beta"}, "tsk-2", journal, submit=False)
-    uploader.submit(journal, "tsk-1")
+    uploader.submit(journal, "tsk-1", {"artifacts_pending": True})
     custody.full = True
     uploader.start()
 
@@ -398,7 +310,7 @@ def test_a_success_that_cannot_be_recorded_ends_its_custody(tmp_path) -> None:
     journal = _stage(uploader, tmp_path, {"a.bin": b"alpha"}, submit=False)
 
     with pytest.raises(OSError):
-        uploader.submit(journal, "tsk-1")
+        uploader.submit(journal, "tsk-1", {"artifacts_pending": True})
 
     assert not ArtifactCustody(root).publication_dir("org", "dsp-1").exists()
 
@@ -446,7 +358,7 @@ def test_one_unuploadable_member_fails_only_the_tasks_that_own_it(tmp_path) -> N
     )
     gone = journal.tasks["tsk-1"].members[0]
     ArtifactCustody(root).source(journal, gone).unlink()
-    uploader.submit(journal, "tsk-1")
+    uploader.submit(journal, "tsk-1", {"artifacts_pending": True})
     uploader.start()
 
     ports.wait(lambda: len({r[0] for r in ports.reports}) == 2)
@@ -467,7 +379,7 @@ def test_a_failed_task_is_reported_once_its_other_files_are_stored(tmp_path) -> 
         uploader, tmp_path, {"a.bin": b"alpha", "b.bin": b"beta"}, submit=False
     )
     ArtifactCustody(root).source(journal, journal.tasks["tsk-1"].members[0]).unlink()
-    uploader.submit(journal, "tsk-1")
+    uploader.submit(journal, "tsk-1", {"artifacts_pending": True})
     uploader.start()
 
     ports.wait(lambda: ports.reports)
@@ -477,9 +389,7 @@ def test_a_failed_task_is_reported_once_its_other_files_are_stored(tmp_path) -> 
     uploader.stop(1.0)
 
 
-def test_a_pending_answer_reports_no_failed_task_still_uploading(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_a_pending_answer_reports_no_failed_task_still_uploading(tmp_path) -> None:
     ports = _Ports()
     ports.poisoned.add(b"beta")
     root = tmp_path / "content"
@@ -489,13 +399,14 @@ def test_a_pending_answer_reports_no_failed_task_still_uploading(
         uploader, tmp_path, {"a.bin": b"alpha", "b.bin": b"beta"}, submit=False
     )
     ArtifactCustody(root).source(journal, journal.tasks["tsk-1"].members[0]).unlink()
-    uploader.submit(journal, "tsk-1")
+    uploader.submit(journal, "tsk-1", {"artifacts_pending": True})
     uploader.start()
     ports.wait(lambda: ports.attempts >= 2)
     assert journal.tasks["tsk-1"].failed is not None
 
     uploader.settle(_settled(UploadDisposition.PENDING))
-    _advance_until_idle(uploader, clock, 1, monkeypatch)
+    _nudge(uploader, clock, 1)
+    time.sleep(0.3)
 
     assert ports.reports == []
     uploader.stop(0.2)
@@ -530,7 +441,7 @@ def test_a_member_that_fails_unexpectedly_holds_up_none_of_its_dispatch(
     journal = uploader.begin("dsp-1", "org")
     _stage_file(uploader, journal, "tsk-1", _write(tmp_path, "a.bin", b"poison"))
     _stage_file(uploader, journal, "tsk-2", _write(tmp_path, "b.bin", b"fine"))
-    uploader.submit(journal, "tsk-1")
+    uploader.submit(journal, "tsk-1", {"artifacts_pending": True})
     uploader.start()
 
     ports.wait(lambda: ports.reports)
@@ -561,7 +472,7 @@ def test_another_workers_custody_is_kept_while_a_task_it_names_is_unanswered(
 
 
 def test_a_crashed_peers_unreported_custody_is_released_once_control_rejects_it(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
+    tmp_path,
 ) -> None:
     root = tmp_path / "content"
     _stage(
@@ -577,7 +488,8 @@ def test_a_crashed_peers_unreported_custody_is_released_once_control_rejects_it(
     ports.wait(lambda: ports.reports)
 
     mine.settle(_settled(UploadDisposition.REJECTED))
-    _advance_until_idle(mine, clock, EVIDENCE_SCAN_SEC + 1, monkeypatch)
+    _nudge(mine, clock, EVIDENCE_SCAN_SEC + 1)
+    time.sleep(0.2)
     mine.stop(0.5)
 
     assert list(ArtifactCustody(root).journals()) == []
@@ -607,7 +519,7 @@ def test_an_earlier_registrations_custody_is_reported_and_never_uploaded(
 
 
 def test_another_workers_custody_is_asked_about_and_released_once_settled(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
+    tmp_path,
 ) -> None:
     root = tmp_path / "content"
     ports = _Ports()
@@ -624,7 +536,8 @@ def test_another_workers_custody_is_asked_about_and_released_once_settled(
     assert ports.reports[0][2] is UploadReport.ABANDONED
 
     mine.settle(_settled(UploadDisposition.PENDING))
-    _advance_until_idle(mine, clock, RESEND_SEC + 1, monkeypatch)
+    _nudge(mine, clock, RESEND_SEC + 1)
+    time.sleep(0.2)
     assert len(ports.reports) == 1 and list(ArtifactCustody(root).journals())
 
     _nudge(mine, clock, EVIDENCE_RESEND_SEC)

@@ -253,7 +253,7 @@ def test_journals_round_trip_and_release_removes_them(tmp_path) -> None:
     journal = _journal(
         "dsp-1", {"tsk-1": StagedTask(task_id="tsk-1", members=[reference])}
     )
-    journal.task_id = "tsk-1"
+    journal.success = {"artifacts_pending": True}
 
     custody.record(journal)
     assert list(custody.journals()) == [journal]

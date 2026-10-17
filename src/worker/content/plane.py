@@ -24,7 +24,6 @@ mints for a peer's copy rests on that task's own binding.
 """
 
 import logging
-import threading
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import BinaryIO
@@ -39,7 +38,6 @@ from shared.content import (
     FabricObjectStore,
 )
 from shared.content.config import DEFAULT_RELAY_TRANSFER_MAX_BYTES
-from shared.content.multipart import MULTIPART_ACK_FRAME_KIND
 from shared.outcome import (
     FabricContentStore,
     FinalizationIndexClient,
@@ -49,7 +47,6 @@ from shared.utils.nofollow import fd_path
 
 from .access import ContentAccessDenied, ContentAccessRegistry
 from .lane_host import ContentLaneHost
-from .multipart import MultipartRegistrar
 from .store import WorkerContentCache
 
 
@@ -70,16 +67,13 @@ class WorkerContentPlane:
         *,
         finalizations: FinalizationIndexClient | None = None,
         relay_max_bytes: int = DEFAULT_RELAY_TRANSFER_MAX_BYTES,
-        multipart: MultipartRegistrar | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._lane = lane
         self._access = access
-        self._multipart = multipart
         self._finalizations = finalizations
         self._relay_max_bytes = relay_max_bytes
         self._logger = logger or logging.getLogger("content-plane")
-        self._stopping = threading.Event()
 
     def for_task(self, task_id: str, scope: str) -> "TaskContentStore":
         """The object surface one task reads and writes through, reading only in the
@@ -91,7 +85,7 @@ class WorkerContentPlane:
         if self._finalizations is None:
             return None
         return FinalizingContentStore(
-            _TaskScopedStores(self, task_id), self._finalizations, stop=self._stopping
+            _TaskScopedStores(self, task_id), self._finalizations
         )
 
     @property
@@ -119,20 +113,13 @@ class WorkerContentPlane:
 
     def rebind(self, holder_id: str, generation: int) -> None:
         """Move to the worker's new registration: drop the store access granted to the
-        previous one and the upload registrations it waits on, and hold the cached
-        copies under the new one."""
+        previous one, and hold the cached copies under the new one."""
         self._access.clear()
-        if self._multipart is not None:
-            self._multipart.abandon()
         if self._lane is not None:
             self._lane.rebind(holder_id, generation)
 
     def stop(self, timeout: float = 10.0) -> None:
-        """End every write waiting on control, then drain the cache lane, if this
-        worker runs one."""
-        self._stopping.set()
-        if self._multipart is not None:
-            self._multipart.abandon()
+        """Drain the cache lane, if this worker runs one."""
         if self._lane is not None:
             self._lane.stop(timeout)
 
@@ -144,10 +131,6 @@ class WorkerContentPlane:
         """Hand one content control frame to whatever consumes it."""
         if frame_kind == "content_access":
             self._access.accept(ContentStoreAccess.model_validate(frame))
-            return
-        if frame_kind == MULTIPART_ACK_FRAME_KIND:
-            if self._multipart is not None:
-                self._multipart.deliver(frame)
             return
         if self._lane is not None:
             self._lane.route(frame_kind, frame)

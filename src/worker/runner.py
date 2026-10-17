@@ -43,12 +43,6 @@ from shared.tasks.artifact_upload import (
     UploadSettled,
 )
 from shared.tasks.credentials import dispatched_credentials
-from shared.tasks.publication import (
-    CHECKPOINT_FIELD,
-    PREPARED_FIELD,
-    PUBLICATION_FRAME_KIND,
-    PublicationAnswer,
-)
 from shared.tasks.specs import (
     EmbeddingSpecStrict,
     InferenceBackend,
@@ -226,8 +220,8 @@ class _Staging:
     def staged(self) -> bool:
         return bool(self._journal.tasks)
 
-    def submit(self, task_id: str) -> None:
-        self._uploads.submit(self._journal, task_id)
+    def submit(self, task_id: str, success: dict[str, Any]) -> None:
+        self._uploads.submit(self._journal, task_id, success)
 
     def abandon(self) -> None:
         self._uploads.abandon(self._journal)
@@ -679,10 +673,6 @@ class Runner:
             if (lane := self.lifecycle.ssh_relay) is not None:
                 lane.route(frame_kind, frame)
             return
-        if frame_kind == PUBLICATION_FRAME_KIND:
-            if (outbox := self.lifecycle.publications) is not None:
-                outbox.answer(PublicationAnswer.model_validate(frame))
-            return
         if frame_kind == UPLOAD_SETTLED_FRAME_KIND:
             if (uploads := self.lifecycle.artifact_uploads) is not None:
                 uploads.settle(UploadSettled.model_validate(frame))
@@ -738,14 +728,10 @@ class Runner:
         self.logger.warning("Unknown mediated-op frame kind: %s", frame_kind)
 
     def _object_store(self, msg: WorkerTaskMessage) -> FabricObjectStore | None:
-        """The content surface this task reads and writes through, keeping a copy of
-        each object it writes until the publications naming it are answered."""
+        """The content surface this task reads and writes through."""
         if (plane := self.lifecycle.content_plane) is None:
             return None
-        store = plane.for_task(msg.task_id, msg.content_scope)
-        if (outbox := self.lifecycle.publications) is None or msg.dispatch_id is None:
-            return store
-        return outbox.keeping(msg.dispatch_id, store)
+        return plane.for_task(msg.task_id, msg.content_scope)
 
     def _outcome_store(self, task_id: str) -> FabricContentStore | None:
         """Where this task's outcomes materialize and deduplicate."""
@@ -1012,7 +998,7 @@ class Runner:
 
         def report(binding: ArtifactBinding) -> None:
             self.lifecycle.notify_task_update(
-                task_id, {CHECKPOINT_FIELD: [binding.model_dump(mode="json")]}
+                task_id, {"artifact_published": [binding.model_dump(mode="json")]}
             )
 
         uploader = CheckpointUploader(
@@ -1079,7 +1065,7 @@ class Runner:
         if staging is not None:
             if staging.staged():
                 metadata[ARTIFACTS_PENDING] = True
-                staging.submit(msg.task_id)
+                staging.submit(msg.task_id, metadata)
             else:
                 staging.abandon()
         self.lifecycle.set_succeeded(msg.task_id, metadata=metadata)
@@ -1589,7 +1575,9 @@ class Runner:
                             shard_index=shard_index,
                             shard_total=shard_total,
                         )
-                        metadata[PREPARED_FIELD] = prepared.model_dump(mode="json")
+                        metadata["input_materialization"] = prepared.model_dump(
+                            mode="json"
+                        )
                         self.lifecycle.set_succeeded(task_id, metadata=metadata)
                         self.logger.info("Task %s prepared its inputs", task_id)
                         continue
@@ -1802,8 +1790,6 @@ class Runner:
                         staging := self._staged.pop(msg.dispatch_id or "", None)
                     ) is not None:
                         staging.abandon()
-                    if (outbox := self.lifecycle.publications) is not None:
-                        outbox.end(msg.dispatch_id)
                     self._current_task_id = None
                     with self._cancel_lock:
                         self._executing = None

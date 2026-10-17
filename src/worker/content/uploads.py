@@ -2,14 +2,10 @@
 
 A dispatch stages its final artifacts into custody and reports success; the uploader
 then puts each staged object in the shared store under the access its owing dispatch
-renews, and reports when a task's whole set is there. Every upload report is repeated
-on a pace until control settles it, because the event helpers drop what they cannot
-send; the success itself is repeated by the publication outbox. Custody ends when
-control settles every task of the dispatch.
-
-Control may answer an upload report by asking it to wait, as while an object it names is
-being removed from the store, or to store named objects again; custody holds every
-object until the upload settles, so either is answered from it.
+renews, and reports when a task's whole set is there. Every report is repeated on a
+pace until control answers it — the success until control accepts it, the upload until
+control settles it — because the event helpers drop what they cannot send. Custody ends
+when control settles every task of the dispatch.
 
 Only the registration that staged a dispatch uploads it. Custody another registration
 left on the node, this worker's earlier one or another worker's, is evidence for
@@ -23,16 +19,16 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import BinaryIO
+from typing import Any, BinaryIO
 
 from pydantic import ValidationError
 
-from shared.content import ContentReference, ContentStoreError, StoreRefusal
+from shared.content import ContentReference, ContentStoreError
 from shared.tasks.artifact_upload import UploadDisposition, UploadReport, UploadSettled
 
 from .custody import ArtifactCustody, StagedTask, UploadJournal
 
-# How often an unanswered upload report is sent again.
+# How often an unanswered success or upload report is sent again.
 RESEND_SEC = 30.0
 # How often evidence of another registration's upload is reported while it is owed.
 EVIDENCE_RESEND_SEC = 300.0
@@ -42,11 +38,10 @@ EVIDENCE_SCAN_SEC = 600.0
 # an unexpected failure.
 _RETRY_MIN_SEC = 1.0
 _RETRY_MAX_SEC = 60.0
-# The first wait before reporting again an upload control asked to wait.
-_RETIREMENT_WAIT_SEC = 5.0
 
 type Identity = Callable[[], tuple[str, int]]
 type Upload = Callable[[str, str, Path, str], ContentReference]
+type ResendSuccess = Callable[[str, str, dict[str, Any]], None]
 type ReportUpload = Callable[[str, str, UploadReport, str | None], None]
 
 
@@ -62,12 +57,10 @@ class _Publication:
     remaining: dict[str, set[str]] = field(default_factory=dict)
     retry_at: float = 0.0
     backoff: float = _RETRY_MIN_SEC
-    # When each unanswered report is next due, by task.
+    # When each unanswered report is next due, by task; the success under "".
     due: dict[str, float] = field(default_factory=dict)
     # The tasks control rejected this dispatch's upload of.
     rejected: set[str] = field(default_factory=set)
-    # How long each task waits before reporting again, after control asked it to.
-    retirement_wait: dict[str, float] = field(default_factory=dict)
 
     @classmethod
     def of(cls, journal: UploadJournal, owned: bool) -> "_Publication":
@@ -85,6 +78,11 @@ class _Publication:
                 publication.owners[digest].add(task.task_id)
         return publication
 
+    def accepted(self) -> bool:
+        return any(
+            task.accepted or task.settled for task in self.journal.tasks.values()
+        )
+
     def uploading(self) -> bool:
         return self.owned and bool(self.queue)
 
@@ -99,6 +97,7 @@ class ArtifactUploader:
         alias: str,
         identity: Identity,
         upload: Upload,
+        resend_success: ResendSuccess,
         report: ReportUpload,
         logger: logging.Logger | None = None,
         clock: Callable[[], float] = time.monotonic,
@@ -107,6 +106,7 @@ class ArtifactUploader:
         self._alias = alias
         self._identity = identity
         self._upload = upload
+        self._resend_success = resend_success
         self._report = report
         self._logger = logger or logging.getLogger("artifact-uploads")
         self._clock = clock
@@ -161,10 +161,13 @@ class ArtifactUploader:
         """End custody for a dispatch whose success will not report it."""
         self._custody.release(journal.scope, journal.dispatch_id)
 
-    def submit(self, journal: UploadJournal, task_id: str) -> None:
+    def submit(
+        self, journal: UploadJournal, task_id: str, success: dict[str, Any]
+    ) -> None:
         """Owe the uploads of a dispatch whose success is about to be reported; its
         custody ends if that cannot be recorded."""
         journal.task_id = task_id
+        journal.success = success
         try:
             self._custody.record(journal)
         except BaseException:
@@ -172,6 +175,7 @@ class ArtifactUploader:
             raise
         with self._cv:
             publication = _Publication.of(journal, owned=True)
+            publication.due[""] = self._clock() + RESEND_SEC
             self._publications[journal.dispatch_id] = publication
             self._cv.notify_all()
 
@@ -194,9 +198,7 @@ class ArtifactUploader:
         """Take control's answer about one task's upload.
 
         A pending answer accepts the success; a report the task already has to make is
-        then made again at once, since the one before it may have been lost. An answer
-        to wait has the report made again later, and one to store objects again has
-        them stored from custody before it.
+        then made again at once, since the one before it may have been lost.
         """
         with self._cv:
             publication = self._publications.get(settled.dispatch_id)
@@ -205,6 +207,8 @@ class ArtifactUploader:
             journal = publication.journal
             if (task := journal.tasks.get(settled.task_id)) is None:
                 return
+            task.accepted = True
+            publication.due.pop("", None)
             if settled.disposition is UploadDisposition.PENDING:
                 if not publication.owned:
                     publication.due[task.task_id] = self._clock() + EVIDENCE_RESEND_SEC
@@ -213,11 +217,6 @@ class ArtifactUploader:
                 ):
                     publication.due[task.task_id] = self._clock()
                 self._cv.notify_all()
-                return
-            if not settled.disposition.settled:
-                if publication.owned:
-                    self._retry_locked(publication, task, settled)
-                    self._cv.notify_all()
                 return
             task.settled = True
             if settled.disposition is UploadDisposition.REJECTED:
@@ -235,32 +234,6 @@ class ArtifactUploader:
             del self._publications[settled.dispatch_id]
             self._cv.notify_all()
         self._custody.release(journal.scope, journal.dispatch_id)
-
-    def _retry_locked(
-        self, publication: _Publication, task: StagedTask, settled: UploadSettled
-    ) -> None:
-        if settled.refusal is StoreRefusal.REMATERIALIZE:
-            again = [m for m in task.members if m.content_digest in settled.digests]
-            if again:
-                self._logger.info(
-                    "Storing %d object(s) of %s again, as control asked",
-                    len(again),
-                    task.task_id,
-                )
-                task.uploaded = False
-                publication.due.pop(task.task_id, None)
-                remaining = publication.remaining.setdefault(task.task_id, set())
-                for member in again:
-                    digest = member.content_digest
-                    remaining.add(digest)
-                    if digest not in publication.owners:
-                        publication.owners[digest] = set()
-                        publication.queue.append(member)
-                    publication.owners[digest].add(task.task_id)
-                return
-        wait = publication.retirement_wait.get(task.task_id, _RETIREMENT_WAIT_SEC)
-        publication.retirement_wait[task.task_id] = min(_RETRY_MAX_SEC, wait * 2)
-        publication.due[task.task_id] = self._clock() + wait
 
     def _releasable(self, publication: _Publication) -> bool:
         """Return whether a settled answer may end another registration's custody: its
@@ -386,6 +359,13 @@ class ArtifactUploader:
             for key, at in list(publication.due.items()):
                 if at > now:
                     continue
+                if key == "":
+                    if publication.owned and not publication.accepted():
+                        publication.due[key] = now + RESEND_SEC
+                        sends.append(self._success_send(journal))
+                    else:
+                        del publication.due[key]
+                    continue
                 task = journal.tasks.get(key)
                 if task is None or task.settled:
                     del publication.due[key]
@@ -395,6 +375,11 @@ class ArtifactUploader:
                 )
                 sends.append(self._report_send(publication, task))
         return sends
+
+    def _success_send(self, journal: UploadJournal) -> Callable[[], None]:
+        return lambda: self._resend_success(
+            journal.task_id, journal.dispatch_id, journal.success
+        )
 
     def _report_send(
         self, publication: _Publication, task: StagedTask

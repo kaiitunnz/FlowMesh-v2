@@ -30,8 +30,6 @@ from .content import (
     WorkerContentPlane,
 )
 from .content.custody import ArtifactCustody
-from .content.multipart import MultipartRegistrar
-from .content.publications import PUBLICATIONS_DIR, PublicationOutbox
 from .content.uploads import ArtifactUploader
 from .executors import EXECUTOR_REGISTRY, IMPORT_ERRORS, get_executor_class_name
 from .executors.base_executor import Executor
@@ -335,19 +333,12 @@ def _build_content_plane(
     a deployment that enables it also gets a local copy of what this worker wrote and
     can serve a peer from it, and one that does not goes to the store every time.
     """
-    multipart = MultipartRegistrar(
-        lambda task_id, payload: client.push_content_multipart_registration(
-            payload, dispatch_for(task_id)
-        ),
-        logger=logger,
-    )
     access = ContentAccessRegistry(
         cfg.object_store,
         logger,
         request_access=lambda task_id: client.push_content_access_request(
             task_id, dispatch_for(task_id)
         ),
-        register_multipart=multipart.register,
     )
     lane: ContentLaneHost | None = None
     if cfg.content_hydration_enabled:
@@ -390,7 +381,6 @@ def _build_content_plane(
             else None
         ),
         relay_max_bytes=cfg.content_relay_transfer_max_bytes,
-        multipart=multipart,
         logger=logger,
     )
 
@@ -419,27 +409,8 @@ def _build_artifact_uploads(
         cfg.alias,
         identity=lambda: (client.worker_id, client.incarnation),
         upload=plane.upload_file,
+        resend_success=client.resend_task_succeeded,
         report=client.report_artifact_upload,
-        logger=logger,
-    )
-
-
-def _build_publications(
-    cfg: WorkerConfig,
-    client: SupervisorClient,
-    plane: WorkerContentPlane | None,
-    logger: logging.Logger,
-) -> PublicationOutbox | None:
-    """The outbox repeating each publication until control answers it, keeping what
-    it names under the results directory, apart from every other worker's."""
-    if plane is None:
-        return None
-    return PublicationOutbox(
-        cfg.results_dir / PUBLICATIONS_DIR / cfg.alias,
-        registration=lambda: client.worker_id,
-        send=client.resend_task_event,
-        upload=plane.upload_file,
-        fail=client.fail_dispatch,
         logger=logger,
     )
 
@@ -574,11 +545,7 @@ def main() -> None:
         peer_material=peer_material,
     )
     uploads = _build_artifact_uploads(cfg, supervisor_client, content_plane, logger)
-    lifecycle.start_content_plane(
-        content_plane,
-        uploads,
-        _build_publications(cfg, supervisor_client, content_plane, logger),
-    )
+    lifecycle.start_content_plane(content_plane, uploads)
     lifecycle.start_ssh_relay(
         SshRelayLane(
             registry=lifecycle.ssh_endpoints,

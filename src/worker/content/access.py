@@ -38,7 +38,6 @@ from shared.content import (
     SharedFilesystemObjectStore,
     renewal_lead_sec,
 )
-from shared.content.multipart import MultipartInitiated
 from shared.content.s3_store import S3Client, S3ObjectStore, is_credential_refusal
 
 _AccessKey = tuple[str, str]
@@ -66,9 +65,6 @@ class ContentAccessRegistry:
         logger: logging.Logger | None = None,
         *,
         request_access: Callable[[str], None] | None = None,
-        register_multipart: (
-            Callable[[str, str, str, str, Callable[[], bool] | None], None] | None
-        ) = None,
         arrival_wait_sec: float = 5.0,
         renewal_wait_sec: float = 15.0,
         clock: Callable[[], float] = time.time,
@@ -77,8 +73,6 @@ class ContentAccessRegistry:
         self._clock = clock
         self._logger = logger or logging.getLogger("content-access")
         self._request_access = request_access
-        # Registers a task's multipart upload in a scope by object key and UploadId.
-        self._register_multipart = register_multipart
         self._arrival_wait_sec = arrival_wait_sec
         self._renewal_wait_sec = renewal_wait_sec
         self._arrived = threading.Condition()
@@ -220,7 +214,6 @@ class ContentAccessRegistry:
                     prefix=self._cfg.prefix,
                     part_bytes=self._cfg.part_bytes,
                     upload_concurrency=self._cfg.upload_concurrency,
-                    on_initiated=self._initiated_hook(key),
                 )
             case x if x == BACKEND_FILESYSTEM:
                 return SharedFilesystemObjectStore(self._cfg.filesystem_root)
@@ -228,18 +221,6 @@ class ContentAccessRegistry:
                 raise ContentBackendUnsupported(
                     f"unknown content store backend {self._cfg.backend}"
                 )
-
-    def _initiated_hook(self, key: _AccessKey) -> MultipartInitiated | None:
-        if (register := self._register_multipart) is None:
-            return None
-        task_id, scope = key
-
-        def initiated(
-            object_key: str, upload_id: str, cancelled: Callable[[], bool] | None
-        ) -> None:
-            register(task_id, scope, object_key, upload_id, cancelled)
-
-        return initiated
 
     def _client(self, key: _AccessKey, *, wait: bool = True) -> S3Client:
         """The backend client this task's live access opens, one per session.
