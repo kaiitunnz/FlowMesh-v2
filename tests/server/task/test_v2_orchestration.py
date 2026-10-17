@@ -85,6 +85,7 @@ class FakeRegistry(StoredTaskStates, StoredLedgers):
         ledger: LedgerChanges | None = None,
         submitted_at: str | None = None,
         blueprints: Any = (),
+        guard: Any = None,
     ) -> None:
         self.workflow_task_ids[workflow_id] = [t.record.task_id for t in tasks]
         self.remaining[workflow_id] = {
@@ -115,6 +116,13 @@ class FakeRegistry(StoredTaskStates, StoredLedgers):
     # Nothing here is ever freed, so every workflow it holds is open.
     async def history_index_state_async(self) -> str:
         return INDEX_COMPLETE
+
+    def claim_root_epoch(self) -> int:
+        self.root_epoch = getattr(self, "root_epoch", 0) + 1
+        return self.root_epoch
+
+    async def claim_root_epoch_async(self) -> int:
+        return self.claim_root_epoch()
 
     async def open_workflow_ids_async(self) -> set[str]:
         return set(self.workflow_task_ids)
@@ -169,7 +177,11 @@ class FakeRegistry(StoredTaskStates, StoredLedgers):
         return PersistedV2Workflow.model_validate_json(blob) if blob else None
 
     def save_ledger(
-        self, workflow_id: str, ledger: LedgerChanges, control: Any = None
+        self,
+        workflow_id: str,
+        ledger: LedgerChanges,
+        control: Any = None,
+        guard: Any = None,
     ) -> None:
         self.put_ledger(workflow_id, ledger)
         if control is not None:
@@ -190,6 +202,7 @@ class FakeRegistry(StoredTaskStates, StoredLedgers):
         cancelled: Sequence[str] = (),
         sched: WorkflowSched | None = None,
         control: WorkflowControl | None = None,
+        guard: Any = None,
     ) -> None:
         self.put_tasks(records)
         self.remaining.setdefault(workflow_id, set()).difference_update(
@@ -216,6 +229,7 @@ class FakeRegistry(StoredTaskStates, StoredLedgers):
         cancelled: Sequence[str] = (),
         sched: WorkflowSched | None = None,
         control: Any = None,
+        guard: Any = None,
     ) -> None:
         remaining = self.remaining.setdefault(workflow_id, set())
         settled = {*done, *failed, *cancelled}
@@ -1408,7 +1422,11 @@ class _LockProbingRegistry(FakeRegistry):
         self.saved_unlocked: list[bool] = []
 
     def save_ledger(
-        self, workflow_id: str, ledger: LedgerChanges, control: Any = None
+        self,
+        workflow_id: str,
+        ledger: LedgerChanges,
+        control: Any = None,
+        guard: Any = None,
     ) -> None:
         assert self.runtime is not None
         lock = self.runtime._lock

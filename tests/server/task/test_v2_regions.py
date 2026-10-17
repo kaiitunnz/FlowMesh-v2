@@ -182,11 +182,16 @@ class _CapturingRegistry:
         ledger: Any = None,
         submitted_at: str | None = None,
         blueprints: Any = (),
+        guard: Any = None,
     ) -> None:
         self.v2[workflow_id] = v2
 
     def save_ledger(
-        self, workflow_id: str, ledger: LedgerChanges, control: Any = None
+        self,
+        workflow_id: str,
+        ledger: LedgerChanges,
+        control: Any = None,
+        guard: Any = None,
     ) -> None:
         return None
 

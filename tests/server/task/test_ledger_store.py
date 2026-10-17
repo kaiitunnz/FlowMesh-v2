@@ -65,6 +65,7 @@ class _Store(WorkflowRegistry):
         workflow_id: str,
         ledger: LedgerChanges,
         control: WorkflowControl | None = None,
+        guard: Any = None,
     ) -> None:
         self._ledger_write(
             workflow_id,

@@ -49,6 +49,7 @@ class FakeWorkflowRegistry(StoredTaskStates, StoredLedgers):
         ledger: Any = None,
         submitted_at: str | None = None,
         blueprints: Any = (),
+        guard: Any = None,
     ) -> None:
         self.workflow_task_ids[workflow_id] = [t.record.task_id for t in tasks]
         self.put_sources([*tasks, *blueprints])
@@ -69,7 +70,9 @@ class FakeWorkflowRegistry(StoredTaskStates, StoredLedgers):
         blob = self.v2_blobs.get(workflow_id)
         return PersistedV2Workflow.model_validate_json(blob) if blob else None
 
-    def save_ledger(self, workflow_id: str, ledger: Any, control: Any = None) -> None:
+    def save_ledger(
+        self, workflow_id: str, ledger: Any, control: Any = None, guard: Any = None
+    ) -> None:
         self.put_ledger(workflow_id, ledger)
 
     async def get_remaining_tasks_async(self, workflow_id: str) -> set[str]:
@@ -92,6 +95,13 @@ class FakeWorkflowRegistry(StoredTaskStates, StoredLedgers):
         return self.get_workflow_ids()
 
     # Nothing here is ever freed, so every workflow it holds is open.
+    def claim_root_epoch(self) -> int:
+        self.root_epoch = getattr(self, "root_epoch", 0) + 1
+        return self.root_epoch
+
+    async def claim_root_epoch_async(self) -> int:
+        return self.claim_root_epoch()
+
     async def open_workflow_ids_async(self) -> set[str]:
         return self.get_workflow_ids()
 
@@ -144,6 +154,7 @@ class FakeWorkflowRegistry(StoredTaskStates, StoredLedgers):
         cancelled: Sequence[str] = (),
         sched: WorkflowSched | None = None,
         control: Any = None,
+        guard: Any = None,
     ) -> None:
         self.put_tasks(records)
         if sched is not None:

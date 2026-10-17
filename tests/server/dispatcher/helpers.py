@@ -39,6 +39,7 @@ class WorkflowRegistryStub:
         ledger: Any = None,
         submitted_at: str | None = None,
         blueprints: Any = (),
+        guard: Any = None,
     ) -> None:
         return None
 
@@ -54,6 +55,7 @@ class WorkflowRegistryStub:
         cancelled: Sequence[str] = (),
         sched: WorkflowSched | None = None,
         control: Any = None,
+        guard: Any = None,
     ) -> None: ...
 
 

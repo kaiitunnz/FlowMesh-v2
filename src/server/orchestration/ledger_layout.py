@@ -19,6 +19,8 @@ from typing import Any, cast
 
 from pydantic import BaseModel, TypeAdapter
 
+from shared.content.reference import ContentReference
+
 from ..utils.journal import JournalKey
 from .state import (
     AcceptedInput,
@@ -122,6 +124,8 @@ class LedgerChanges:
     rewrite: int = 0
     """The count of whole-ledger rewrites owed up to the write, which its landing
     settles; 0 for a write of changes only."""
+    references: tuple[ContentReference, ...] = ()
+    """The content the entities the write stores name, which it protects."""
 
     @property
     def stores_nothing(self) -> bool:

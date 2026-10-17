@@ -4,6 +4,7 @@ import atexit
 import importlib
 import inspect
 import os
+import signal
 import threading
 from contextlib import AsyncExitStack, asynccontextmanager
 from functools import partial
@@ -245,6 +246,8 @@ if IS_ROOT_NODE:
         content_scope_authority=FINALIZATION_INDEX.assign_scope,
         n8n=config.n8n,
     )
+    # A root a later root has fenced stops rather than keep serving stale state.
+    RUNTIME.on_fenced = lambda: os.kill(os.getpid(), signal.SIGTERM)
     TELEMETRY_STORE = build_telemetry_store(config.telemetry_store)
     AGENT_MODEL_GATEWAY = AgentModelGateway(
         RUNTIME, config.orchestration.gateway, logger

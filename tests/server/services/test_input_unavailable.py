@@ -226,9 +226,11 @@ async def test_returning_an_undispatched_task_saves_no_ledger() -> None:
     saves: list[str] = []
     save = registry.save_ledger
 
-    def _counted(workflow_id: str, ledger: Any, control: Any = None) -> Any:
+    def _counted(
+        workflow_id: str, ledger: Any, control: Any = None, guard: Any = None
+    ) -> None:
         saves.append(workflow_id)
-        return save(workflow_id, ledger, control)
+        save(workflow_id, ledger, control, guard)
 
     registry.save_ledger = _counted  # type: ignore[method-assign]
     for _ in range(3):

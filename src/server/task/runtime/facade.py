@@ -641,6 +641,9 @@ class TaskRuntime:
         )
         self._committer.on_debt = self._durability.schedule
         self._committer.on_fault_cleared = self._release_write_faulted_locked
+        self._committer.on_fenced = self._on_fenced
+        # What stops this root once a later root took the epoch; the server wires it.
+        self.on_fenced: Callable[[], None] | None = None
         self._occurrences = OccurrenceMaterializer(
             self._tasks, self._original_deps, self._committer
         )
@@ -1039,7 +1042,11 @@ class TaskRuntime:
         A store without the open-workflow index has its stored workflows classified
         first, as ``HistoryBootstrap`` describes with the callbacks it takes. Returns
         the number of workflows restored.
+
+        It first takes a new root epoch, so a transaction an earlier root issued and
+        has not landed can no longer commit asserted state.
         """
+        await self.claim_root_epoch_async()
         await HistoryBootstrap(
             self._workflow_registry,
             self._scratch_runtime,
@@ -1053,6 +1060,24 @@ class TaskRuntime:
         )
         await self.start_settled_history()
         return restored
+
+    def _on_fenced(self, exc: Exception) -> None:
+        if self.on_fenced is not None:
+            self.on_fenced()
+
+    async def claim_root_epoch_async(self) -> int:
+        """Take a new root epoch for this runtime's guarded commits."""
+        epoch = await self._workflow_registry.claim_root_epoch_async()
+        with self._lock:
+            self._committer.epoch = epoch
+        return epoch
+
+    def claim_root_epoch(self) -> int:
+        """Take a new root epoch as ``claim_root_epoch_async`` does."""
+        epoch = self._workflow_registry.claim_root_epoch()
+        with self._lock:
+            self._committer.epoch = epoch
+        return epoch
 
     def _scratch_runtime(self) -> "TaskRuntime":
         """A runtime over the same store that restores workflows and delivers
@@ -1820,9 +1845,13 @@ class TaskRuntime:
                         yield
                     except BaseException as exc:
                         # A refusal alone stopped after its writes, not partway.
-                        if outermost and not (
-                            isinstance(exc, TransitionNotDurable)
-                            and not exc.stopped_partway
+                        if (
+                            outermost
+                            and not self._committer.fenced
+                            and not (
+                                isinstance(exc, TransitionNotDurable)
+                                and not exc.stopped_partway
+                            )
                         ):
                             with self._cv:
                                 # A transition that stopped partway may have changed
@@ -1835,10 +1864,13 @@ class TaskRuntime:
                         if outermost:
                             with self._cv:
                                 self._actions.close_scope_locked()
-                                self._actions.release_locked(self._committer.durable)
+                                if not self._committer.fenced:
+                                    self._actions.release_locked(
+                                        self._committer.durable
+                                    )
             finally:
                 held, refused = self._committer.exit_scope()
-                if outermost:
+                if outermost and not self._committer.fenced:
                     self._act_after_commit()
         except TransitionNotDurable:
             raise

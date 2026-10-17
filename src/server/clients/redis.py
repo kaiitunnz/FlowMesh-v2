@@ -324,6 +324,38 @@ def content_finalization_scope_key(idempotency_key: str) -> str:
     return f"ct:finalization-scope:{idempotency_key}"
 
 
+RECLAIM_ROOT_EPOCH_KEY = "rc:root-epoch"
+RECLAIM_SCOPES_KEY = "rc:scopes"
+
+
+def reclaim_protected_key(scope: str) -> str:
+    return f"rc:{{{scope}}}:protected"
+
+
+def reclaim_pins_key(scope: str) -> str:
+    return f"rc:{{{scope}}}:pins"
+
+
+def reclaim_deleting_key(scope: str) -> str:
+    return f"rc:{{{scope}}}:deleting"
+
+
+def reclaim_history_key(scope: str) -> str:
+    return f"rc:{{{scope}}}:history"
+
+
+def reclaim_condemned_key(scope: str) -> str:
+    return f"rc:{{{scope}}}:condemned"
+
+
+def reclaim_unexpanded_key(scope: str) -> str:
+    return f"rc:{{{scope}}}:unexpanded"
+
+
+def reclaim_uncertified_key(scope: str) -> str:
+    return f"rc:{{{scope}}}:uncertified"
+
+
 def ssh_connection_key(connection_id: str) -> str:
     return f"ssh:connection:{connection_id}"
 

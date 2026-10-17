@@ -6,6 +6,7 @@ from typing import Any, ClassVar
 
 from pydantic import BaseModel
 
+from ...reclamation.references import distinct, references_of
 from ...utils.journal import AppendOnlyList, JournaledModel, TrackedDict, TrackedSet
 from ..guardrails import ScopeBudget
 from ..ledger_layout import (
@@ -481,13 +482,21 @@ class SnapshotCodec:
                 lengths=lengths,
                 scalars=scalars,
                 rewrite=self._rewrite,
+                references=distinct(
+                    references_of(
+                        *(tracked.values() for tracked in self._keyed.values()),
+                        *self._histories.values(),
+                    )
+                ),
             )
         else:
             fields: dict[str, str] = {}
             deleted: list[str] = []
+            stored: list[Any] = []
             for name, key in captured:
                 if (tracked := self._keyed.get(name)) is not None:
                     if key in tracked:
+                        stored.append(tracked[key])
                         fields[field_name(name, key)] = keyed_value(
                             tracked.ordinals[key], tracked[key]
                         )
@@ -499,6 +508,7 @@ class SnapshotCodec:
                     deleted.append(field_name(name, key))
             for name, history in self._histories.items():
                 for position in range(self._written_lengths[name], len(history)):
+                    stored.append(history[position])
                     fields[field_name(name, position)] = history[
                         position
                     ].model_dump_json()
@@ -511,6 +521,7 @@ class SnapshotCodec:
                 captured=captured,
                 lengths=lengths,
                 scalars=scalars,
+                references=distinct(references_of(*stored)),
             )
         if self.verify_changes:
             self._verify(changes)

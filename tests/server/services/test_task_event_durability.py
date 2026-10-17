@@ -57,7 +57,11 @@ class _Store(_Registry):
         self.writes.append("records")
 
     def save_ledger(
-        self, workflow_id: str, ledger: LedgerChanges, control: Any = None
+        self,
+        workflow_id: str,
+        ledger: LedgerChanges,
+        control: Any = None,
+        guard: Any = None,
     ) -> None:
         if self.error is not None:
             raise self.error
