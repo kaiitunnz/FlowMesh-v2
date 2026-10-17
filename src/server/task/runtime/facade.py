@@ -103,6 +103,7 @@ from ...orchestration.tool_dispatch import (
     ToolOutcome,
     ToolOutcomeStatus,
 )
+from ...reclamation.multipart import MultipartOwner, MultipartStore
 from ...registries.history import HistoryPublication, StoredTask
 from ...registries.worker import Worker, WorkerRegistry
 from ...registries.workflow import (
@@ -216,6 +217,7 @@ from .after_commit import (
     Reap,
     Revoke,
     Settled,
+    TransferMultipart,
     UploadAck,
 )
 from .agent_inputs import AgentInputs
@@ -618,6 +620,7 @@ class TaskRuntime:
         )
 
         self._uploads = ArtifactUploads()
+        self._multipart: MultipartStore | None = None
         self._reconciler = reconciler(
             results, self._upload_check, self._settle_upload_from_store, logger
         )
@@ -2084,6 +2087,11 @@ class TaskRuntime:
                 self._answer_model_turn(proposal, proposer_id, action)
             case UploadAck(worker_id=worker_id, settled=settled):
                 self.send_upload_settled(worker_id, settled)
+            case TransferMultipart(scope=scope, dispatch_id=dispatch_id):
+                if self._multipart is not None:
+                    self._multipart.transfer(
+                        scope, dispatch_id, MultipartOwner.upload(dispatch_id)
+                    )
         return True
 
     def send_upload_settled(self, worker_id: str, settled: UploadSettled) -> None:
@@ -3849,6 +3857,7 @@ class TaskRuntime:
         # A success replayed after its registration ended owes what only the store
         # can settle.
         departed = self._uploads.departed_locked(worker_id)
+        owed = False
         for record in records:
             record_internal = record.internal
             receipt, record_internal.early_upload_receipt = (
@@ -3873,9 +3882,15 @@ class TaskRuntime:
                         self._unuploadable_locked(record.task_id, worker_id, receipt)
             record_internal.artifact_upload = upload
             self._uploads.track_locked(record)
+            owed = True
             if departed and upload.pending:
                 self._uploads.fence_locked(record.task_id)
                 self._reconciler.request(record.task_id)
+        if owed and self._multipart is not None:
+            self._file_locked(
+                records[0].task_id,
+                TransferMultipart(records[0].org_id, dispatch_id),
+            )
 
     def _unuploadable_locked(
         self, task_id: str, worker_id: str, receipt: EarlyUploadReceipt | None = None
@@ -4399,6 +4414,41 @@ class TaskRuntime:
         with self._lock:
             record = self._tasks.get(task_id)
         return record.org_id if record is not None else ""
+
+    def set_multipart_store(self, store: MultipartStore) -> None:
+        """Move a dispatch's registered multipart uploads to the upload obligation its
+        success leaves owed, once that obligation is durable."""
+        self._multipart = store
+
+    def multipart_owner(
+        self, task_id: str, worker_id: str, dispatch_id: str | None
+    ) -> tuple[str, MultipartOwner] | None:
+        """The scope a task's multipart upload writes in and the owner it stays live
+        under, or None when the worker owns no upload for the task.
+
+        The owner is the dispatch holding the task on that worker while it runs, and
+        then the upload its success left owed on the registration owing it.
+        """
+        with self._lock:
+            record = self._tasks.get(task_id)
+            if (
+                record is not None
+                and dispatch_id is not None
+                and self._fence.dispatch_live_locked(record, worker_id, dispatch_id)
+            ):
+                return record.org_id, MultipartOwner.dispatch(dispatch_id, task_id)
+            for owing_id in self._uploads.owed_for_dispatch_locked(dispatch_id):
+                owing = self._tasks.get(owing_id)
+                if (
+                    dispatch_id is not None
+                    and owing is not None
+                    and (upload := owing.internal.artifact_upload) is not None
+                    and upload.owner_id == worker_id
+                    and upload.dispatch_task_id == task_id
+                    and not self._uploads.fenced_locked(owing_id)
+                ):
+                    return owing.org_id, MultipartOwner.upload(dispatch_id)
+            return None
 
     def renewable_content_scope(
         self, task_id: str, worker_id: str, dispatch_id: str | None

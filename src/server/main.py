@@ -66,6 +66,7 @@ from .network.reverse_relay import (
 )
 from .network.service import NetworkPlane
 from .orchestration.telemetry import build_workflow_span_emitter
+from .reclamation.multipart import MultipartRegistrations, MultipartStore
 from .registries import WorkerRegistry, WorkflowRegistry
 from .registries.node import NodeRegistry
 from .registries.resident import ResidentRegistry
@@ -463,6 +464,8 @@ if IS_ROOT_NODE:
         )
 
     WORKFLOW_SPAN_EMITTER = build_workflow_span_emitter(SERVER_TRACER, config.telemetry)
+    MULTIPART_STORE = MultipartStore(REDIS_CLIENT)
+    RUNTIME.set_multipart_store(MULTIPART_STORE)
     EVENT_MONITOR = EventMonitor(
         redis_client=REDIS_CLIENT.sync,
         logger=logger,
@@ -484,6 +487,9 @@ if IS_ROOT_NODE:
         ),
         content_authority=CONTENT_AUTHORITY,
         content_access=CONTENT_ACCESS,
+        multipart=MultipartRegistrations(
+            MULTIPART_STORE, RUNTIME.multipart_owner, WORKER_REGISTRY, logger
+        ),
     )
     # The runtime settles terminals the task-event stream never carries, so it tells
     # the monitor's finalizer when a workflow may have ended; the finalizer decides.

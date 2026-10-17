@@ -91,6 +91,15 @@ class UploadAck:
     settled: UploadSettled
 
 
+@dataclass(frozen=True)
+class TransferMultipart:
+    """Move the multipart uploads a dispatch owns in a scope to the upload obligation
+    its success left owed."""
+
+    scope: str
+    dispatch_id: str
+
+
 type AfterCommit = (
     CreditRelease
     | Reap
@@ -101,6 +110,7 @@ type AfterCommit = (
     | Settled
     | AuthorizeTurn
     | UploadAck
+    | TransferMultipart
 )
 
 

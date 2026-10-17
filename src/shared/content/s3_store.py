@@ -34,6 +34,7 @@ from typing import Any, Protocol
 from botocore.exceptions import ClientError
 
 from .config import DEFAULT_PART_BYTES, DEFAULT_UPLOAD_CONCURRENCY
+from .multipart import MultipartDoomed, MultipartInitiated
 from .reference import OCTET_STREAM, ContentReference
 from .store import (
     STREAM_CHUNK_BYTES,
@@ -65,6 +66,8 @@ _CONFLICT_RETRIES = 5
 _CONFLICT_BACKOFF_SEC = 0.2
 # S3 numbers an upload's parts from 1 to this.
 _MAX_PARTS = 10_000
+# How many UploadIds one write starts while control answers that each is doomed.
+_DOOMED_ATTEMPTS = 3
 
 
 class S3Client(Protocol):
@@ -113,12 +116,14 @@ class S3ObjectStore(FabricObjectStore):
         prefix: str = "",
         part_bytes: int = DEFAULT_PART_BYTES,
         upload_concurrency: int = DEFAULT_UPLOAD_CONCURRENCY,
+        on_initiated: MultipartInitiated | None = None,
     ) -> None:
         self._client = client
         self._bucket = bucket
         self._prefix = prefix.strip("/")
         self._part_bytes = part_bytes
         self._upload_concurrency = upload_concurrency
+        self._on_initiated = on_initiated
 
     def _key(self, reference: ContentReference) -> str:
         scope, algorithm, digest = reference.identity
@@ -260,15 +265,7 @@ class S3ObjectStore(FabricObjectStore):
         key = self._key(reference)
         if self._present(reference):
             return
-        try:
-            upload_id = self._client.create_multipart_upload(
-                Bucket=self._bucket,
-                Key=key,
-                ContentType=reference.media_type,
-                ChecksumAlgorithm="SHA256",
-            )["UploadId"]
-        except Exception as exc:
-            raise _write_error(exc) from exc
+        upload_id = self._initiate(key, reference.media_type)
         try:
             parts = self._send_parts(key, upload_id, checksums, read_part, cancelled)
             _committing(
@@ -291,6 +288,42 @@ class S3ObjectStore(FabricObjectStore):
             if isinstance(exc, ContentStoreError) or not isinstance(exc, Exception):
                 raise
             raise _write_error(exc) from exc
+
+    def _initiate(self, key: str, media_type: str) -> str:
+        """Start an upload and register its UploadId before any part is sent.
+
+        An UploadId control answers is doomed is aborted and replaced by a new one, a
+        bounded number of times; any other refusal aborts it and fails the write, which
+        has sent nothing.
+        """
+        for _ in range(_DOOMED_ATTEMPTS):
+            try:
+                upload_id: str = self._client.create_multipart_upload(
+                    Bucket=self._bucket,
+                    Key=key,
+                    ContentType=media_type,
+                    ChecksumAlgorithm="SHA256",
+                )["UploadId"]
+            except Exception as exc:
+                raise _write_error(exc) from exc
+            if self._on_initiated is None:
+                return upload_id
+            try:
+                self._on_initiated(key, upload_id)
+            except MultipartDoomed:
+                self._abort(key, upload_id)
+                continue
+            except BaseException as exc:
+                self._abort(key, upload_id)
+                if isinstance(exc, ContentStoreError) or not isinstance(exc, Exception):
+                    raise
+                raise ContentStoreError(
+                    f"multipart upload of {key} was not registered: {exc}"
+                ) from exc
+            return upload_id
+        raise ContentStoreError(
+            f"every multipart upload of {key} was doomed before it could be sent"
+        )
 
     def _send_parts(
         self,

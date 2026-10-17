@@ -22,6 +22,7 @@ from shared.content import (
     ContentStoreError,
     ScopedObjectStore,
 )
+from shared.content.multipart import finalizing
 from shared.telemetry.propagation import inject_ambient_traceparent
 from shared.utils.http import auth_headers
 
@@ -154,6 +155,12 @@ class FinalizingContentStore(FabricContentStore):
         """
         if (found := self._index.find(scope, idempotency_key)) is not None:
             return found
+        with finalizing(idempotency_key):
+            return self._materialize(scope, idempotency_key, data, media_type)
+
+    def _materialize(
+        self, scope: str, idempotency_key: str, data: bytes, media_type: str
+    ) -> OutcomeManifest:
         content = self.write(scope, data, media_type=media_type)
         delay = _REFUSED_BACKOFF_SEC
         while True:

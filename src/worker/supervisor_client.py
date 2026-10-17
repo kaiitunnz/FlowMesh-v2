@@ -19,6 +19,7 @@ from pydantic import ValidationError
 
 from shared._version import FLOWMESH_RELEASE_VERSION
 from shared.content import ContentReference, ContentRouteObservation, HoldingReport
+from shared.content.multipart import CONTENT_PROTOCOL
 from shared.grpc.supervisor.v1 import supervisor_pb2, supervisor_pb2_grpc
 from shared.resident.reports import (
     ResidentBootstrapAck,
@@ -171,6 +172,7 @@ class SupervisorClient:
             "tags_json": json.dumps(tags, ensure_ascii=False),
             "last_seen": started_at,
             "cost_per_hour": str(cost_per_hour),
+            "content_protocol": str(CONTENT_PROTOCOL),
         }
         if ssh_limits is not None:
             worker_meta["ssh_limits_json"] = ssh_limits.model_dump_json()
@@ -1057,6 +1059,20 @@ class SupervisorClient:
         self._push_event(
             "CONTENT_ACCESS_REQUEST",
             {"task_id": task_id, "dispatch_id": dispatch_id},
+            ready_timeout_sec=ready_timeout_sec,
+        )
+
+    def push_content_multipart_registration(
+        self,
+        payload: dict[str, Any],
+        dispatch_id: str | None,
+        ready_timeout_sec: float = 5.0,
+    ) -> None:
+        """Register one multipart upload with control before any part of it is sent,
+        for the dispatch whose work writes it."""
+        self._push_event(
+            "CONTENT_MULTIPART_REGISTER",
+            {**payload, "dispatch_id": dispatch_id},
             ready_timeout_sec=ready_timeout_sec,
         )
 

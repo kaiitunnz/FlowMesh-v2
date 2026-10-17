@@ -356,6 +356,14 @@ def reclaim_uncertified_key(scope: str) -> str:
     return f"rc:{{{scope}}}:uncertified"
 
 
+def reclaim_multipart_key(scope: str) -> str:
+    return f"rc:{{{scope}}}:mpu"
+
+
+def reclaim_multipart_dispatch_key(scope: str, dispatch_id: str) -> str:
+    return f"rc:{{{scope}}}:mpu-dispatch:{dispatch_id}"
+
+
 def ssh_connection_key(connection_id: str) -> str:
     return f"ssh:connection:{connection_id}"
 

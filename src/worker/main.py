@@ -30,6 +30,7 @@ from .content import (
     WorkerContentPlane,
 )
 from .content.custody import ArtifactCustody
+from .content.multipart import MultipartRegistrar
 from .content.uploads import ArtifactUploader
 from .executors import EXECUTOR_REGISTRY, IMPORT_ERRORS, get_executor_class_name
 from .executors.base_executor import Executor
@@ -333,12 +334,19 @@ def _build_content_plane(
     a deployment that enables it also gets a local copy of what this worker wrote and
     can serve a peer from it, and one that does not goes to the store every time.
     """
+    multipart = MultipartRegistrar(
+        lambda task_id, payload: client.push_content_multipart_registration(
+            payload, dispatch_for(task_id)
+        ),
+        logger=logger,
+    )
     access = ContentAccessRegistry(
         cfg.object_store,
         logger,
         request_access=lambda task_id: client.push_content_access_request(
             task_id, dispatch_for(task_id)
         ),
+        register_multipart=multipart.register,
     )
     lane: ContentLaneHost | None = None
     if cfg.content_hydration_enabled:
@@ -381,6 +389,7 @@ def _build_content_plane(
             else None
         ),
         relay_max_bytes=cfg.content_relay_transfer_max_bytes,
+        multipart=multipart,
         logger=logger,
     )
 

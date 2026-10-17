@@ -56,6 +56,7 @@ from ..orchestration.telemetry import (
     NULL_WORKFLOW_SPAN_EMITTER,
     WorkflowSpanEmitter,
 )
+from ..reclamation.multipart import MultipartRegistrations
 from ..registries.node import NodeRegistry
 from ..registries.worker import ReportOutcome, StatusReport, WorkerRegistry
 from ..schemas.logs import LogEvent
@@ -149,6 +150,7 @@ class EventMonitor:
         workflow_span_emitter: WorkflowSpanEmitter | None = None,
         content_authority: ContentHydrationAuthority | None = None,
         content_access: ContentAccessBroker | None = None,
+        multipart: MultipartRegistrations | None = None,
     ) -> None:
         self._redis_client = redis_client
         self._on_node_removed = on_node_removed
@@ -168,6 +170,7 @@ class EventMonitor:
         self._server_base_url = self._validate_server_base_url(server_base_url)
         self._content_authority = content_authority
         self._content_access = content_access
+        self._multipart = multipart
         self._warned_cache_off: set[str] = set()
         self._finalizer = WorkflowFinalizer(
             redis_client=redis_client,
@@ -1055,6 +1058,8 @@ class EventMonitor:
                     )
                 else:
                     self._content_access.issue(worker_id, task_id, scope)
+            case "CONTENT_MULTIPART_REGISTER" if self._multipart is not None:
+                self._multipart.on_registration(worker_id, event.payload)
             case "CONTENT_HYDRATION_REQUEST" if self._content_authority is not None:
                 self._content_authority.on_request(
                     worker_id,
