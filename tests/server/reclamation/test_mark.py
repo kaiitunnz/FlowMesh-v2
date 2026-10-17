@@ -6,7 +6,6 @@ import hashlib
 import pytest
 
 import server.reclamation.mark as mark_module
-
 from server.reclamation.mark import (
     FALSE_POSITIVE_RATE,
     MIN_CAPACITY,

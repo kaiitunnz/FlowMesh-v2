@@ -11,8 +11,8 @@ from typing import Any
 
 import fakeredis
 import pytest
-from redis.exceptions import NoPermissionError
 from pydantic import BaseModel
+from redis.exceptions import NoPermissionError
 
 import server.clients.redis as redis_module
 import server.reclamation.marking as marking
