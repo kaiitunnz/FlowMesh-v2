@@ -120,6 +120,24 @@ The root server reports the resident fleet per service family — replica count,
 admission slots in use, and claim credit held — alongside the ready-queue depth.
 A deployment with resident capacity disabled reports queue depth alone.
 
+With `CONTENT_RECLAMATION_ENABLED` the root also reports what its last content-store
+audit found, as gauges set once per audit. "Recent" is modified within the hour before
+the audit's mark started.
+
+| Gauge | Unit | Value |
+|-------|------|-------|
+| `flowmesh.content.reclamation.unbound` | `{object}` | Stored objects no binding named at scan, older than recent |
+| `flowmesh.content.reclamation.unbound_bytes` | `By` | Their bytes |
+| `flowmesh.content.reclamation.recent_unbound` | `{object}` | Stored objects no binding named at scan, modified recently |
+| `flowmesh.content.reclamation.recent_unbound_bytes` | `By` | Their bytes |
+| `flowmesh.content.reclamation.incomplete_scopes` | `{scope}` | Scopes with a binding or tree the audit could not read, reported without an unbound count |
+| `flowmesh.content.reclamation.open_uploads` | `{upload}` | Multipart uploads the store holds open, set only where its listing of them is complete |
+| `flowmesh.content.reclamation.open_upload_bytes` | `By` | Bytes of their parts, set likewise |
+| `flowmesh.content.reclamation.open_uploads_known` | `1` | `1` when the store's listing of open uploads is complete, else `0` |
+| `flowmesh.content.reclamation.eligible` | `1` | `1` when the store can be audited, else `0` |
+| `flowmesh.content.reclamation.mark_bytes` | `By` | Memory the audit's mark holds |
+| `flowmesh.content.reclamation.sweep_seconds` | `s` | How long the last audit took |
+
 `GET /api/v1/system/metrics` is unchanged.
 
 ## Storage

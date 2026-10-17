@@ -107,6 +107,7 @@ src/
     network/              Network plane: endpoint directory, reachability, resolver, relay
     orchestration/        Durable orchestration ledger (DS), engine, outcomes
       engine/               Orchestration engine, its ledger, stores and actors
+    reclamation/          Content audit: marking what bindings name, listing the store
     registries/           Worker / Node registries (Redis-backed)
     routers/v1/           workflows, tasks, results, workers, nodes, ssh, stack, system
     schemas/              REST API request and response schemas
@@ -495,6 +496,22 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   and never treats an idempotency key as a name. The scope that binding lands in is the
   one control assigned the work when it authorized the key, so the producer reporting a
   finalization is held to it rather than naming a scope of its own.
+- **Content audit.** With `CONTENT_RECLAMATION_ENABLED` (on by default) the root audits
+  the shared store hourly in the background and changes nothing in it. Each audit marks
+  every reference the control store's bindings name — workflow ledgers, task records and
+  blueprints, artifact catalogs, settled workflows' histories and outcome finalizations
+  — and every member of each bound tree, then lists the store: every object version on a
+  bucket that keeps versions, every object on any other S3-compatible bucket. An object
+  the mark does not hold is unbound at scan. The mark is taken before the listing, so an
+  object bound since can appear unbound; one modified within the hour before the mark
+  started is counted apart as recent. A scope with a binding or tree the audit cannot
+  read is reported incomplete, with no unbound count. The audit also counts the
+  multipart uploads the store holds open, as unknown except on AWS S3 listed without a
+  key prefix, the only store whose listing of them is complete. It reports to the log,
+  to metrics (see [`TELEMETRY.md`](TELEMETRY.md)) and to the capped `rc:audit` stream in
+  the control store. A filesystem store is not audited. The mark lives in the root's
+  memory, a compact filter that may count an unbound object as bound but never the
+  reverse; each tree's manifest is read once per root.
 - **Store access.** A worker reaches the store only under a `csg-`
   `ContentStoreAccessGrant` the control plane mints for one dispatched task in one
   authorization scope, bound to the worker incarnation running it and expiring shortly
