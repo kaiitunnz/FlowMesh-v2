@@ -29,12 +29,12 @@ from ..clients.redis import (
     reclaim_pins_key,
     reclaim_protected_key,
 )
-from ..reclamation.lua import HOLDERS, KINDS
+from ..reclamation.lua import HOLDERS, KINDS, RETIREMENT
 from ..reclamation.pins import Nonces, VerifyRounds
 
 # KEYS: finalization, epoch, protected, pins, deleting, history, condemned, scopes.
 # ARGV: epoch, manifest, digest, nonce, locator, verified revision, ttl, scope.
-_RECORD = KINDS + HOLDERS + """
+_RECORD = KINDS + HOLDERS + RETIREMENT + """
 local wrong = wrong_kind(span(3, 8, 'set hash'))
 if wrong then
   return redis.error_reply('WRONGTYPE ' .. wrong)
@@ -47,14 +47,12 @@ if existing then
   return {'winner', existing}
 end
 local digest = ARGV[3]
-if redis.call('HEXISTS', KEYS[5], digest) == 1 then
+local verdict = retirement_verdict('bind', KEYS[3], KEYS[5], KEYS[6], digest, ARGV[6])
+if verdict == 'R' then
   return {'retiring'}
 end
-if redis.call('SISMEMBER', KEYS[3], digest) == 0 then
-  local revision = redis.call('HGET', KEYS[6], digest)
-  if revision and revision ~= ARGV[6] then
-    return {'verify', revision}
-  end
+if string.sub(verdict, 1, 2) == 'N:' then
+  return {'verify', string.sub(verdict, 3)}
 end
 add_holder(KEYS[4], digest, ARGV[4], ARGV[5])
 redis.call('HDEL', KEYS[7], digest)

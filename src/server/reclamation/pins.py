@@ -30,7 +30,7 @@ from ..clients.redis import (
     reclaim_protected_key,
     reclaim_unexpanded_key,
 )
-from .lua import HOLDERS, KINDS
+from .lua import HOLDERS, KINDS, RETIREMENT
 
 # How many identities one script decides at a time, which bounds how long it holds
 # Redis: about 1 ms at this size.
@@ -38,7 +38,7 @@ CHUNK = 256
 
 # KEYS: protected, pins, deleting, history, condemned, unexpanded.
 # ARGV: nonce, locator, mode, probe, n, d1..dn, e1..en, m, manifest1..manifestm.
-_ACQUIRE = KINDS + HOLDERS + """
+_ACQUIRE = KINDS + HOLDERS + RETIREMENT + """
 local wrong = wrong_kind(span(1, 6, 'set hash'))
 if wrong then
   return redis.error_reply('WRONGTYPE ' .. wrong)
@@ -48,16 +48,9 @@ local probe, n = ARGV[4] == '1', tonumber(ARGV[5])
 local out, refused = {}, false
 for i = 1, n do
   local d, expected = ARGV[5 + i], ARGV[5 + n + i]
-  local verdict = 'A'
-  local rev = mode ~= 'pending' and redis.call('HGET', KEYS[4], d)
-  if mode ~= 'pending' and redis.call('HEXISTS', KEYS[3], d) == 1 then
-    verdict, refused = 'R', true
-  elseif mode == 'bind' and rev and rev ~= expected then
-    verdict, refused = 'N:' .. rev, true
-  elseif mode == 'member' and rev then
-    verdict = 'H'
-  elseif redis.call('SISMEMBER', KEYS[1], d) == 1 then
-    verdict = 'P'
+  local verdict = retirement_verdict(mode, KEYS[1], KEYS[3], KEYS[4], d, expected)
+  if verdict == 'R' or string.sub(verdict, 1, 2) == 'N:' then
+    refused = true
   end
   out[i] = verdict
 end

@@ -66,4 +66,32 @@ local function drop_holder(key, digest, nonce)
 end
 """
 
-__all__ = ["HOLDERS", "KINDS"]
+# ``retirement_verdict(mode, protected, deleting, history, digest, verified)`` decides
+# one identity for a write about to name it, reading retirement before protection,
+# since protection stops no delete already issued and an identity protected only as a
+# pending upload names no stored bytes. It returns ``R`` while the identity is being
+# retired; in ``bind`` mode ``N:<revision>`` when it was retired at a revision other
+# than ``verified``; in ``member`` mode ``H`` when it was retired before; else ``P``
+# when it is protected and ``A`` otherwise. ``pending`` mode reads protection only.
+RETIREMENT = """
+local function retirement_verdict(mode, protected, deleting, history, digest, verified)
+  if mode ~= 'pending' then
+    if redis.call('HEXISTS', deleting, digest) == 1 then
+      return 'R'
+    end
+    local revision = redis.call('HGET', history, digest)
+    if revision and mode == 'bind' and revision ~= verified then
+      return 'N:' .. revision
+    end
+    if revision and mode == 'member' then
+      return 'H'
+    end
+  end
+  if redis.call('SISMEMBER', protected, digest) == 1 then
+    return 'P'
+  end
+  return 'A'
+end
+"""
+
+__all__ = ["HOLDERS", "KINDS", "RETIREMENT"]

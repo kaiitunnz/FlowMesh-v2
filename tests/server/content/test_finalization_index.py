@@ -18,7 +18,7 @@ from server.content.finalizations import (
     FinalizationRefused,
     StaleRootEpoch,
 )
-from server.reclamation.pins import Nonces
+from server.reclamation.pins import Nonces, PinStore, Verdict
 from shared.content import ContentReference, StoreRefusal, reference_for
 from tests.server.redis_helpers import fake_redis_client
 
@@ -111,6 +111,40 @@ def test_a_retired_identity_binds_only_on_a_verified_backing(
         _index(server, verify=lambda _: present).record(_SCOPE, "idm-1", reference)
     assert refused.value.refusal is refusal
     assert _index(server).find(_SCOPE, "idm-1") is None
+
+
+@pytest.mark.parametrize(
+    ("present", "refusal"),
+    [(False, StoreRefusal.REMATERIALIZE), (True, None)],
+    ids=["absent", "present"],
+)
+def test_a_protected_identity_retired_before_binds_only_on_a_verified_backing(
+    server, raw, present: bool, refusal: StoreRefusal | None
+) -> None:
+    # Protection alone names no stored bytes: a pending upload protects an identity
+    # whose earlier copy was retired, so the store decides, as a bind acquisition does.
+    reference = reference_for(_SCOPE, b"pending and retired")
+    raw.sadd(reclaim_protected_key(_SCOPE), reference.content_digest)
+    raw.hset(reclaim_history_key(_SCOPE), reference.content_digest, "4")
+    pins = PinStore(fake_redis_client(server)).acquire(
+        _SCOPE, [reference.content_digest], "1:99", {"kind": "probe"}
+    )
+    assert pins.verdict is Verdict.NEEDS_VERIFY
+    seen: list[ContentReference] = []
+
+    def verify(ref: ContentReference) -> bool:
+        seen.append(ref)
+        return present
+
+    index = _index(server, verify=verify)
+    if refusal is None:
+        assert index.record(_SCOPE, "idm-1", reference).content == reference
+    else:
+        with pytest.raises(FinalizationRefused) as refused:
+            index.record(_SCOPE, "idm-1", reference)
+        assert refused.value.refusal is refusal
+        assert index.find(_SCOPE, "idm-1") is None
+    assert seen == [reference]
 
 
 def test_a_verified_backing_binds_a_retired_identity(server, raw) -> None:
