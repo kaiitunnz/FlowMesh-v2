@@ -13,10 +13,10 @@ from typing import Any
 
 import fakeredis
 import pytest
-import redis
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from server.clients.redis import RECLAIM_ROOT_EPOCH_KEY, reclaim_history_key
 from server.content import FinalizationIndex
@@ -175,7 +175,7 @@ def test_a_control_store_outage_answers_503(
     client, index = _assigned("idm-outage")
 
     def unreachable(*args: Any, **kwargs: Any) -> Any:
-        raise redis.exceptions.ConnectionError("control store unreachable")
+        raise RedisConnectionError("control store unreachable")
 
     if method == "put":
         monkeypatch.setattr(index._rds.sync, "eval", unreachable)
