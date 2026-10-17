@@ -513,8 +513,9 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   every binding the control store holds and certifies each scope once its index covers
   every binding; both persist across restarts. Hourly it audits the certified scopes of
   a versioned S3 bucket its credential can list, reporting objects no binding names
-  (recent ones counted apart) and open multipart uploads to its log, metrics and an
-  audit stream. Any other store is reported ineligible.
+  (recent ones counted apart) to its log, metrics and an audit stream; any other store
+  is reported ineligible. On any S3 bucket it can list, it also reports the open
+  multipart uploads.
 - **Store access.** A worker reaches the store only under a `csg-`
   `ContentStoreAccessGrant` the control plane mints for one dispatched task in one
   authorization scope, bound to the worker incarnation running it and expiring shortly

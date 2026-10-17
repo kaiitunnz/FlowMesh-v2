@@ -118,7 +118,9 @@ recorded.
 
 The root server reports the resident fleet per service family — replica count,
 admission slots in use, and claim credit held — alongside the ready-queue depth.
-A deployment with resident capacity disabled reports queue depth alone.
+A deployment with resident capacity disabled reports queue depth alone. The root also
+reports the publication lane's depth, `flowmesh.content.publication_lane`, per `state`:
+`held`, `waiting` or `reserved`.
 
 With `CONTENT_RECLAMATION_ENABLED` the root also reports what its last content-store
 audit found, as gauges set once per sweep:
