@@ -24,8 +24,9 @@ from botocore.client import Config
 
 from shared.content import BACKEND_S3, DigestAlgorithm, ObjectStoreConfig
 
-# The most a listing returns per page.
-PAGE_SIZE = 1000
+# The most a listing returns per page, kept small since parsing a page holds the
+# interpreter.
+PAGE_SIZE = 250
 
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 
