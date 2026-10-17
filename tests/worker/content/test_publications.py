@@ -420,9 +420,11 @@ def test_a_busy_lane_is_offered_again_shortly(rig) -> None:
     outbox, ports, clock, _ = rig
     reference = _kept_store(outbox, ports).write(_SCOPE, b"result")
     outbox.reported("TASK_SUCCEEDED", "tsk-1", "dsp-1", _success(reference))
-    outbox.answer(_answer(reference, StoreRefusal.BUSY))
-    _nudge(outbox, clock, 2 * BUSY_SEC + 0.1)
-    ports.wait(lambda: len(ports.sent) == 1)
+    # However often the lane is full, the report waits no longer than a busy pause.
+    for sent in range(1, 7):
+        outbox.answer(_answer(reference, StoreRefusal.BUSY))
+        _nudge(outbox, clock, 2 * BUSY_SEC + 0.1)
+        ports.wait(lambda: len(ports.sent) == sent)
 
 
 def test_an_answer_about_another_version_is_ignored(rig) -> None:
