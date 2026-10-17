@@ -6,103 +6,23 @@ under the same identity. That question is control-plane state: the index here ma
 finalization's ``idm-*`` to the reference it produced, and holds nothing else — never
 the bytes, which live in the shared content store, and never a general name for content,
 which an idempotency key is not.
-
-Recording a finalization is a binding, so it protects the content it binds, and only
-the winner's: a re-drive that loses is handed the first binding and protects nothing.
 """
 
-import json
-from collections.abc import Callable
-
-from shared.content import ContentReference, StoreRefusal
+from shared.content import ContentReference
 from shared.outcome import OutcomeManifest
 
 from ..clients.redis import (
-    RECLAIM_ROOT_EPOCH_KEY,
-    RECLAIM_SCOPES_KEY,
     RedisClient,
     content_finalization_key,
     content_finalization_scope_key,
-    reclaim_condemned_key,
-    reclaim_deleting_key,
-    reclaim_history_key,
-    reclaim_pins_key,
-    reclaim_protected_key,
 )
-from ..reclamation.lua import HOLDERS, KINDS, RETIREMENT
-from ..reclamation.pins import Nonces, VerifyRounds
-
-# KEYS: finalization, epoch, protected, pins, deleting, history, condemned, scopes.
-# ARGV: epoch, manifest, digest, nonce, locator, verified revision, ttl, scope.
-_RECORD = KINDS + HOLDERS + RETIREMENT + """
-local wrong = wrong_kind(span(3, 8, 'set hash'))
-if wrong then
-  return redis.error_reply('WRONGTYPE ' .. wrong)
-end
-if redis.call('GET', KEYS[2]) ~= ARGV[1] then
-  return {'fenced'}
-end
-local existing = redis.call('GET', KEYS[1])
-if existing then
-  return {'winner', existing}
-end
-local digest = ARGV[3]
-local verdict = retirement_verdict('bind', KEYS[3], KEYS[5], KEYS[6], digest, ARGV[6])
-if verdict == 'R' then
-  return {'retiring'}
-end
-if string.sub(verdict, 1, 2) == 'N:' then
-  return {'verify', string.sub(verdict, 3)}
-end
-add_holder(KEYS[4], digest, ARGV[4], ARGV[5])
-redis.call('HDEL', KEYS[7], digest)
-redis.call('SET', KEYS[1], ARGV[2])
-if tonumber(ARGV[7]) > 0 then
-  redis.call('EXPIRE', KEYS[1], tonumber(ARGV[7]))
-end
-redis.call('SADD', KEYS[3], digest)
-redis.call('SADD', KEYS[8], ARGV[8])
-drop_holder(KEYS[4], digest, ARGV[4])
-return {'committed', ARGV[2]}
-"""
-
-# How many times a recording re-checks a backing it verified before it gives up for now.
-_VERIFY_ROUNDS = 3
-
-
-class FinalizationRefused(Exception):
-    """A finalization the index did not record, with what its producer does next."""
-
-    def __init__(self, refusal: StoreRefusal) -> None:
-        super().__init__(f"finalization not recorded: {refusal.value}")
-        self.refusal = refusal
-
-
-class StaleRootEpoch(RuntimeError):
-    """This root no longer holds the root epoch and records nothing."""
 
 
 class FinalizationIndex:
-    """The reference each outcome finalization committed, by scope and key.
+    """The reference each outcome finalization committed, by scope and key."""
 
-    ``nonces`` returns the acquisition nonces of the root epoch this root records
-    under, or None before it holds one; ``verify`` reads whether a reference's content
-    is currently stored: True, False, or None when the store cannot say. ``on_fenced``
-    runs when a later root has taken the epoch, before the recording raises.
-    """
-
-    def __init__(
-        self,
-        redis: RedisClient,
-        nonces: Callable[[], Nonces | None],
-        verify: Callable[[ContentReference], bool | None],
-        on_fenced: Callable[[], None],
-        ttl_sec: float = 0.0,
-    ) -> None:
+    def __init__(self, redis: RedisClient, *, ttl_sec: float = 0.0) -> None:
         self._rds = redis
-        self._nonces = nonces
-        self._verify = verify
-        self._on_fenced = on_fenced
         self._ttl = ttl_sec
 
     def assign_scope(self, idempotency_key: str, scope: str) -> None:
@@ -141,60 +61,21 @@ class FinalizationIndex:
 
         The first binding stands: a re-drive that produced the same content records
         nothing new, and one that produced different content still settles as the
-        first, so an outcome never changes after it has been committed. One script
-        decides the winner, checks the content is not being retired, and protects it,
-        so two drives racing never both believe they won. Raises
-        ``FinalizationRefused`` when the content cannot be bound now, including before
-        this root holds an epoch, and ``StaleRootEpoch`` once a later root holds it.
+        first, so an outcome never changes after it has been committed. The write is
+        what decides which drive was first — two drives racing here is the very thing
+        the index exists to settle, so reading before writing would let both believe
+        they won and leave the later one's content bound.
         """
-        nonces = self._nonces()
-        if nonces is None:
-            raise FinalizationRefused(StoreRefusal.RETRY)
+        key = content_finalization_key(scope, idempotency_key)
         manifest = OutcomeManifest(
             content=content, provenance=provenance, idempotency_key=idempotency_key
-        ).model_dump_json()
-        nonce = nonces.next()
-        locator = json.dumps({"kind": "finalization", "idm": idempotency_key})
-        keys = [
-            content_finalization_key(scope, idempotency_key),
-            RECLAIM_ROOT_EPOCH_KEY,
-            reclaim_protected_key(scope),
-            reclaim_pins_key(scope),
-            reclaim_deleting_key(scope),
-            reclaim_history_key(scope),
-            reclaim_condemned_key(scope),
-            RECLAIM_SCOPES_KEY,
-        ]
-        verified = ""
-        rounds = VerifyRounds(_VERIFY_ROUNDS)
-        while rounds.take():
-            reply = list(
-                self._rds.sync.eval(
-                    _RECORD,
-                    len(keys),
-                    *keys,
-                    str(nonces.epoch),
-                    manifest,
-                    content.content_digest,
-                    nonce,
-                    locator,
-                    verified,
-                    str(int(self._ttl)),
-                    scope,
-                )
-            )
-            match reply[0]:
-                case "committed" | "winner":
-                    return OutcomeManifest.model_validate_json(reply[1])
-                case "fenced":
-                    self._on_fenced()
-                    raise StaleRootEpoch("a later root holds the root epoch")
-                case "retiring":
-                    raise FinalizationRefused(StoreRefusal.RETRY_RETIREMENT)
-            present = self._verify(content)
-            if present is False:
-                raise FinalizationRefused(StoreRefusal.REMATERIALIZE)
-            if present is None:
-                raise FinalizationRefused(StoreRefusal.RETRY)
-            verified = str(reply[1])
-        raise FinalizationRefused(StoreRefusal.RETRY)
+        )
+        if not self._rds.sync.set_value_if_absent(key, manifest.model_dump_json()):
+            if (existing := self.find(scope, idempotency_key)) is not None:
+                return existing
+            # The binding went away between the refused write and the read — expired,
+            # or dropped — so this drive's content is what there is to bind.
+            self._rds.sync.set_value(key, manifest.model_dump_json())
+        if self._ttl:
+            self._rds.sync.expire(key, int(self._ttl))
+        return manifest

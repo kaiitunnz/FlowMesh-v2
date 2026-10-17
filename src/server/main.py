@@ -243,12 +243,7 @@ if IS_ROOT_NODE:
             read_attempts=config.content_store.read_attempts,
         )
     )
-    FINALIZATION_INDEX = FinalizationIndex(
-        REDIS_CLIENT,
-        lambda: RUNTIME.nonces if RUNTIME else None,
-        RESULT_READER.backed,
-        _stop_fenced_root,
-    )
+    FINALIZATION_INDEX = FinalizationIndex(REDIS_CLIENT)
     RUNTIME = TaskRuntime(
         WORKFLOW_REGISTRY,
         WORKER_REGISTRY,

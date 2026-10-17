@@ -1,194 +1,107 @@
-"""Which content an outcome finalization is bound to, which drive decides it, and
-what its binding protects."""
+"""Which content an outcome finalization is bound to, and which drive decides it."""
 
-from collections.abc import Callable
+from types import SimpleNamespace
+from typing import Any, cast
 
-import fakeredis
-import pytest
-
-from server.clients.redis import (
-    RECLAIM_ROOT_EPOCH_KEY,
-    reclaim_deleting_key,
-    reclaim_history_key,
-    reclaim_pins_key,
-    reclaim_protected_key,
-)
 from server.content import FinalizationIndex
-from server.content.finalizations import (
-    FinalizationRefused,
-    StaleRootEpoch,
-)
-from server.reclamation.pins import Nonces, PinStore, Verdict
-from shared.content import ContentReference, StoreRefusal, reference_for
-from tests.server.redis_helpers import fake_redis_client
+from shared.content import reference_for
 
 _SCOPE = "tenant-a"
 
 
-@pytest.fixture
-def server() -> fakeredis.FakeServer:
-    return fakeredis.FakeServer()
+class _FakeRedis:
+    """A redis whose set-if-absent is the only way a first writer is decided."""
+
+    def __init__(self) -> None:
+        self.values: dict[str, str] = {}
+        self.expirations: dict[str, int] = {}
+
+    def get(self, key: str) -> str | None:
+        return self.values.get(key)
+
+    def set_value(self, key: str, value: str) -> None:
+        self.values[key] = value
+
+    def set_value_if_absent(self, key: str, value: str) -> bool:
+        if key in self.values:
+            return False
+        self.values[key] = value
+        return True
+
+    def expire(self, key: str, ttl: int) -> None:
+        self.expirations[key] = ttl
 
 
-_EPOCH = 1
+def _index(fake: _FakeRedis, ttl: float = 0.0) -> FinalizationIndex:
+    return FinalizationIndex(cast(Any, SimpleNamespace(sync=fake)), ttl_sec=ttl)
 
 
-@pytest.fixture
-def raw(server: fakeredis.FakeServer) -> fakeredis.FakeRedis:
-    redis = fakeredis.FakeRedis(server=server, decode_responses=True)
-    redis.set(RECLAIM_ROOT_EPOCH_KEY, str(_EPOCH))
-    return redis
-
-
-def _index(
-    server: fakeredis.FakeServer,
-    nonces: Nonces | None = None,
-    verify: Callable[[ContentReference], bool | None] = lambda _: True,
-    on_fenced: Callable[[], None] = lambda: None,
-) -> FinalizationIndex:
-    held = nonces or Nonces(_EPOCH)
-    return FinalizationIndex(fake_redis_client(server), lambda: held, verify, on_fenced)
-
-
-def test_a_finalization_binds_and_protects_the_content_it_materialized(
-    server, raw
-) -> None:
+def test_a_finalization_binds_the_content_it_materialized() -> None:
+    fake = _FakeRedis()
     reference = reference_for(_SCOPE, b"the outcome", media_type="application/json")
 
-    manifest = _index(server).record(_SCOPE, "idm-1", reference)
+    manifest = _index(fake).record(_SCOPE, "idm-1", reference)
 
     assert manifest.content == reference
     assert manifest.idempotency_key == "idm-1"
-    assert raw.sismember(reclaim_protected_key(_SCOPE), reference.content_digest)
-    assert not raw.exists(reclaim_pins_key(_SCOPE))
 
 
-def test_a_re_drive_resolves_the_first_materialization_and_protects_nothing(
-    server, raw
-) -> None:
-    index = _index(server)
+def test_a_re_drive_resolves_the_first_materialization() -> None:
+    fake = _FakeRedis()
+    index = _index(fake)
     first = reference_for(_SCOPE, b"sampled once", media_type="application/json")
     index.record(_SCOPE, "idm-1", first)
-    loser = reference_for(_SCOPE, b"sampled twice", media_type="application/json")
 
-    again = index.record(_SCOPE, "idm-1", loser)
+    again = index.record(
+        _SCOPE,
+        "idm-1",
+        reference_for(_SCOPE, b"sampled twice", media_type="application/json"),
+    )
 
     assert again.content == first
     settled = index.find(_SCOPE, "idm-1")
     assert settled is not None and settled.content == first
-    assert not raw.sismember(reclaim_protected_key(_SCOPE), loser.content_digest)
 
 
-def test_a_scope_does_not_see_another_scopes_finalization(server, raw) -> None:
-    index = _index(server)
+class _RacingRedis(_FakeRedis):
+    """A redis where another drive wins the key before this one writes."""
+
+    def __init__(self, winner: str) -> None:
+        super().__init__()
+        self._winner = winner
+
+    def set_value_if_absent(self, key: str, value: str) -> bool:
+        if key not in self.values:
+            self.values[key] = self._winner
+            return False
+        return super().set_value_if_absent(key, value)
+
+
+def test_a_drive_that_loses_the_write_takes_the_winners_content() -> None:
+    """Two drives race the same key and the refused one adopts what the winner bound.
+
+    Both drives see no binding when they look, so the decision has to be the write
+    itself. Reading first and then writing would let both believe they were first: the
+    later one's content would end up bound and each caller would be told its own stood,
+    which is exactly the outcome this index exists to prevent.
+    """
+    winner = reference_for(_SCOPE, b"sampled once", media_type="application/json")
+    index_for_winner = _index(_FakeRedis())
+    winning_manifest = index_for_winner.record(_SCOPE, "idm-1", winner)
+
+    fake = _RacingRedis(winning_manifest.model_dump_json())
+    loser = _index(fake).record(
+        _SCOPE, "idm-1", reference_for(_SCOPE, b"sampled twice")
+    )
+
+    assert loser.content == winner
+    settled = _index(fake).find(_SCOPE, "idm-1")
+    assert settled is not None and settled.content == winner
+
+
+def test_a_scope_does_not_see_another_scopes_finalization() -> None:
+    fake = _FakeRedis()
+    index = _index(fake)
     index.record(_SCOPE, "idm-1", reference_for(_SCOPE, b"mine"))
 
     assert index.find("tenant-b", "idm-1") is None
-
-
-def test_content_being_retired_is_refused_and_nothing_is_bound(server, raw) -> None:
-    reference = reference_for(_SCOPE, b"doomed")
-    raw.hset(reclaim_deleting_key(_SCOPE), reference.content_digest, "{}")
-    with pytest.raises(FinalizationRefused) as refused:
-        _index(server).record(_SCOPE, "idm-1", reference)
-    assert refused.value.refusal is StoreRefusal.RETRY_RETIREMENT
-    assert _index(server).find(_SCOPE, "idm-1") is None
-
-
-@pytest.mark.parametrize(
-    ("present", "refusal"),
-    [
-        (False, StoreRefusal.REMATERIALIZE),
-        (None, StoreRefusal.RETRY),
-    ],
-)
-def test_a_retired_identity_binds_only_on_a_verified_backing(
-    server, raw, present: bool | None, refusal: StoreRefusal
-) -> None:
-    reference = reference_for(_SCOPE, b"retired once")
-    raw.hset(reclaim_history_key(_SCOPE), reference.content_digest, "4")
-    with pytest.raises(FinalizationRefused) as refused:
-        _index(server, verify=lambda _: present).record(_SCOPE, "idm-1", reference)
-    assert refused.value.refusal is refusal
-    assert _index(server).find(_SCOPE, "idm-1") is None
-
-
-@pytest.mark.parametrize(
-    ("present", "refusal"),
-    [(False, StoreRefusal.REMATERIALIZE), (True, None)],
-    ids=["absent", "present"],
-)
-def test_a_protected_identity_retired_before_binds_only_on_a_verified_backing(
-    server, raw, present: bool, refusal: StoreRefusal | None
-) -> None:
-    # Protection alone names no stored bytes: a pending upload protects an identity
-    # whose earlier copy was retired, so the store decides, as a bind acquisition does.
-    reference = reference_for(_SCOPE, b"pending and retired")
-    raw.sadd(reclaim_protected_key(_SCOPE), reference.content_digest)
-    raw.hset(reclaim_history_key(_SCOPE), reference.content_digest, "4")
-    pins = PinStore(fake_redis_client(server)).acquire(
-        _SCOPE, [reference.content_digest], "1:99", {"kind": "probe"}
-    )
-    assert pins.verdict is Verdict.NEEDS_VERIFY
-    seen: list[ContentReference] = []
-
-    def verify(ref: ContentReference) -> bool:
-        seen.append(ref)
-        return present
-
-    index = _index(server, verify=verify)
-    if refusal is None:
-        assert index.record(_SCOPE, "idm-1", reference).content == reference
-    else:
-        with pytest.raises(FinalizationRefused) as refused:
-            index.record(_SCOPE, "idm-1", reference)
-        assert refused.value.refusal is refusal
-        assert index.find(_SCOPE, "idm-1") is None
-    assert seen == [reference]
-
-
-def test_a_verified_backing_binds_a_retired_identity(server, raw) -> None:
-    reference = reference_for(_SCOPE, b"retired once")
-    raw.hset(reclaim_history_key(_SCOPE), reference.content_digest, "4")
-    seen: list[ContentReference] = []
-
-    def verify(ref: ContentReference) -> bool:
-        seen.append(ref)
-        return True
-
-    manifest = _index(server, verify=verify).record(_SCOPE, "idm-1", reference)
-    assert manifest.content == reference and seen == [reference]
-    assert raw.sismember(reclaim_protected_key(_SCOPE), reference.content_digest)
-
-
-def test_a_root_past_its_epoch_records_nothing_and_stops(server, raw) -> None:
-    raw.set(RECLAIM_ROOT_EPOCH_KEY, "2")
-    fenced: list[bool] = []
-    index = _index(server, on_fenced=lambda: fenced.append(True))
-    with pytest.raises(StaleRootEpoch):
-        index.record(_SCOPE, "idm-1", reference_for(_SCOPE, b"late"))
-    assert fenced == [True]
-    assert index.find(_SCOPE, "idm-1") is None
-
-
-def test_a_root_holding_no_epoch_yet_answers_retry_and_records_nothing(
-    server, raw
-) -> None:
-    index = FinalizationIndex(
-        fake_redis_client(server), lambda: None, lambda _: True, lambda: None
-    )
-    with pytest.raises(FinalizationRefused) as refused:
-        index.record(_SCOPE, "idm-1", reference_for(_SCOPE, b"early"))
-    assert refused.value.refusal is StoreRefusal.RETRY
-    assert index.find(_SCOPE, "idm-1") is None
-
-
-def test_a_finalization_draws_its_nonce_from_the_roots_shared_source(
-    server, raw
-) -> None:
-    # A holder nonce must be unique within the epoch across every acquirer, so the
-    # index draws from the runtime's own source rather than a counter of its own.
-    nonces = Nonces(_EPOCH)
-    assert nonces.next() == f"{_EPOCH}:1"
-    _index(server, nonces).record(_SCOPE, "idm-1", reference_for(_SCOPE, b"drawn"))
-    assert nonces.next() == f"{_EPOCH}:3"

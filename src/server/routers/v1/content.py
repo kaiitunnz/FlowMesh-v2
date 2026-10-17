@@ -6,9 +6,7 @@ materialization instead of re-running a sampled producer. Only that binding cros
 surface: the bytes are in the shared store and never pass through the server.
 """
 
-import asyncio
 import logging
-from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
@@ -21,22 +19,10 @@ from ...auth.security import (
     authenticate_connection,
     require_permission,
 )
-from ...clients.redis import REDIS_CONN_ERRORS
 from ...content import FinalizationIndex
-from ...content.finalizations import FinalizationRefused, StaleRootEpoch
 from ...hooks import ResourceAction, ResourceKind
 
 router = APIRouter(prefix="/content", tags=["Content"])
-
-_UNAVAILABLE: tuple[type[BaseException], ...] = (StaleRootEpoch, *REDIS_CONN_ERRORS)
-
-_BIND_RESPONSES: dict[int | str, dict[str, Any]] = {
-    409: {
-        "description": "The content cannot be bound now; ``detail.refusal`` names "
-        "what its producer does next.",
-    },
-    503: {"description": "A later root has replaced this one."},
-}
 
 
 def _require_index(index: FinalizationIndex | None) -> FinalizationIndex:
@@ -79,61 +65,10 @@ def _binding_scope(
     return assigned
 
 
-def _unavailable(exc: BaseException) -> HTTPException:
-    return HTTPException(
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
-    )
-
-
-def _bind(
-    index: FinalizationIndex,
-    principal: PrincipalContext,
-    idempotency_key: str,
-    asserted: str,
-    content: ContentReference,
-) -> OutcomeManifest:
-    try:
-        admitted = _binding_scope(index, principal, idempotency_key, asserted)
-        if content.authorization_scope != admitted:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="content is outside the admitted scope",
-            )
-        return index.record(
-            admitted,
-            idempotency_key,
-            content,
-            provenance=f"principal:{principal.principal_id}",
-        )
-    except FinalizationRefused as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={"refusal": exc.refusal.value},
-        ) from exc
-    except _UNAVAILABLE as exc:
-        raise _unavailable(exc) from exc
-
-
-def _resolve(
-    index: FinalizationIndex,
-    principal: PrincipalContext,
-    idempotency_key: str,
-    asserted: str,
-) -> OutcomeManifest | None:
-    try:
-        return index.find(
-            _binding_scope(index, principal, idempotency_key, asserted),
-            idempotency_key,
-        )
-    except REDIS_CONN_ERRORS as exc:
-        raise _unavailable(exc) from exc
-
-
 @router.put(
     "/finalizations",
     summary="Bind an outcome finalization to its content",
     description="Record the content one idempotency key materialized.",
-    responses=_BIND_RESPONSES,
 )
 async def put_finalization(
     content: ContentReference,
@@ -146,8 +81,15 @@ async def put_finalization(
     await require_permission(
         principal, ResourceKind.RESULT, None, ResourceAction.WRITE, logger
     )
-    return await asyncio.to_thread(
-        _bind, _require_index(index), principal, idem, scope, content
+    bound = _require_index(index)
+    admitted = _binding_scope(bound, principal, idem, scope)
+    if content.authorization_scope != admitted:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="content is outside the admitted scope",
+        )
+    return bound.record(
+        admitted, idem, content, provenance=f"principal:{principal.principal_id}"
     )
 
 
@@ -166,9 +108,8 @@ async def get_finalization(
     await require_permission(
         principal, ResourceKind.RESULT, None, ResourceAction.READ, logger
     )
-    manifest = await asyncio.to_thread(
-        _resolve, _require_index(index), principal, idem, scope
-    )
+    bound = _require_index(index)
+    manifest = bound.find(_binding_scope(bound, principal, idem, scope), idem)
     if manifest is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="no content for key"
