@@ -2,7 +2,8 @@
 
 The audit shares the root's interpreter with the runtime, so it works in short bursts
 and rests between them for long enough that it holds at most a ``duty`` share of the
-time, never under a minimum pause.
+time, never under a minimum pause. A burst counts only the CPU time its thread spent,
+so time waiting on the network or the store costs no rest.
 """
 
 import threading
@@ -15,8 +16,8 @@ MIN_PAUSE_SEC = 0.005
 
 
 class Pacer:
-    """Rests after every ``every`` units of work, in proportion to the work done since
-    the last rest."""
+    """Rests after every ``every`` units of work, in proportion to the CPU time spent
+    since the last rest."""
 
     def __init__(
         self,
@@ -25,7 +26,7 @@ class Pacer:
         *,
         duty: float = DUTY,
         min_pause_sec: float = MIN_PAUSE_SEC,
-        clock: Callable[[], float] = time.perf_counter,
+        clock: Callable[[], float] = time.thread_time,
     ) -> None:
         self._stop = stop
         self._every = every

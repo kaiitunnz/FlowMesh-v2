@@ -1,4 +1,5 @@
 import threading
+import time
 
 import pytest
 
@@ -64,3 +65,19 @@ def test_a_set_stop_ends_the_work_at_the_next_unit() -> None:
 
     assert pacer.tick()
     assert pacer.pause()
+
+
+def test_a_pacer_rests_for_its_cpu_time_not_its_waiting() -> None:
+    stop = _Waits()
+    pacer = Pacer(stop, 1, duty=0.1, min_pause_sec=0.005)
+
+    time.sleep(0.05)
+    pacer.tick()
+    end = time.thread_time() + 0.02
+    while time.thread_time() < end:
+        pass
+    pacer.tick()
+
+    waiting, working = stop.waits
+    assert waiting < 0.05
+    assert working >= 0.18

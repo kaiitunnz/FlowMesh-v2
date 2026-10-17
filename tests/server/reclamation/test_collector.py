@@ -353,7 +353,9 @@ def test_listing_pages_rest_in_proportion_to_their_work(
     listed = fx.s3.list_object_versions
 
     def slow(**kwargs: Any) -> Any:
-        time.sleep(busy)
+        end = time.thread_time() + busy
+        while time.thread_time() < end:
+            pass
         return listed(**kwargs)
 
     monkeypatch.setattr(fx.s3, "list_object_versions", slow)
