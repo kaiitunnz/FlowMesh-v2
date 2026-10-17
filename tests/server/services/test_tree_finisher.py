@@ -70,9 +70,7 @@ def test_a_staged_tree_whose_members_were_not_all_held_is_tried_again() -> None:
     runtime.tree_expanded.assert_not_called()
 
 
-def test_a_written_through_tree_whose_members_were_not_all_held_is_left_unexpanded() -> (
-    None
-):
+def test_a_written_through_tree_not_all_held_is_left_to_reconciliation() -> None:
     finisher, runtime = _finisher(TreeStatus.INCOMPLETE)
     _submit(finisher, staged=False)
 
