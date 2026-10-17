@@ -11,6 +11,7 @@ import fakeredis
 import pytest
 
 from server.clients.redis import (
+    RECLAIM_ROOT_EPOCH_KEY,
     reclaim_deleting_key,
     reclaim_history_key,
     reclaim_pins_key,
@@ -88,6 +89,7 @@ class _Rig:
         record_dispatch(self.runtime, self.task_id, "wkr-1", "dsp-1")
         server = fakeredis.FakeServer()
         self.raw = fakeredis.FakeRedis(server=server, decode_responses=True)
+        self.raw.set(RECLAIM_ROOT_EPOCH_KEY, str(self.runtime.root_epoch))
         self.backed = backed or _Backed()
         self.answers = _Answers()
         setattr(self.runtime, "send_publication_answer", self.answers)

@@ -7,8 +7,10 @@ from typing import Any, cast
 
 import fakeredis
 import pytest
+import redis.exceptions
 
 from server.clients.redis import (
+    RECLAIM_ROOT_EPOCH_KEY,
     RECLAIM_SCOPES_KEY,
     reclaim_deleting_key,
     reclaim_history_key,
@@ -100,7 +102,8 @@ class _Rig:
     def __init__(self) -> None:
         server = fakeredis.FakeServer()
         self.raw = fakeredis.FakeRedis(server=server, decode_responses=True)
-        client = fake_redis_client(server)
+        self.raw.set(RECLAIM_ROOT_EPOCH_KEY, "9")
+        self.client = client = fake_redis_client(server)
         self.store = _Store()
         self.trees = TreeExpander(client, self.store.open, self.store.stored_size)
         self.holds = PublicationHolds(
@@ -349,3 +352,207 @@ def test_reconciling_leaves_a_tree_its_owed_upload_expands(rig) -> None:
     )
 
     assert waiting == 1 and rig.store.reads == 0
+
+
+def _flaky(rig: _Rig, method: str, fail_on: int, monkeypatch) -> list[int]:
+    """Make the ``fail_on``-th call of the control store's ``method`` drop its
+    connection; returns the running call count."""
+    real = getattr(rig.client.sync, method)
+    calls = [0]
+
+    def flaky(*args: Any, **kwargs: Any) -> Any:
+        calls[0] += 1
+        if calls[0] == fail_on:
+            raise redis.exceptions.ConnectionError("connection reset")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(rig.client.sync, method, flaky)
+    return calls
+
+
+def test_a_promotion_the_control_store_drops_finishes_when_promoted_again(
+    rig, monkeypatch
+) -> None:
+    members = _members(600)
+    manifest = _tree(rig.store, members)
+    preparation = rig.holds.acquire(_success(manifest), _LOCATOR)
+    assert preparation.holds is not None
+    rig.raw.sadd(reclaim_protected_key(_SCOPE), manifest.content_digest)
+    _flaky(rig, "eval", 2, monkeypatch)
+
+    outcome = rig.trees.promote(manifest, preparation.holds.nonce)
+
+    assert outcome.status is TreeStatus.UNAVAILABLE
+    assert rig.unexpanded() == {manifest.content_digest}
+    assert {m.digest for m in members[:256]} <= rig.protected()
+    assert {m.digest for m in members[256:]} <= rig.pinned()
+    assert rig.trees.promote(manifest, preparation.holds.nonce).status is (
+        TreeStatus.DONE
+    )
+    assert {m.digest for m in members} <= rig.protected()
+    assert rig.pinned() == {manifest.content_digest}
+    assert rig.unexpanded() == set()
+
+
+def test_a_hold_the_control_store_drops_is_unavailable(rig) -> None:
+    manifest = _tree(rig.store, _members(3))
+
+    def dropped(_scope: str, _members: list[TreeMember]) -> None:
+        raise redis.exceptions.TimeoutError("timed out")
+
+    assert rig.trees.hold(manifest, dropped).status is TreeStatus.UNAVAILABLE
+
+
+def test_a_release_the_control_store_drops_is_unavailable(rig) -> None:
+    manifest = _tree(rig.store, _members(3))
+
+    def dropped(*_args: Any) -> int:
+        raise redis.exceptions.ConnectionError("connection reset")
+
+    outcome = rig.trees.release(manifest, "9:1", dropped)
+    assert outcome.status is TreeStatus.UNAVAILABLE
+
+
+def test_a_reconcile_the_control_store_drops_resumes_on_the_next_pass(
+    rig, monkeypatch
+) -> None:
+    trees = [_tree(rig.store, _members(3, salt)) for salt in ("a", "b")]
+    rig.raw.sadd(RECLAIM_SCOPES_KEY, _SCOPE)
+    for manifest in trees:
+        rig.raw.sadd(reclaim_unexpanded_key(_SCOPE), manifest.content_digest)
+        rig.raw.sadd(reclaim_protected_key(_SCOPE), manifest.content_digest)
+    _flaky(rig, "sismember", 2, monkeypatch)
+
+    def expand(manifest: ContentReference) -> Any:
+        return rig.holds.expand(manifest, _LOCATOR, staged=False)
+
+    assert rig.trees.reconcile(rig.trees.scopes(), expand, lambda: False) == 1
+    assert len(rig.unexpanded()) == 1
+    assert rig.trees.reconcile(rig.trees.scopes(), expand, lambda: False) == 0
+    assert rig.unexpanded() == set()
+    for salt in ("a", "b"):
+        assert {m.digest for m in _members(3, salt)} <= rig.protected()
+
+
+def test_a_member_whose_hold_ended_keeps_its_tree_unexpanded(rig) -> None:
+    members = _members(3)
+    manifest = _tree(rig.store, members)
+    preparation = rig.holds.acquire(_success(manifest), _LOCATOR)
+    assert preparation.holds is not None
+    rig.raw.sadd(reclaim_protected_key(_SCOPE), manifest.content_digest)
+    rig.raw.hdel(reclaim_pins_key(_SCOPE), members[1].digest)
+    bound = frozenset({manifest.content_digest})
+
+    ((tree, outcome),) = rig.holds.finish(preparation.holds, bound, _LOCATOR)
+
+    assert tree == manifest and outcome.status is TreeStatus.INCOMPLETE
+    assert members[1].digest not in rig.protected()
+    assert rig.unexpanded() == {manifest.content_digest}
+    # A later expansion under a fresh hold finishes it.
+    waiting = rig.trees.reconcile(
+        rig.trees.scopes(),
+        lambda m: rig.holds.expand(m, _LOCATOR, staged=False),
+        lambda: False,
+    )
+    assert waiting == 0
+    assert {m.digest for m in members} <= rig.protected()
+    assert rig.unexpanded() == set()
+
+
+def test_an_expansion_a_later_root_fenced_protects_nothing(rig) -> None:
+    members = _members(3)
+    manifest = _tree(rig.store, members)
+    rig.raw.sadd(RECLAIM_SCOPES_KEY, _SCOPE)
+    rig.raw.sadd(reclaim_protected_key(_SCOPE), manifest.content_digest)
+    rig.raw.sadd(reclaim_unexpanded_key(_SCOPE), manifest.content_digest)
+    rig.raw.set(RECLAIM_ROOT_EPOCH_KEY, "10")
+
+    outcome = rig.holds.expand(manifest, _LOCATOR, staged=False)
+
+    assert outcome.status is TreeStatus.FENCED
+    assert rig.protected() == {manifest.content_digest}
+    assert rig.unexpanded() == {manifest.content_digest}
+    assert rig.pinned() == set()
+
+    other = _tree(rig.store, _members(3, "b"))
+    rig.raw.sadd(reclaim_protected_key(_SCOPE), other.content_digest)
+    rig.raw.sadd(reclaim_unexpanded_key(_SCOPE), other.content_digest)
+    expanded: list[ContentReference] = []
+
+    def expand(m: ContentReference) -> Any:
+        expanded.append(m)
+        return rig.holds.expand(m, _LOCATOR, staged=False)
+
+    # The pass stops at the first fenced expansion.
+    assert rig.trees.reconcile(rig.trees.scopes(), expand, lambda: False) == 1
+    assert len(expanded) == 1
+
+
+def test_a_write_through_promotion_a_later_root_fenced_leaves_the_tree(rig) -> None:
+    members = _members(3)
+    manifest = _tree(rig.store, members)
+    preparation = rig.holds.acquire(_success(manifest), _LOCATOR)
+    assert preparation.holds is not None
+    rig.raw.sadd(reclaim_protected_key(_SCOPE), manifest.content_digest)
+    rig.raw.set(RECLAIM_ROOT_EPOCH_KEY, "10")
+
+    assert (
+        rig.trees.promote(manifest, preparation.holds.nonce).status is TreeStatus.FENCED
+    )
+    assert rig.protected() == {manifest.content_digest}
+    assert rig.unexpanded() == {manifest.content_digest}
+
+
+def test_settling_an_unbound_tree_never_drops_one_a_publication_holds(
+    rig, monkeypatch
+) -> None:
+    manifest = _tree(rig.store, _members(3))
+    digest = manifest.content_digest
+    rig.raw.sadd(reclaim_unexpanded_key(_SCOPE), digest)
+    pins = PinStore(rig.client)
+    raced: list[str] = []
+    real_pipeline, real_eval = rig.client.sync.control_pipeline, rig.client.sync.eval
+
+    def race() -> None:
+        # A publication naming the tree holds it, entering the unexpanded set with
+        # its hold, between the settle's first read and its write.
+        if not raced:
+            raced.append(digest)
+            pins.acquire(_SCOPE, [digest], "9:7", {}, manifests=[digest])
+
+    class _Pipeline:
+        def __init__(self, inner: Any) -> None:
+            self._inner = inner
+
+        def __enter__(self) -> Any:
+            pipe = self._inner.__enter__()
+            execute = pipe.execute
+
+            def raced_execute() -> Any:
+                result = execute()
+                race()
+                return result
+
+            pipe.execute = raced_execute
+            return pipe
+
+        def __exit__(self, *exc: Any) -> Any:
+            return self._inner.__exit__(*exc)
+
+    def raced_eval(*args: Any) -> Any:
+        result = real_eval(*args)
+        race()
+        return result
+
+    monkeypatch.setattr(
+        rig.client.sync,
+        "control_pipeline",
+        lambda *a, **k: _Pipeline(real_pipeline(*a, **k)),
+    )
+    monkeypatch.setattr(rig.client.sync, "eval", raced_eval)
+
+    rig.trees.settle_unbound(_SCOPE, digest)
+
+    assert raced
+    assert digest in rig.pinned()
+    assert rig.unexpanded() == {digest}

@@ -30,7 +30,9 @@ from shared.content.tree import (
 )
 
 from ..clients.redis import (
+    RECLAIM_ROOT_EPOCH_KEY,
     RECLAIM_SCOPES_KEY,
+    REDIS_CONN_ERRORS,
     RedisClient,
     reclaim_pins_key,
     reclaim_protected_key,
@@ -40,20 +42,26 @@ from ..clients.redis import (
 from ..task.results import ResultUnavailable, ResultUnreadable
 from .pins import CHUNK
 
-# KEYS: protected, pins, scopes. ARGV: nonce, scope, d1..dn.
+# KEYS: protected, pins, scopes, root epoch. ARGV: nonce, scope, epoch, d1..dn.
+# Returns -1 when a later root holds the epoch, else how many members are neither
+# promoted nor already protected.
 _PROMOTE = """
-for _, key in ipairs(KEYS) do
-  local kind = redis.call('TYPE', key).ok
+for i = 1, 3 do
+  local kind = redis.call('TYPE', KEYS[i]).ok
   if kind ~= 'none' and kind ~= 'set' and kind ~= 'hash' then
-    return redis.error_reply('WRONGTYPE ' .. key)
+    return redis.error_reply('WRONGTYPE ' .. KEYS[i])
   end
 end
+if redis.call('GET', KEYS[4]) ~= ARGV[3] then
+  return -1
+end
 redis.call('SADD', KEYS[3], ARGV[2])
-local promoted = 0
-for i = 3, #ARGV do
+local missing = 0
+for i = 4, #ARGV do
   local current = redis.call('HGET', KEYS[2], ARGV[i])
+  local held = false
   if current then
-    local kept, held = {}, false
+    local kept = {}
     for _, holder in ipairs(cjson.decode(current)) do
       if holder.n == ARGV[1] then
         held = true
@@ -63,7 +71,6 @@ for i = 3, #ARGV do
     end
     if held then
       redis.call('SADD', KEYS[1], ARGV[i])
-      promoted = promoted + 1
       if #kept == 0 then
         redis.call('HDEL', KEYS[2], ARGV[i])
       else
@@ -71,8 +78,31 @@ for i = 3, #ARGV do
       end
     end
   end
+  if not held and redis.call('SISMEMBER', KEYS[1], ARGV[i]) == 0 then
+    missing = missing + 1
+  end
 end
-return promoted
+return missing
+"""
+
+# KEYS: unexpanded, uncertified, root epoch. ARGV: epoch, manifest, broken-tree marker.
+_EXPANDED = """
+if redis.call('GET', KEYS[3]) ~= ARGV[1] then
+  return 0
+end
+redis.call('SREM', KEYS[1], ARGV[2])
+redis.call('SREM', KEYS[2], ARGV[3])
+return 1
+"""
+
+# KEYS: protected, pins, unexpanded. ARGV: manifest.
+_SETTLE_UNBOUND = """
+if redis.call('SISMEMBER', KEYS[1], ARGV[1]) == 1
+    or redis.call('HEXISTS', KEYS[2], ARGV[1]) == 1 then
+  return 0
+end
+redis.call('SREM', KEYS[3], ARGV[1])
+return 1
 """
 
 type OpenStream = Callable[[ContentReference], Iterator[bytes]]
@@ -89,6 +119,11 @@ class TreeStatus(StrEnum):
     """A member's hold was refused."""
     RETIRING = "retiring"
     """A member is being retired; the expansion waits for its retirement to end."""
+    INCOMPLETE = "incomplete"
+    """A member's hold ended before it was protected; the manifest stays unexpanded
+    for an expansion under a fresh hold."""
+    FENCED = "fenced"
+    """A later root holds the root epoch; this root changes nothing more."""
 
 
 @dataclass(frozen=True)
@@ -101,6 +136,10 @@ class TreeOutcome:
     retired: tuple[ContentReference, ...] = ()
     """Members retired before, whose current backing the upload's durability check
     verifies."""
+
+
+_UNREACHABLE: tuple[type[BaseException], ...] = (ResultUnavailable, *REDIS_CONN_ERRORS)
+_FENCED = TreeOutcome(TreeStatus.FENCED, "a later root holds the root epoch")
 
 
 def _broken_tree_marker(digest: str) -> str:
@@ -136,34 +175,62 @@ class TreeExpander:
             return TreeOutcome(TreeStatus.MALFORMED, str(exc))
         except ResultUnreadable as exc:
             return TreeOutcome(TreeStatus.MALFORMED, str(exc))
-        except (ResultUnavailable, OSError) as exc:
+        except _UNREACHABLE as exc:
             return TreeOutcome(TreeStatus.UNAVAILABLE, str(exc))
         return TreeOutcome(TreeStatus.DONE)
 
     def promote(self, manifest: ContentReference, nonce: str) -> TreeOutcome:
         """Protect each member ``nonce`` holds and end its hold, then mark the
-        manifest expanded."""
+        manifest expanded once every member it names is protected.
+
+        Only the root epoch ``nonce`` was minted under promotes. A promotion cut short
+        leaves the manifest unexpanded and the rest of its members held, so promoting
+        again finishes it.
+        """
         scope = manifest.authorization_scope
+        epoch = nonce.partition(":")[0]
         keys = [
             reclaim_protected_key(scope),
             reclaim_pins_key(scope),
             RECLAIM_SCOPES_KEY,
+            RECLAIM_ROOT_EPOCH_KEY,
         ]
+        missing = 0
         try:
             for page in self._pages(manifest):
-                self._rds.sync.eval(
-                    _PROMOTE, len(keys), *keys, nonce, scope, *(m.digest for m in page)
+                unprotected = int(
+                    self._rds.sync.eval(
+                        _PROMOTE,
+                        len(keys),
+                        *keys,
+                        nonce,
+                        scope,
+                        epoch,
+                        *(m.digest for m in page),
+                    )
                 )
-            with self._rds.sync.control_pipeline(transaction=False) as pipe:
-                pipe.srem(reclaim_unexpanded_key(scope), manifest.content_digest)
-                pipe.srem(
-                    reclaim_uncertified_key(scope),
-                    _broken_tree_marker(manifest.content_digest),
+                if unprotected < 0:
+                    return _FENCED
+                missing += unprotected
+            if missing:
+                return TreeOutcome(
+                    TreeStatus.INCOMPLETE,
+                    f"{missing} member(s) lost their hold before they were protected",
                 )
-                pipe.execute()
+            if not self._rds.sync.eval(
+                _EXPANDED,
+                3,
+                reclaim_unexpanded_key(scope),
+                reclaim_uncertified_key(scope),
+                RECLAIM_ROOT_EPOCH_KEY,
+                epoch,
+                manifest.content_digest,
+                _broken_tree_marker(manifest.content_digest),
+            ):
+                return _FENCED
         except (TreeManifestError, ResultUnreadable) as exc:
             return TreeOutcome(TreeStatus.MALFORMED, str(exc))
-        except (ResultUnavailable, OSError) as exc:
+        except _UNREACHABLE as exc:
             return TreeOutcome(TreeStatus.UNAVAILABLE, str(exc))
         return TreeOutcome(TreeStatus.DONE)
 
@@ -179,7 +246,7 @@ class TreeExpander:
         except (TreeManifestError, ResultUnreadable):
             # A manifest that did not read whole held no member past where it broke.
             return TreeOutcome(TreeStatus.DONE)
-        except (ResultUnavailable, OSError) as exc:
+        except _UNREACHABLE as exc:
             return TreeOutcome(TreeStatus.UNAVAILABLE, str(exc))
         return TreeOutcome(TreeStatus.DONE)
 
@@ -235,14 +302,16 @@ class TreeExpander:
     def settle_unbound(self, scope: str, digest: str) -> bool:
         """Drop a manifest from the unexpanded set when nothing binds or holds it, as
         after its publication was refused; returns whether it was dropped."""
-        with self._rds.sync.control_pipeline(transaction=False) as pipe:
-            pipe.sismember(reclaim_protected_key(scope), digest)
-            pipe.hexists(reclaim_pins_key(scope), digest)
-            bound, held = pipe.execute()
-        if bound or held:
-            return False
-        self._rds.sync.srem(reclaim_unexpanded_key(scope), digest)
-        return True
+        return bool(
+            self._rds.sync.eval(
+                _SETTLE_UNBOUND,
+                3,
+                reclaim_protected_key(scope),
+                reclaim_pins_key(scope),
+                reclaim_unexpanded_key(scope),
+                digest,
+            )
+        )
 
     def reconcile(
         self,
@@ -252,47 +321,60 @@ class TreeExpander:
         owed: Set[str] = frozenset(),
     ) -> int:
         """Expand every bound manifest still waiting in ``scopes`` and drop each that
-        nothing binds or holds; returns how many still wait.
+        nothing binds or holds; returns how many still wait, counting one for a pass
+        cut short.
 
         A tree in ``owed`` is a staged tree whose upload is still owed, which its
-        publication expands; it is left waiting.
+        publication expands; it is left waiting. The pass ends early when a later root
+        holds the epoch or the control store cannot be reached; what it did not reach
+        stays unexpanded for the next pass.
         """
         waiting = 0
-        for scope in scopes:
-            for digest in self.unexpanded(scope):
-                if stop():
-                    return waiting + 1
-                if digest in owed:
-                    waiting += 1
-                    continue
-                if self.settle_unbound(scope, digest):
-                    continue
-                if not self._rds.sync.sismember(reclaim_protected_key(scope), digest):
-                    # Held by a publication still in flight, which expands it.
-                    waiting += 1
-                    continue
-                try:
-                    manifest = self.manifest_of(scope, digest)
-                except (ResultUnavailable, OSError) as exc:
-                    self._logger.warning("Tree %s cannot be read now: %s", digest, exc)
-                    waiting += 1
-                    continue
-                outcome = (
-                    expand(manifest)
-                    if manifest is not None
-                    else TreeOutcome(
-                        TreeStatus.MALFORMED, "the store holds no manifest"
-                    )
-                )
-                if outcome.status is not TreeStatus.DONE:
-                    waiting += 1
-                    self._logger.warning(
-                        "Tree %s in scope %s stays unexpanded: %s",
-                        digest,
-                        scope,
-                        outcome.reason,
-                    )
+        try:
+            for scope in scopes:
+                for digest in self.unexpanded(scope):
+                    if stop():
+                        return waiting + 1
+                    if digest in owed:
+                        waiting += 1
+                        continue
+                    if self.settle_unbound(scope, digest):
+                        continue
+                    if not self._rds.sync.sismember(
+                        reclaim_protected_key(scope), digest
+                    ):
+                        # Held by a publication still in flight, which expands it.
+                        waiting += 1
+                        continue
+                    outcome = self._reconcile_one(scope, digest, expand)
+                    if outcome.status is TreeStatus.FENCED:
+                        return waiting + 1
+                    if outcome.status is not TreeStatus.DONE:
+                        waiting += 1
+                        self._logger.warning(
+                            "Tree %s in scope %s stays unexpanded: %s",
+                            digest,
+                            scope,
+                            outcome.reason,
+                        )
+        except REDIS_CONN_ERRORS as exc:
+            self._logger.warning("Expanding bound trees waits for Redis: %s", exc)
+            return waiting + 1
         return waiting
+
+    def _reconcile_one(
+        self,
+        scope: str,
+        digest: str,
+        expand: Callable[[ContentReference], TreeOutcome],
+    ) -> TreeOutcome:
+        try:
+            manifest = self.manifest_of(scope, digest)
+        except (ResultUnavailable, OSError) as exc:
+            return TreeOutcome(TreeStatus.UNAVAILABLE, f"cannot be read now: {exc}")
+        if manifest is None:
+            return TreeOutcome(TreeStatus.MALFORMED, "the store holds no manifest")
+        return expand(manifest)
 
     def scopes(self) -> list[str]:
         return sorted(self._rds.sync.set_members(RECLAIM_SCOPES_KEY))

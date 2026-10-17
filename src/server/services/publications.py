@@ -13,10 +13,11 @@ re-reads everything, and the answer and the release of the holds go out once tha
 transition is durable.
 """
 
+import heapq
+import itertools
 import logging
 import threading
 import time
-from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -238,7 +239,9 @@ class TreeFinisher:
         self._logger = logger
         self._clock = clock
         self._cv = threading.Condition()
-        self._queue: deque[_Finish] = deque()
+        # Unbounded: every job carries holds only its finish releases.
+        self._queue: list[tuple[float, int, _Finish]] = []
+        self._seq = itertools.count()
         self._stopping = False
         self._thread: threading.Thread | None = None
 
@@ -262,9 +265,7 @@ class TreeFinisher:
         bound: Mapping[str, frozenset[str]],
         locator: dict[str, Any],
     ) -> None:
-        with self._cv:
-            self._queue.append(_Finish(task_id, holds, bound, locator))
-            self._cv.notify_all()
+        self._push(_Finish(task_id, holds, bound, locator))
 
     def resume_staged(self) -> None:
         """Protect the members of every staged tree an owed upload names, as after a
@@ -284,24 +285,29 @@ class TreeFinisher:
                 {"task": task_id, "kind": "expansion"},
             )
 
+    def _push(self, job: "_Finish") -> None:
+        with self._cv:
+            heapq.heappush(self._queue, (job.at, next(self._seq), job))
+            self._cv.notify_all()
+
     def _run(self) -> None:
         while True:
             with self._cv:
                 self._cv.wait_for(lambda: self._due() or self._stopping, self._wait())
                 if self._stopping:
                     return
-                if (job := self._due()) is None:
+                if not self._due():
                     continue
-                self._queue.remove(job)
+                _, _, job = heapq.heappop(self._queue)
             self._finish(job)
 
-    def _due(self) -> "_Finish | None":
-        now = self._clock()
-        return next((job for job in self._queue if job.at <= now), None)
+    def _due(self) -> bool:
+        return bool(self._queue) and self._queue[0][0] <= self._clock()
 
     def _wait(self) -> float:
-        now = self._clock()
-        return max(0.05, min((job.at - now for job in self._queue), default=5.0))
+        if not self._queue:
+            return 5.0
+        return max(0.05, self._queue[0][0] - self._clock())
 
     def _finish(self, job: "_Finish") -> None:
         try:
@@ -316,20 +322,34 @@ class TreeFinisher:
         failed: dict[str, str] = {}
         retired: dict[str, tuple[ContentReference, ...]] = {}
         for manifest, outcome in unfinished:
-            if outcome.status is TreeStatus.UNAVAILABLE:
-                retry = "a store could not be read"
-            elif outcome.status is TreeStatus.RETIRING:
-                retry = f"a member of tree {manifest.content_digest} is being retired"
-            elif outcome.status is TreeStatus.DONE:
-                retired[manifest.content_digest] = outcome.retired
-            elif manifest.content_digest in staged:
-                failed[manifest.content_digest] = outcome.reason or "malformed"
-            else:
-                self._logger.error(
-                    "Tree %s verified before its commit no longer reads: %s",
-                    manifest.content_digest,
-                    outcome.reason,
-                )
+            digest = manifest.content_digest
+            match outcome.status:
+                case TreeStatus.FENCED:
+                    # A later root holds the epoch, and finishes the tree itself.
+                    self._logger.info(
+                        "Leaving tree %s of %s to a later root", digest, job.task_id
+                    )
+                    return
+                case TreeStatus.UNAVAILABLE:
+                    retry = "a store could not be read"
+                case TreeStatus.RETIRING:
+                    retry = f"a member of tree {digest} is being retired"
+                case TreeStatus.INCOMPLETE if digest in staged:
+                    retry = f"a member of tree {digest} was not held"
+                case TreeStatus.INCOMPLETE:
+                    # Its members' holds ended unpromoted; the tree stays unexpanded
+                    # for reconciliation to protect under a fresh hold.
+                    self._logger.info("Tree %s is left to reconciliation", digest)
+                case TreeStatus.DONE:
+                    retired[digest] = outcome.retired
+                case _ if digest in staged:
+                    failed[digest] = outcome.reason or "malformed"
+                case _:
+                    self._logger.error(
+                        "Tree %s verified before its commit no longer reads: %s",
+                        digest,
+                        outcome.reason,
+                    )
         if retry is not None:
             self._retry(job, retry)
             return
@@ -346,11 +366,9 @@ class TreeFinisher:
             job.backoff,
             reason,
         )
-        with self._cv:
-            job.at = self._clock() + job.backoff
-            job.backoff = min(_FINISH_RETRY_MAX_SEC, job.backoff * 2)
-            self._queue.append(job)
-            self._cv.notify_all()
+        job.at = self._clock() + job.backoff
+        job.backoff = min(_FINISH_RETRY_MAX_SEC, job.backoff * 2)
+        self._push(job)
 
 
 @dataclass
