@@ -342,6 +342,59 @@ def test_an_expansion_reports_the_members_retired_before(rig) -> None:
     assert {m.digest for m in members} <= rig.protected()
 
 
+def _expanded(rig: _Rig) -> set[str]:
+    return cast(set[str], rig.raw.smembers(reclaim_expanded_key(_SCOPE)))
+
+
+def _checkpoint(manifest: ContentReference) -> Any:
+    binding = ArtifactBinding(
+        name="ckpt",
+        revision="step-4",
+        kind=ArtifactKind.TREE,
+        reference=manifest,
+        size_bytes=1,
+        files=1,
+    ).model_dump(mode="json")
+    return assertion_of("TASK_UPDATE", {"artifact_published": [binding]})
+
+
+def test_a_tree_with_a_member_retired_before_is_not_marked_expanded(rig) -> None:
+    members = _members(3)
+    manifest = _tree(rig.store, members)
+    rig.raw.sadd(reclaim_protected_key(_SCOPE), manifest.content_digest)
+    rig.raw.hset(reclaim_history_key(_SCOPE), members[2].digest, "1")
+    assert rig.holds.expand(manifest, _LOCATOR).retired
+    assert rig.unexpanded() == set()
+    assert _expanded(rig) == set()
+
+    asked: list[str] = []
+
+    def absent(reference: ContentReference) -> bool:
+        asked.append(reference.content_digest)
+        return False
+
+    holds = PublicationHolds(
+        PinStore(rig.client), lambda: Nonces(9), absent, trees=rig.trees
+    )
+    preparation = holds.acquire(_checkpoint(manifest), _LOCATOR)
+
+    assert asked == [members[2].digest]
+    assert preparation.refusal is StoreRefusal.REMATERIALIZE
+    assert preparation.digests == (members[2].digest,)
+
+
+def test_a_write_through_tree_verified_whole_is_marked_expanded(rig) -> None:
+    members = _members(3)
+    manifest = _tree(rig.store, members)
+    rig.raw.hset(reclaim_history_key(_SCOPE), members[2].digest, "1")
+    preparation = rig.holds.acquire(_checkpoint(manifest), _LOCATOR)
+    assert preparation.holds is not None
+    rig.raw.sadd(reclaim_protected_key(_SCOPE), manifest.content_digest)
+    bound = frozenset({manifest.content_digest})
+    assert rig.holds.finish(preparation.holds, bound, _LOCATOR) == []
+    assert _expanded(rig) == {manifest.content_digest}
+
+
 def test_reconciling_leaves_a_tree_its_owed_upload_expands(rig) -> None:
     manifest = _tree(rig.store, _members(3))
     rig.raw.sadd(RECLAIM_SCOPES_KEY, _SCOPE)

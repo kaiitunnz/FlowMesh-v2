@@ -446,7 +446,10 @@ class PublicationHolds:
         self, manifest: ContentReference, locator: dict[str, Any], staged: bool = True
     ) -> TreeOutcome:
         """Protect the members a bound tree names: hold them under the expansion's
-        own nonce while its manifest verifies, then protect what that held.
+        own nonce while its manifest verifies, then protect what that held. A tree
+        with a member retired before, whose backing the upload's durability check
+        verifies, is not marked expanded, so a later publication of it verifies that
+        member again.
 
         A member being retired stops the expansion: a ``staged`` tree, whose files may
         still be uploading, waits for the retirement to end; any other tree's bytes
@@ -480,7 +483,7 @@ class PublicationHolds:
         try:
             outcome = self._trees.hold(manifest, hold_page)
             if outcome.status is TreeStatus.DONE:
-                promoted = self._trees.promote(manifest, nonce)
+                promoted = self._trees.promote(manifest, nonce, backed=not retired)
                 if promoted.status is TreeStatus.DONE:
                     return TreeOutcome(TreeStatus.DONE, retired=tuple(retired))
                 outcome = promoted

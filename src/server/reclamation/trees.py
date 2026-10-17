@@ -7,8 +7,11 @@ once its stream ends, so its members are first held under the expansion's own no
 and only those held are then protected, by a second read; a corrupt read can hold
 digests for a while but never protect one. Until a manifest's members are protected it
 stays in its scope's unexpanded set, which keeps the scope out of collection; the
-promotion that protects the last of them moves it to the scope's expanded set, which
-names only manifests whose members are protected and binds nothing itself.
+promotion that protects the last of them takes it out. The scope's expanded set names
+only manifests whose members are protected and confirmed stored, so a publication of
+one holds none of its members; a promotion that protected a member retired before,
+whose backing is still unverified, leaves the manifest out of it. The expanded set
+binds nothing itself.
 
 A member being retired stops a staged tree's expansion until its retirement ends. A
 tree bound with its bytes already stored can have no member being retired, since a
@@ -70,14 +73,16 @@ return missing
 """
 
 # KEYS: unexpanded, uncertified, root epoch, expanded.
-# ARGV: epoch, manifest, broken-tree marker.
+# ARGV: epoch, manifest, broken-tree marker, '1' when every member is backed.
 _EXPANDED = """
 if redis.call('GET', KEYS[3]) ~= ARGV[1] then
   return 0
 end
 redis.call('SREM', KEYS[1], ARGV[2])
 redis.call('SREM', KEYS[2], ARGV[3])
-redis.call('SADD', KEYS[4], ARGV[2])
+if ARGV[4] == '1' then
+  redis.call('SADD', KEYS[4], ARGV[2])
+end
 return 1
 """
 
@@ -164,9 +169,13 @@ class TreeExpander:
             return TreeOutcome(TreeStatus.UNAVAILABLE, str(exc))
         return TreeOutcome(TreeStatus.DONE)
 
-    def promote(self, manifest: ContentReference, nonce: str) -> TreeOutcome:
-        """Protect each member ``nonce`` holds and end its hold, then mark the
-        manifest expanded once every member it names is protected.
+    def promote(
+        self, manifest: ContentReference, nonce: str, backed: bool = True
+    ) -> TreeOutcome:
+        """Protect each member ``nonce`` holds and end its hold, then take the
+        manifest out of the unexpanded set once every member it names is protected,
+        marking it expanded when every member is ``backed``: confirmed stored, not
+        retired before with its backing unverified.
 
         Only the root epoch ``nonce`` was minted under promotes. A promotion cut short
         leaves the manifest unexpanded and the rest of its members held, so promoting
@@ -212,6 +221,7 @@ class TreeExpander:
                 epoch,
                 manifest.content_digest,
                 _broken_tree_marker(manifest.content_digest),
+                "1" if backed else "0",
             ):
                 return _FENCED
         except (TreeManifestError, ResultUnreadable) as exc:
@@ -266,8 +276,8 @@ class TreeExpander:
         return None if size is None else probe.model_copy(update={"size_bytes": size})
 
     def expanded(self, manifests: list[ContentReference]) -> set[str]:
-        """Return the digests of the manifests whose members are already protected:
-        those a complete promotion under the root epoch marked expanded.
+        """Return the digests of the manifests whose members are already protected
+        and backed: those a complete promotion under the root epoch marked expanded.
 
         Being protected says nothing of a digest's members, since a file whose bytes
         equal a tree manifest is protected as a file and never expanded.
