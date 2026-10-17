@@ -1,6 +1,7 @@
 """The fleet/residency sampler: on-loop gauges that join a span by service_family."""
 
 import asyncio
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -122,9 +123,9 @@ def test_sample_once_with_no_stores_emits_queue_depth_only():
 def test_sample_once_emits_the_publication_lane_depth_per_state():
     reader, meter = _meter_with_reader()
     sampler = build_fleet_sampler(
-        meter,
+        cast(Any, meter),
         stores=None,
-        runtime=_fake_runtime(0),
+        runtime=cast(Any, _fake_runtime(0)),
         node_id=lambda: "nde-1",
         interval_sec=1.0,
         enabled=True,
