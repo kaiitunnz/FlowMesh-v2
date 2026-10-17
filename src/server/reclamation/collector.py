@@ -373,7 +373,7 @@ class AuditCollector:
                     audit.unsized += 1
                     continue
                 try:
-                    parts, size = admin.upload_bytes(upload)
+                    parts, size = admin.upload_bytes(upload, pacer)
                 except Exception as exc:
                     self._logger.debug(
                         "Content audit could not size upload %s: %s",

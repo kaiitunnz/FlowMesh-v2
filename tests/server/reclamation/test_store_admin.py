@@ -13,6 +13,7 @@ from server.reclamation.audit import AuditTrail
 from server.reclamation.closures import TreeClosures
 from server.reclamation.collector import AuditCollector
 from server.reclamation.marking import Marker
+from server.reclamation.pacing import Pacer
 from server.reclamation.service import ContentAuditService
 from server.reclamation.store_admin import (
     Eligible,
@@ -368,7 +369,23 @@ def test_uploads_name_their_scope_and_are_sized_by_their_parts() -> None:
         ("u-1", "org-a"),
         ("u-2", None),
     ]
-    assert admin.upload_bytes(uploads[0]) == (3, 18)
+    assert admin.upload_bytes(uploads[0], Pacer(threading.Event(), 1, duty=1.0)) == (
+        3,
+        18,
+    )
+
+
+def test_sizing_an_upload_ends_at_the_page_its_pacer_stops() -> None:
+    s3 = ReadOnlyS3(page=1)
+    s3.uploads = [{"Key": f"{PREFIX}/org-a/sha256/x", "UploadId": "u-1"}]
+    s3.parts = {"u-1": [{"Size": 5}, {"Size": 6}, {"Size": 7}]}
+    admin = _admin(s3)
+    (uploads,) = list(admin.uploads())
+    stop = threading.Event()
+    stop.set()
+
+    assert admin.upload_bytes(uploads[0], Pacer(stop, 1, duty=1.0)) == (1, 5)
+    assert s3.calls.count("list_parts") == 1
 
 
 @pytest.mark.parametrize(

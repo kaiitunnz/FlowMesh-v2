@@ -24,6 +24,8 @@ from botocore.client import Config
 
 from shared.content import BACKEND_S3, DigestAlgorithm, ObjectStoreConfig
 
+from .pacing import Pacer
+
 # The most a listing returns per page, kept small since parsing a page holds the
 # interpreter.
 PAGE_SIZE = 250
@@ -279,8 +281,9 @@ class StoreAdmin:
                 return
             markers = _next(page, "KeyMarker", "UploadIdMarker")
 
-    def upload_bytes(self, upload: OpenUpload) -> tuple[int, int]:
-        """The parts an open upload holds and their total size."""
+    def upload_bytes(self, upload: OpenUpload, pacer: Pacer) -> tuple[int, int]:
+        """The parts an open upload holds and their total size, ticking ``pacer`` per
+        page; a stopped pacer ends it with what it has counted."""
         parts = size = 0
         marker = 0
         while True:
@@ -294,7 +297,7 @@ class StoreAdmin:
             for part in page.get("Parts", []):
                 parts += 1
                 size += int(part.get("Size") or 0)
-            if not page.get("IsTruncated"):
+            if not page.get("IsTruncated") or pacer.tick():
                 return parts, size
             marker = int(_next(page, "PartNumberMarker")["PartNumberMarker"])
 
