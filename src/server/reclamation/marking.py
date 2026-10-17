@@ -59,14 +59,13 @@ from ..task.history import (
     output_member_field,
 )
 from .mark import Mark
-from .pacing import DUTY, Pacer
+from .pacing import DUTY, MIN_PAUSE_SEC, Pacer
 from .references import model_bears, references_of
 
 # Keys one SCAN page asks for and fields one HSCAN page asks for.
 SCAN_COUNT = 500
 FIELD_COUNT = 256
-# The least pause between pages, and how many decoded values run between pauses.
-PAGE_PAUSE_SEC = 0.005
+# How many decoded values run between pauses.
 VALUES_PER_PAUSE = 100
 
 _OUTPUT_INDEX_PREFIX = output_index_field("")
@@ -386,14 +385,14 @@ class Marker:
         rds: RedisClient,
         logger: logging.Logger,
         *,
-        page_pause_sec: float = PAGE_PAUSE_SEC,
+        min_pause_sec: float = MIN_PAUSE_SEC,
         values_per_pause: int = VALUES_PER_PAUSE,
         duty: float = DUTY,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self._rds = rds
         self._logger = logger
-        self._page_pause = page_pause_sec
+        self._min_pause = min_pause_sec
         self._values_per_pause = values_per_pause
         self._duty = duty
         self._clock = clock
@@ -411,7 +410,7 @@ class Marker:
                 stop,
                 self._values_per_pause,
                 duty=self._duty,
-                min_pause_sec=self._page_pause,
+                min_pause_sec=self._min_pause,
             ),
         )
         identity = self._rds.sync.server_identity()

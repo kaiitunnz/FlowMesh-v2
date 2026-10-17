@@ -54,7 +54,7 @@ class _Fixture:
         self.stop = _Waits()
         self.waits_at_open: list[int] = []
         self.marker = Marker(
-            self.rds, _LOGGER, page_pause_sec=0, duty=1.0, clock=lambda: NOW
+            self.rds, _LOGGER, min_pause_sec=0, duty=1.0, clock=lambda: NOW
         )
         self.service = ContentAuditService(
             self.marker,
