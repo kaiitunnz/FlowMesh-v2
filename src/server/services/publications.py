@@ -98,7 +98,12 @@ class PublicationIntake:
             lambda: self._publish(event, publication),
         )
         if admission is Admission.BUSY:
-            self._refuse(publication, StoreRefusal.BUSY, "the publication lane is full")
+            self._refuse(
+                event.task_id,
+                publication,
+                StoreRefusal.BUSY,
+                "the publication lane is full",
+            )
 
     def _publish(self, event: TaskEvent, publication: Publication) -> None:
         locator = {
@@ -124,6 +129,7 @@ class PublicationIntake:
                 )
                 return
             self._refuse(
+                event.task_id,
                 publication,
                 preparation.refusal,
                 preparation.reason,
@@ -194,6 +200,7 @@ class PublicationIntake:
 
     def _refuse(
         self,
+        task_id: str,
         publication: Publication,
         refusal: StoreRefusal,
         reason: str | None,
@@ -202,7 +209,7 @@ class PublicationIntake:
         self._logger.info(
             "Publication %s of %s refused (%s): %s",
             publication.key,
-            publication.dispatch_id,
+            task_id,
             refusal.value,
             reason,
         )
