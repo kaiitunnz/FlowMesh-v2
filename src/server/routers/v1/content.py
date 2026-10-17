@@ -6,7 +6,9 @@ materialization instead of re-running a sampled producer. Only that binding cros
 surface: the bytes are in the shared store and never pass through the server.
 """
 
+import asyncio
 import logging
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
@@ -24,6 +26,14 @@ from ...content.finalizations import FinalizationRefused, StaleRootEpoch
 from ...hooks import ResourceAction, ResourceKind
 
 router = APIRouter(prefix="/content", tags=["Content"])
+
+_BIND_RESPONSES: dict[int | str, dict[str, Any]] = {
+    409: {
+        "description": "The content cannot be bound now; ``detail.refusal`` names "
+        "what its producer does next.",
+    },
+    503: {"description": "This root no longer holds the root epoch."},
+}
 
 
 def _require_index(index: FinalizationIndex | None) -> FinalizationIndex:
@@ -66,10 +76,53 @@ def _binding_scope(
     return assigned
 
 
+def _bind(
+    index: FinalizationIndex,
+    principal: PrincipalContext,
+    idempotency_key: str,
+    asserted: str,
+    content: ContentReference,
+) -> OutcomeManifest:
+    admitted = _binding_scope(index, principal, idempotency_key, asserted)
+    if content.authorization_scope != admitted:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="content is outside the admitted scope",
+        )
+    try:
+        return index.record(
+            admitted,
+            idempotency_key,
+            content,
+            provenance=f"principal:{principal.principal_id}",
+        )
+    except FinalizationRefused as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"refusal": exc.refusal.value},
+        ) from exc
+    except StaleRootEpoch as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+
+
+def _resolve(
+    index: FinalizationIndex,
+    principal: PrincipalContext,
+    idempotency_key: str,
+    asserted: str,
+) -> OutcomeManifest | None:
+    return index.find(
+        _binding_scope(index, principal, idempotency_key, asserted), idempotency_key
+    )
+
+
 @router.put(
     "/finalizations",
     summary="Bind an outcome finalization to its content",
     description="Record the content one idempotency key materialized.",
+    responses=_BIND_RESPONSES,
 )
 async def put_finalization(
     content: ContentReference,
@@ -82,26 +135,9 @@ async def put_finalization(
     await require_permission(
         principal, ResourceKind.RESULT, None, ResourceAction.WRITE, logger
     )
-    bound = _require_index(index)
-    admitted = _binding_scope(bound, principal, idem, scope)
-    if content.authorization_scope != admitted:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="content is outside the admitted scope",
-        )
-    try:
-        return bound.record(
-            admitted, idem, content, provenance=f"principal:{principal.principal_id}"
-        )
-    except FinalizationRefused as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={"refusal": exc.refusal.value},
-        ) from exc
-    except StaleRootEpoch as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
-        ) from exc
+    return await asyncio.to_thread(
+        _bind, _require_index(index), principal, idem, scope, content
+    )
 
 
 @router.get(
@@ -119,8 +155,9 @@ async def get_finalization(
     await require_permission(
         principal, ResourceKind.RESULT, None, ResourceAction.READ, logger
     )
-    bound = _require_index(index)
-    manifest = bound.find(_binding_scope(bound, principal, idem, scope), idem)
+    manifest = await asyncio.to_thread(
+        _resolve, _require_index(index), principal, idem, scope
+    )
     if manifest is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="no content for key"

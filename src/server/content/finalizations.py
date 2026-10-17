@@ -11,7 +11,6 @@ Recording a finalization is a binding, so it protects the content it binds, and 
 the winner's: a re-drive that loses is handed the first binding and protects nothing.
 """
 
-import itertools
 import json
 from collections.abc import Callable
 
@@ -30,6 +29,7 @@ from ..clients.redis import (
     reclaim_pins_key,
     reclaim_protected_key,
 )
+from ..reclamation.pins import Nonces
 
 # KEYS: finalization, epoch, protected, pins, deleting, history, condemned, scopes.
 # ARGV: epoch, manifest, digest, nonce, locator, verified revision, ttl, scope.
@@ -40,7 +40,7 @@ for i = 3, 8 do
     return redis.error_reply('WRONGTYPE ' .. KEYS[i])
   end
 end
-if ARGV[1] ~= '' and redis.call('GET', KEYS[2]) ~= ARGV[1] then
+if redis.call('GET', KEYS[2]) ~= ARGV[1] then
   return {'fenced'}
 end
 local existing = redis.call('GET', KEYS[1])
@@ -101,24 +101,25 @@ class StaleRootEpoch(RuntimeError):
 class FinalizationIndex:
     """The reference each outcome finalization committed, by scope and key.
 
-    ``epoch`` returns the root epoch this root records under, or None before it holds
-    one; ``verify`` reads whether a reference's content is currently stored: True,
-    False, or None when the store cannot say.
+    ``nonces`` returns the acquisition nonces of the root epoch this root records
+    under, or None before it holds one; ``verify`` reads whether a reference's content
+    is currently stored: True, False, or None when the store cannot say. ``on_fenced``
+    runs when a later root has taken the epoch, before the recording raises.
     """
 
     def __init__(
         self,
         redis: RedisClient,
-        *,
+        nonces: Callable[[], Nonces | None],
+        verify: Callable[[ContentReference], bool | None],
+        on_fenced: Callable[[], None],
         ttl_sec: float = 0.0,
-        epoch: Callable[[], int | None] | None = None,
-        verify: Callable[[ContentReference], bool | None] | None = None,
     ) -> None:
         self._rds = redis
+        self._nonces = nonces
+        self._verify = verify
+        self._on_fenced = on_fenced
         self._ttl = ttl_sec
-        self.epoch = epoch
-        self.verify = verify
-        self._nonces = itertools.count(1)
 
     def assign_scope(self, idempotency_key: str, scope: str) -> None:
         """Record the scope control assigned the work this key settles.
@@ -159,13 +160,16 @@ class FinalizationIndex:
         first, so an outcome never changes after it has been committed. One script
         decides the winner, checks the content is not being retired, and protects it,
         so two drives racing never both believe they won. Raises
-        ``FinalizationRefused`` when the content cannot be bound now.
+        ``FinalizationRefused`` when the content cannot be bound now, including before
+        this root holds an epoch, and ``StaleRootEpoch`` once a later root holds it.
         """
+        nonces = self._nonces()
+        if nonces is None:
+            raise FinalizationRefused(StoreRefusal.RETRY)
         manifest = OutcomeManifest(
             content=content, provenance=provenance, idempotency_key=idempotency_key
         ).model_dump_json()
-        epoch = self.epoch() if self.epoch is not None else None
-        nonce = f"{epoch or 0}:fin:{next(self._nonces)}"
+        nonce = nonces.next()
         locator = json.dumps({"kind": "finalization", "idm": idempotency_key})
         keys = [
             content_finalization_key(scope, idempotency_key),
@@ -184,7 +188,7 @@ class FinalizationIndex:
                     _RECORD,
                     len(keys),
                     *keys,
-                    "" if epoch is None else str(epoch),
+                    str(nonces.epoch),
                     manifest,
                     content.content_digest,
                     nonce,
@@ -198,10 +202,11 @@ class FinalizationIndex:
                 case "committed" | "winner":
                     return OutcomeManifest.model_validate_json(reply[1])
                 case "fenced":
+                    self._on_fenced()
                     raise StaleRootEpoch("a later root holds the root epoch")
                 case "retiring":
                     raise FinalizationRefused(StoreRefusal.RETRY_RETIREMENT)
-            present = self.verify(content) if self.verify is not None else None
+            present = self._verify(content)
             if present is False:
                 raise FinalizationRefused(StoreRefusal.REMATERIALIZE)
             if present is None:

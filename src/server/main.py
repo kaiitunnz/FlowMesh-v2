@@ -210,10 +210,14 @@ FLEET_SAMPLER = None
 ROOT_NODE_ID: str | None = None
 
 
+def _stop_fenced_root() -> None:
+    """Stop a root a later root has fenced, rather than keep serving stale state."""
+    os.kill(os.getpid(), signal.SIGTERM)
+
+
 if IS_ROOT_NODE:
     WORKFLOW_REGISTRY = WorkflowRegistry(REDIS_CLIENT)
     WORKER_REGISTRY = WorkerRegistry(REDIS_CLIENT)
-    FINALIZATION_INDEX = FinalizationIndex(REDIS_CLIENT)
     CREDENTIAL_VAULT = CredentialVault(REDIS_CLIENT)
     POLICY_SURFACE = build_policy_surface(config.orchestration.policy)
     SERVER_TRACER = build_tracer(
@@ -240,6 +244,12 @@ if IS_ROOT_NODE:
             read_attempts=config.content_store.read_attempts,
         )
     )
+    FINALIZATION_INDEX = FinalizationIndex(
+        REDIS_CLIENT,
+        lambda: RUNTIME.nonces if RUNTIME else None,
+        RESULT_READER.backed,
+        _stop_fenced_root,
+    )
     RUNTIME = TaskRuntime(
         WORKFLOW_REGISTRY,
         WORKER_REGISTRY,
@@ -255,10 +265,7 @@ if IS_ROOT_NODE:
         content_scope_authority=FINALIZATION_INDEX.assign_scope,
         n8n=config.n8n,
     )
-    # A root a later root has fenced stops rather than keep serving stale state.
-    RUNTIME.on_fenced = lambda: os.kill(os.getpid(), signal.SIGTERM)
-    FINALIZATION_INDEX.epoch = lambda: RUNTIME.root_epoch if RUNTIME else None
-    FINALIZATION_INDEX.verify = RESULT_READER.backed
+    RUNTIME.on_fenced = _stop_fenced_root
     TELEMETRY_STORE = build_telemetry_store(config.telemetry_store)
     AGENT_MODEL_GATEWAY = AgentModelGateway(
         RUNTIME, config.orchestration.gateway, logger
