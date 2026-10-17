@@ -982,7 +982,7 @@ STACK_ENV_SCHEMA = EnvSchema(
                     min_value=1,
                 ),
                 EnvVar(
-                    "CONTENT_RECLAMATION_ENABLED",
+                    "CONTENT_AUDIT_ENABLED",
                     "true",
                     description="Audit the content store for objects no binding names.",
                     var_type=EnvVarType.BOOL,

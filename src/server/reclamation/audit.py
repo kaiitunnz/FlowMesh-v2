@@ -5,7 +5,7 @@ import json
 import time
 from typing import Any
 
-from ..clients.redis import RECLAIM_AUDIT_KEY, RedisClient
+from ..clients.redis import CONTENT_AUDIT_KEY, RedisClient
 
 # Roughly how many facts the stream keeps; older ones are trimmed.
 AUDIT_MAXLEN = 10_000
@@ -20,12 +20,10 @@ class AuditTrail:
     def record(self, kind: str, **facts: Any) -> None:
         """Append one fact of ``kind``; a value that is not a string is stored as
         JSON."""
-        fields: dict[Any, Any] = {"kind": kind, "at": f"{time.time():.3f}"}
+        fields: dict[str, str] = {"kind": kind, "at": f"{time.time():.3f}"}
         for name, value in facts.items():
             fields[name] = value if isinstance(value, str) else json.dumps(value)
-        with self._rds.sync.control_pipeline(transaction=False) as pipe:
-            pipe.xadd(RECLAIM_AUDIT_KEY, fields, maxlen=AUDIT_MAXLEN, approximate=True)
-            pipe.execute()
+        self._rds.sync.xadd_control(CONTENT_AUDIT_KEY, fields, maxlen=AUDIT_MAXLEN)
 
 
 __all__ = ["AUDIT_MAXLEN", "AuditTrail"]

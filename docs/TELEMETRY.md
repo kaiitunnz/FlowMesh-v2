@@ -105,7 +105,7 @@ on each and comparing by window isolates the v2 control plane's cost.
 
 ## Metrics
 
-Alongside the spans, a deployment with `SERVER_METRICS_METRICS_ENABLED` gets two
+Alongside the spans, a deployment with `SERVER_METRICS_METRICS_ENABLED` gets three
 series families, sampled every `SERVER_METRICS_RESOURCE_SAMPLE_SEC` seconds and
 carrying the same attribute keys the spans do, so a series joins the trace it
 summarizes rather than being correlated by wall clock.
@@ -120,23 +120,23 @@ The root server reports the resident fleet per service family — replica count,
 admission slots in use, and claim credit held — alongside the ready-queue depth.
 A deployment with resident capacity disabled reports queue depth alone.
 
-With `CONTENT_RECLAMATION_ENABLED` the root also reports what its last content-store
-audit found, as gauges set once per audit. "Recent" is modified within the hour before
-the audit's mark started.
+With `CONTENT_AUDIT_ENABLED` the root also reports what its last content-store
+audit found, as gauges set once per audit. "Recent" means modified at or after an hour
+before the audit's mark started.
 
 | Gauge | Unit | Value |
 |-------|------|-------|
-| `flowmesh.content.reclamation.unbound` | `{object}` | Stored objects no binding named at scan, older than recent |
-| `flowmesh.content.reclamation.unbound_bytes` | `By` | Their bytes |
-| `flowmesh.content.reclamation.recent_unbound` | `{object}` | Stored objects no binding named at scan, modified recently |
-| `flowmesh.content.reclamation.recent_unbound_bytes` | `By` | Their bytes |
-| `flowmesh.content.reclamation.incomplete_scopes` | `{scope}` | Scopes with a binding or tree the audit could not read, reported without an unbound count |
-| `flowmesh.content.reclamation.open_uploads` | `{upload}` | Multipart uploads the store holds open, set only where its listing of them is complete |
-| `flowmesh.content.reclamation.open_upload_bytes` | `By` | Bytes of their parts, set likewise |
-| `flowmesh.content.reclamation.open_uploads_known` | `1` | `1` when the store's listing of open uploads is complete, else `0` |
-| `flowmesh.content.reclamation.eligible` | `1` | `1` when the store can be audited, else `0` |
-| `flowmesh.content.reclamation.mark_bytes` | `By` | Memory the audit's mark holds |
-| `flowmesh.content.reclamation.sweep_seconds` | `s` | How long the last audit took |
+| `flowmesh.content.audit.unbound` | `{object}` | Stored objects unbound at scan, modified before the recent window |
+| `flowmesh.content.audit.unbound_bytes` | `By` | Their bytes |
+| `flowmesh.content.audit.recent_unbound` | `{object}` | Stored objects unbound at scan, modified within the recent window |
+| `flowmesh.content.audit.recent_unbound_bytes` | `By` | Their bytes |
+| `flowmesh.content.audit.incomplete_scopes` | `{scope}` | Scopes with a binding or tree the audit could not read, reported without an unbound count |
+| `flowmesh.content.audit.open_uploads` | `{upload}` | Multipart uploads the store holds open, set only where its listing of them is complete |
+| `flowmesh.content.audit.open_upload_bytes` | `By` | Bytes of their parts, set likewise |
+| `flowmesh.content.audit.open_uploads_known` | `1` | `1` when the store's listing of open uploads is complete, else `0` |
+| `flowmesh.content.audit.eligible` | `1` | `1` when the store can be audited, else `0` |
+| `flowmesh.content.audit.mark_bytes` | `By` | Memory the audit's mark holds |
+| `flowmesh.content.audit.sweep_seconds` | `s` | How long the last audit took |
 
 `GET /api/v1/system/metrics` is unchanged.
 

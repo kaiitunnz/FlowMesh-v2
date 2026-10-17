@@ -148,12 +148,12 @@ def iter_members(chunks: Iterable[bytes]) -> Iterator[TreeMember]:
     refusing what ``TreeManifest.decode`` refuses, holding one window of text and one
     member at a time.
 
-    Only the encoding ``TreeManifest.encode`` writes is read, so text that cannot
-    begin it, a path past any a published walk reaches, a member line longer than
-    such a member encodes to, or a byte past the closing brace is refused once it is
-    read. A caller verifying the bytes by
-    digest learns of a corrupt manifest only once the stream ends, so it acts on no
-    member as settled before then.
+    Only the encoding ``TreeManifest.encode`` writes is read, so text that cannot begin
+    it, a path or size past any a published walk reaches, which ``decode`` accepts, a
+    member line longer than such a member encodes to, or a byte past the closing brace
+    is refused once it is read. A caller verifying the bytes by digest learns of a
+    corrupt manifest only once the stream ends, so it acts on no member as settled
+    before then.
     """
     reader = _MemberReader()
     for chunk in chunks:
