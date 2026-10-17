@@ -313,8 +313,14 @@ def install() -> None:
 
 
 def runtimes() -> list[Any]:
-    """Every live runtime built since the contract was installed."""
+    """Every live runtime built since the contract was installed and not retired."""
     return list(_runtimes)
+
+
+def retire(runtime: Any) -> None:
+    """Stop searching ``runtime`` for an engine's owner; its components and the
+    engines already traced to it stay checked."""
+    _runtimes.discard(runtime)
 
 
 def take_trips() -> list[Trip]:

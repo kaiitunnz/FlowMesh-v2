@@ -13,12 +13,14 @@ import pytest
 import redis
 
 from server.clients.redis import AsyncRedisClient, SyncRedisClient
+from tests.support.live_redis import LIVE_REDIS
 
 _LIVE_URL = os.getenv("FLOWMESH_TEST_REDIS_URL")
 
-pytestmark = pytest.mark.skipif(
-    not _LIVE_URL, reason="FLOWMESH_TEST_REDIS_URL is not set"
-)
+pytestmark = [
+    pytest.mark.skipif(not _LIVE_URL, reason="FLOWMESH_TEST_REDIS_URL is not set"),
+    LIVE_REDIS,
+]
 
 _KEY = "test:redis-client:vault"
 _LOGGER = logging.getLogger("redis-client-keys")

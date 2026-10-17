@@ -82,10 +82,13 @@ jobs:
 
       - name: Run unit tests
         # Skip the multiprocessing GPU-cleanup test — it's too costly to
-        # run on every PR (vllm engine startup + multi-process cleanup).
+        # run on every PR (vllm engine startup + multi-process cleanup). Six workers
+        # fit the runner's memory beside the service containers, and loadgroup keeps
+        # the tests sharing the live Redis on one worker.
         run: >
           uv run pytest tests/
           --ignore=tests/worker/test_mp_executor_cleanup_gpu.py
+          -n 6 --dist loadgroup
           -v
 
   process-ssh-backend:

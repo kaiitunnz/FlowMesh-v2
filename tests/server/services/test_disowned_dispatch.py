@@ -40,11 +40,14 @@ from tests.server.task.test_v2_orchestration import LINEAR, FakeRegistry, _drain
 from tests.server.task.test_v2_orchestration import _register as _register_v2
 from tests.server.task.test_v2_orchestration import _runtime as _runtime_v2
 from tests.server.task.test_v2_orchestration import _worker as _worker_v2
+from tests.support.live_redis import LIVE_REDIS
 from tests.support.waiting import pop_ready
 
 _LIVE_URL = os.getenv("FLOWMESH_TEST_REDIS_URL")
 
 _live = pytest.mark.skipif(not _LIVE_URL, reason="FLOWMESH_TEST_REDIS_URL is not set")
+
+pytestmark = LIVE_REDIS
 
 _WORKER = "wkr-disown"
 _OTHER = "wkr-other"

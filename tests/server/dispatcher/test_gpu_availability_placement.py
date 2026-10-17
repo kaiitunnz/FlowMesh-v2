@@ -33,13 +33,15 @@ from tests.server.task.test_v2_embodiment_fence import (
     _upstream_task,
 )
 from tests.server.task.test_v2_orchestration import FakeRegistry, _register
+from tests.support.live_redis import LIVE_REDIS
 from tests.worker.factories import make_worker_hardware
 
 _LIVE_URL = os.getenv("FLOWMESH_TEST_REDIS_URL")
 
-pytestmark = pytest.mark.skipif(
-    not _LIVE_URL, reason="FLOWMESH_TEST_REDIS_URL is not set"
-)
+pytestmark = [
+    pytest.mark.skipif(not _LIVE_URL, reason="FLOWMESH_TEST_REDIS_URL is not set"),
+    LIVE_REDIS,
+]
 
 _WORKER = "wkr-gpu-held"
 _HELD = "GPU-held"

@@ -107,6 +107,15 @@ uv run pytest tests/server/            # Server-specific tests
 uv run pytest tests/test_core_flow.py  # Single file
 ```
 
+The suite runs in parallel under [pytest-xdist](https://pytest-xdist.readthedocs.io/):
+
+```bash
+uv run pytest tests/ -n auto --dist loadgroup  # One worker per CPU; or pass a count, such as -n 32
+uv run pytest tests/path/to/test_file.py::test_name -n 0  # Serially, for debugging, as is any run without -n
+```
+
+`--dist loadgroup` keeps the tests that share the live Redis named by `FLOWMESH_TEST_REDIS_URL` on one worker and spreads every other test.
+
 If your change touches shared schemas or proto definitions, verify downstream compatibility across Server and Worker packages.
 
 The process SSH backend's suite, `tests/worker/test_ssh_process_backend_root.py`, creates accounts and starts `sshd`, so it runs only as root inside a container and skips anywhere else. To run it locally:
