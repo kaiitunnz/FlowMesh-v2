@@ -495,6 +495,29 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   and never treats an idempotency key as a name. The scope that binding lands in is the
   one control assigned the work when it authorized the key, so the producer reporting a
   finalization is held to it rather than naming a scope of its own.
+- **Content retention.** Every bound object is retained, and the root keeps the
+  evidence of that: each write that binds content records the identities it names in
+  its scope's protection index in the same transaction, and a bound tree's members
+  join it once the root has read the tree's manifest from the store, a window at a
+  time, and it has verified whole. A worker's report naming objects it stored — a
+  success, a checkpoint or a prepared request — is a publication. The task-event
+  consumer only receives it; on a bounded lane that admits publications fairly across
+  workflows, control holds every object the report names against retirement before
+  binding any, a written-through tree's members included, and answers the worker once
+  the binding is durable. The worker keeps a copy of each object until its publication
+  is committed or rejected, repeats the report until then, and stores an object again
+  from its copy when control refuses it, so a refusal never runs a task, a provider
+  call or an input resolution again; a worker lost before the commit loses its
+  dispatch as any lost worker does. A root takes a new epoch when it starts, a write
+  carrying a publication lands only under the epoch it was made in, and a root a
+  later one has replaced stops. A worker registers each multipart upload's exact id
+  with control before sending any part. With `CONTENT_RECLAMATION_ENABLED` (on by
+  default) the root backfills protection for what was bound before, certifies each
+  scope whose coverage is complete, and audits a store it is eligible on — an S3
+  bucket with versioning enabled that its credential can list — reporting the
+  objects no binding names and the open multipart uploads to its log, metrics and an
+  audit stream. It deletes and aborts nothing. A filesystem store, or a bucket without
+  versioning, is reported ineligible and keeps every object.
 - **Store access.** A worker reaches the store only under a `csg-`
   `ContentStoreAccessGrant` the control plane mints for one dispatched task in one
   authorization scope, bound to the worker incarnation running it and expiring shortly
