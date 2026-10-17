@@ -101,6 +101,8 @@ class ScopeAudit:
     kept: int = 0
     """Content versions a binding or an assertion in flight holds."""
     young: int = 0
+    """Content versions nothing binds or holds, too recent to condemn."""
+    young_bytes: int = 0
     orphans: int = 0
     """Content versions condemned: stored, unbound and old enough."""
     orphan_bytes: int = 0
@@ -138,6 +140,14 @@ class SweepAudit:
     @property
     def orphan_bytes(self) -> int:
         return sum(scope.orphan_bytes for scope in self.scopes)
+
+    @property
+    def young(self) -> int:
+        return sum(scope.young for scope in self.scopes)
+
+    @property
+    def young_bytes(self) -> int:
+        return sum(scope.young_bytes for scope in self.scopes)
 
     @property
     def uncertified(self) -> int:
@@ -181,6 +191,18 @@ class AuditCollector:
             unit="By",
             description="Bytes of stored content versions no binding names, as of the "
             "last sweep.",
+        )
+        self._young = meter.create_gauge(
+            "flowmesh.content.reclamation.young",
+            unit="{object}",
+            description="Stored content versions no binding names that were too "
+            "recent to condemn, as of the last sweep.",
+        )
+        self._young_bytes = meter.create_gauge(
+            "flowmesh.content.reclamation.young_bytes",
+            unit="By",
+            description="Bytes of stored content versions no binding names that were "
+            "too recent to condemn, as of the last sweep.",
         )
         self._open_uploads = meter.create_gauge(
             "flowmesh.content.reclamation.open_uploads",
@@ -310,6 +332,7 @@ class AuditCollector:
                 audit.kept += len(versions)
             elif any(now - v.last_modified < self._min_age for v in versions):
                 audit.young += len(versions)
+                audit.young_bytes += sum(v.size_bytes for v in versions)
             else:
                 newest = max(versions, key=lambda v: (v.latest, v.last_modified))
                 candidates.append((digest, newest))
@@ -364,19 +387,23 @@ class AuditCollector:
     def _publish(self, result: SweepAudit) -> None:
         self._orphans.set(result.orphans)
         self._orphan_bytes.set(result.orphan_bytes)
+        self._young.set(result.young)
+        self._young_bytes.set(result.young_bytes)
         self._uncertified.set(result.uncertified)
         uploads = result.uploads or UploadAudit()
         self._open_uploads.set(uploads.uploads)
         self._open_upload_bytes.set(uploads.bytes)
         self._logger.info(
             "Content reclamation sweep %s: %d scopes (%d uncertified), %d orphaned "
-            "versions (%d bytes) condemned, %d open uploads (%d bytes); nothing "
-            "deleted, in %.1fs",
+            "versions (%d bytes) condemned, %d unbound versions (%d bytes) too recent "
+            "to condemn, %d open uploads (%d bytes); nothing deleted, in %.1fs",
             result.sweep,
             len(result.scopes),
             result.uncertified,
             result.orphans,
             result.orphan_bytes,
+            result.young,
+            result.young_bytes,
             uploads.uploads,
             uploads.bytes,
             result.seconds,
@@ -389,6 +416,8 @@ class AuditCollector:
                 uncertified=result.uncertified,
                 orphans=result.orphans,
                 orphan_bytes=result.orphan_bytes,
+                young=result.young,
+                young_bytes=result.young_bytes,
                 uploads=uploads.uploads,
                 upload_bytes=uploads.bytes,
                 seconds=round(result.seconds, 3),

@@ -515,8 +515,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   default) the root backfills protection for what was bound before, certifies each
   scope whose coverage is complete, and audits a store it is eligible on — an S3
   bucket with versioning enabled that its credential can list — reporting the
-  objects no binding names and the open multipart uploads to its log, metrics and an
-  audit stream. It deletes and aborts nothing. A filesystem store, or a bucket without
+  objects no binding names, those too recent to condemn counted apart, and the open
+  multipart uploads to its log, metrics and an audit stream. It deletes and aborts nothing. A filesystem store, or a bucket without
   versioning, is reported ineligible and keeps every object.
 - **Store access.** A worker reaches the store only under a `csg-`
   `ContentStoreAccessGrant` the control plane mints for one dispatched task in one

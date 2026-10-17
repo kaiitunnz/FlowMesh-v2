@@ -173,7 +173,7 @@ def test_only_unbound_unheld_old_objects_are_condemned(fx) -> None:
     bound = fx.s3.put(_A, "bound")
     pinned = fx.s3.put(_A, "pinned")
     orphan = fx.s3.put(_A, "orphan", size=33)
-    young = fx.s3.put(_A, "young", at=_NOW - 60)
+    young = fx.s3.put(_A, "young", size=7, at=_NOW - 60)
     fx.raw.sadd(reclaim_protected_key(_A), bound)
     fx.raw.hset(reclaim_pins_key(_A), pinned, json.dumps([{"n": "1:1", "l": "{}"}]))
     fx.s3.versions.append(
@@ -195,6 +195,7 @@ def test_only_unbound_unheld_old_objects_are_condemned(fx) -> None:
     assert (scope.orphans, scope.orphan_bytes, scope.kept, scope.young) == (1, 33, 2, 1)
     assert scope.foreign == 1
     assert young not in fx.condemned()
+    assert (result.young, result.young_bytes) == (1, 7)
     _assert_nothing_destroyed(fx.s3, fx.raw)
 
 
