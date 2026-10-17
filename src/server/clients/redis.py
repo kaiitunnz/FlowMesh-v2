@@ -356,6 +356,20 @@ def reclaim_uncertified_key(scope: str) -> str:
     return f"rc:{{{scope}}}:uncertified"
 
 
+RECLAIM_HOOKS_ON_KEY = "rc:hooks-on"
+RECLAIM_BACKFILL_KEY = "rc:backfill"
+RECLAIM_BACKFILL_FAULTS_KEY = "rc:backfill-faults"
+RECLAIM_AUDIT_KEY = "rc:audit"
+
+
+def reclaim_cert_key(scope: str) -> str:
+    return f"rc:{{{scope}}}:cert"
+
+
+def reclaim_coverage_key(scope: str) -> str:
+    return f"rc:{{{scope}}}:coverage"
+
+
 def reclaim_multipart_key(scope: str) -> str:
     return f"rc:{{{scope}}}:mpu"
 

@@ -981,6 +981,15 @@ STACK_ENV_SCHEMA = EnvSchema(
                     var_type=EnvVarType.INT,
                     min_value=1,
                 ),
+                EnvVar(
+                    "CONTENT_RECLAMATION_ENABLED",
+                    "true",
+                    description=(
+                        "Backfill content protection and audit stored content no "
+                        "binding names."
+                    ),
+                    var_type=EnvVarType.BOOL,
+                ),
             ],
         ),
         EnvSection(

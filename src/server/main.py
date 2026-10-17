@@ -67,6 +67,7 @@ from .network.reverse_relay import (
 from .network.service import NetworkPlane
 from .orchestration.telemetry import build_workflow_span_emitter
 from .reclamation.multipart import MultipartRegistrations, MultipartStore
+from .reclamation.service import start_reclamation
 from .registries import WorkerRegistry, WorkflowRegistry
 from .registries.node import NodeRegistry
 from .registries.resident import ResidentRegistry
@@ -596,6 +597,19 @@ def _start_root_threads() -> None:
     )
     settled_history_thread.start()
     BACKGROUND_THREADS.append(settled_history_thread)
+
+    runtime = RUNTIME
+    reclamation_thread = start_reclamation(
+        config.content_store.reclamation_enabled,
+        REDIS_CLIENT,
+        config.object_store,
+        lambda: runtime.root_epoch,
+        logger,
+        STOP_EVENT,
+        SERVER_METER,
+    )
+    if reclamation_thread is not None:
+        BACKGROUND_THREADS.append(reclamation_thread)
 
     watchdog_thread = WATCHDOG.start(STOP_EVENT)
     if watchdog_thread and watchdog_thread not in BACKGROUND_THREADS:
