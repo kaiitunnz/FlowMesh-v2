@@ -32,6 +32,7 @@ from ..clients.redis import (
     WORKFLOWS_OPEN_KEY,
     WORKFLOWS_SET_KEY,
     RedisClient,
+    reclaim_uncertified_key,
     task_artifacts_key,
     task_state_key,
     workflow_blueprints_key,
@@ -584,6 +585,21 @@ class WorkflowRegistry(WorkflowHistoryStore, ArtifactCatalogStore):
 
     async def claim_root_epoch_async(self) -> int:
         return await self._rds.asyncio.incr(RECLAIM_ROOT_EPOCH_KEY)
+
+    def mark_uncovered(self, scope: str, workflow_id: str) -> None:
+        """Record that a write of the workflow faulted partway, so the scope's
+        protection may miss a binding until the workflow's rewrite lands."""
+        self._rds.sync.sadd(reclaim_uncertified_key(scope), workflow_id)
+
+    def clear_uncovered(self, scope: str, workflow_id: str) -> None:
+        """Record that the workflow's rewrite landed with its protection."""
+        self._rds.sync.srem(reclaim_uncertified_key(scope), workflow_id)
+
+    async def mark_uncovered_async(self, scope: str, workflow_id: str) -> None:
+        await self._rds.asyncio.sadd(reclaim_uncertified_key(scope), workflow_id)
+
+    async def clear_uncovered_async(self, scope: str, workflow_id: str) -> None:
+        await self._rds.asyncio.srem(reclaim_uncertified_key(scope), workflow_id)
 
     def _watch_lost(self, guard: CommitGuard, exc: WatchError) -> Exception:
         """What a guarded commit whose watch fired means: a later root, or a lost

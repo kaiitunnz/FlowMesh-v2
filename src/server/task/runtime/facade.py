@@ -653,7 +653,8 @@ class TaskRuntime:
             self._lock,
         )
         self._committer.on_debt = self._durability.schedule
-        self._committer.on_fault_cleared = self._release_write_faulted_locked
+        self._committer.on_faulted = self._uncover_locked
+        self._committer.on_fault_cleared = self._fault_cleared_locked
         self._committer.on_fenced = self._on_fenced
         # What stops this root once a later root took the epoch; the server wires it.
         self.on_fenced: Callable[[], None] | None = None
@@ -1965,6 +1966,36 @@ class TaskRuntime:
                             record, increment_retry=False, front=True
                         )
                         self._cv.notify_all()
+
+    def _uncover_locked(self, workflow_id: str) -> None:
+        """Keep the workflow's scope out of collection while a faulted write may have
+        landed a binding without its protection."""
+        if (scope := self._scope_locked(workflow_id)) is None:
+            return
+        try:
+            self._workflow_registry.mark_uncovered(scope, workflow_id)
+        except Exception:
+            self._logger.exception(
+                "Could not keep scope %s out of collection after workflow %s faulted",
+                scope,
+                workflow_id,
+            )
+
+    def _fault_cleared_locked(self, workflow_id: str) -> None:
+        if (scope := self._scope_locked(workflow_id)) is not None:
+            try:
+                self._workflow_registry.clear_uncovered(scope, workflow_id)
+            except Exception:
+                self._logger.warning(
+                    "Could not return scope %s to collection", scope, exc_info=True
+                )
+        self._release_write_faulted_locked(workflow_id)
+
+    def _scope_locked(self, workflow_id: str) -> str | None:
+        for task_id in self._tasks.ids_of(workflow_id):
+            if (record := self._tasks.get(task_id)) is not None:
+                return record.org_id
+        return None
 
     def _release_write_faulted_locked(self, workflow_id: str) -> None:
         """Queue again each task whose publication waited for a write of the

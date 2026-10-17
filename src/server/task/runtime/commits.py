@@ -249,6 +249,7 @@ class TransitionCommitter:
         # Workflows owing a rewrite after a write raised a fault of its own, and what
         # runs once a write of one is made again.
         self.faulted: set[str] = set()
+        self.on_faulted: Callable[[str], None] | None = None
         self.on_fault_cleared: Callable[[str], None] | None = None
         # The root epoch this runtime commits asserted state under, and the workflows
         # whose in-memory state holds an asserted publication no landed write carries,
@@ -420,6 +421,8 @@ class TransitionCommitter:
                 self._owe_rewrite_locked(workflow_id)
                 if workflow_id not in self.faulted:
                     self.faulted.add(workflow_id)
+                    if self.on_faulted is not None:
+                        self.on_faulted(workflow_id)
                     self._logger.error(
                         "A write of workflow %s raised; its next write rewrites it: %s",
                         workflow_id,

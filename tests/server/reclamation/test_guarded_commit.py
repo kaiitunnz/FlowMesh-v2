@@ -107,3 +107,25 @@ def test_the_async_guard_fences_a_later_root(setup) -> None:
     asyncio.run(run())
     assert raw.hget(workflow_ds_key(_WF), "f") == "1:{}"
     assert not raw.hexists(workflow_ds_key(_WF), "g")
+
+
+def test_a_fenced_reset_leaves_the_stored_ledger_whole(
+    setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry, raw = setup
+    epoch = registry.claim_root_epoch()
+    registry.save_ledger(_WF, _changes(), guard=CommitGuard(epoch))
+
+    def later_root_starts(pipe, guard):
+        _guard_sync(pipe, guard)
+        raw.incr(RECLAIM_ROOT_EPOCH_KEY)
+
+    monkeypatch.setattr("server.registries.workflow._guard_sync", later_root_starts)
+    reset = LedgerChanges(
+        {"g": "2:{}"}, references=(reference_for("org-a", b"other"),), reset=True
+    )
+    with pytest.raises(EpochFenced):
+        registry.save_ledger(_WF, reset, guard=CommitGuard(epoch))
+    # Neither the delete nor the rewrite of the reset landed.
+    assert raw.hgetall(workflow_ds_key(_WF)) == {"f": "1:{}"}
+    assert raw.smembers(reclaim_protected_key("org-a")) == {_REF.content_digest}

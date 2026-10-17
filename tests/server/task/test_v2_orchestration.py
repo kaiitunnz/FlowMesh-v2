@@ -121,6 +121,14 @@ class FakeRegistry(StoredTaskStates, StoredLedgers):
         self.root_epoch = getattr(self, "root_epoch", 0) + 1
         return self.root_epoch
 
+    def mark_uncovered(self, scope: str, workflow_id: str) -> None:
+        current: set[tuple[str, str]] = getattr(self, "uncovered", set())
+        self.uncovered = current | {(scope, workflow_id)}
+
+    def clear_uncovered(self, scope: str, workflow_id: str) -> None:
+        current: set[tuple[str, str]] = getattr(self, "uncovered", set())
+        self.uncovered = current - {(scope, workflow_id)}
+
     async def claim_root_epoch_async(self) -> int:
         return self.claim_root_epoch()
 
