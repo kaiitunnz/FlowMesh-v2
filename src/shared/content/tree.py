@@ -101,7 +101,7 @@ class TreeManifest:
     def decode(cls, data: bytes) -> Self:
         try:
             document = json.loads(data)
-        except ValueError as exc:
+        except (ValueError, RecursionError) as exc:
             raise TreeManifestError(f"tree manifest is not JSON: {exc}") from exc
         if not isinstance(document, dict) or document.get("schema") != _SCHEMA:
             raise TreeManifestError("tree manifest has an unknown schema")
@@ -230,7 +230,7 @@ class _MemberReader:
                     raise TreeManifestError("tree member is too long") from None
                 self._wait = len(buffer) - self._pos
                 return
-            except ValueError as exc:
+            except (ValueError, RecursionError) as exc:
                 raise TreeManifestError(f"malformed tree member: {exc}") from exc
             match entry:
                 case [str() as path, str() as digest, int() as size]:

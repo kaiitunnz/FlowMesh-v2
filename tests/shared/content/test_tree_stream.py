@@ -141,3 +141,31 @@ def test_bytes_that_are_not_utf8_are_refused_as_a_malformed_manifest(at: int) ->
 
     with pytest.raises(TreeManifestError):
         list(iter_members(_windows(data, 4096)))
+
+
+_DEPTH = 100_000
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b'{"schema":1,"members":[["a",' + b"[" * _DEPTH,
+        b'{"schema":1,"members":[["a",' + b"[" * _DEPTH + b"]" * _DEPTH + b",1]]}",
+    ],
+    ids=["unclosed", "closed"],
+)
+@pytest.mark.parametrize("size", [7, 64 * 1024])
+def test_deeply_nested_arrays_are_refused_as_a_malformed_manifest(
+    data: bytes, size: int
+) -> None:
+    tracemalloc.start()
+    try:
+        with pytest.raises(TreeManifestError):
+            deque(iter_members(_windows(data, size)), maxlen=0)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert peak < 6 << 20
+    with pytest.raises(TreeManifestError):
+        TreeManifest.decode(data)
