@@ -231,9 +231,9 @@ def test_a_stopped_store_does_not_wait() -> None:
 
 
 class _Response:
-    def __init__(self, status_code: int) -> None:
+    def __init__(self, status_code: int, content: bytes = b"{}") -> None:
         self.status_code = status_code
-        self.content = b"{}"
+        self.content = content
 
     def json(self) -> Any:
         return {}
@@ -265,3 +265,55 @@ def test_the_index_client_reports_an_unreachable_control_as_unavailable(
             client.find("local", "idm-8")
         else:
             client.record("local", "idm-8", reference_for("local", b"x"))
+
+
+def _answering(
+    monkeypatch: pytest.MonkeyPatch, *statuses: int
+) -> tuple[list[int], ContentReference]:
+    """Route the index client's calls to a control answering ``statuses`` to each
+    recording in turn, then binding it; returns the statuses answered and the content.
+    """
+    content = reference_for("local", b"once", media_type="text/plain")
+    bound = OutcomeManifest(content=content, idempotency_key="idm-10")
+    pending = list(statuses)
+    answered: list[int] = []
+
+    def put(*args: Any, **kwargs: Any) -> _Response:
+        answer = pending.pop(0) if pending else 200
+        answered.append(answer)
+        return _Response(answer, bound.model_dump_json().encode())
+
+    monkeypatch.setattr(
+        "shared.outcome.finalizing_store.requests.get", lambda *a, **k: _Response(404)
+    )
+    monkeypatch.setattr("shared.outcome.finalizing_store.requests.put", put)
+    return answered, content
+
+
+def test_a_materialization_waits_out_a_control_answering_503(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    answered, content = _answering(monkeypatch, 503, 503)
+    store = FinalizingContentStore(
+        _SharedStore(), FinalizationIndexClient("http://control"), pause=_Pauses()
+    )
+
+    manifest = store.materialize("local", "idm-10", b"once", media_type="text/plain")
+
+    assert manifest.content == content
+    assert answered == [503, 503, 200]
+
+
+def test_a_materialization_surfaces_a_control_fault(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    answered, _ = _answering(monkeypatch, 500)
+    store = FinalizingContentStore(
+        _SharedStore(), FinalizationIndexClient("http://control"), pause=_Pauses()
+    )
+
+    with pytest.raises(ContentStoreError) as raised:
+        store.materialize("local", "idm-10", b"once", media_type="text/plain")
+
+    assert not isinstance(raised.value, FinalizationUnavailableError)
+    assert answered == [500]

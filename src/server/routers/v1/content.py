@@ -21,18 +21,21 @@ from ...auth.security import (
     authenticate_connection,
     require_permission,
 )
+from ...clients.redis import REDIS_CONN_ERRORS
 from ...content import FinalizationIndex
 from ...content.finalizations import FinalizationRefused, StaleRootEpoch
 from ...hooks import ResourceAction, ResourceKind
 
 router = APIRouter(prefix="/content", tags=["Content"])
 
+_UNAVAILABLE: tuple[type[BaseException], ...] = (StaleRootEpoch, *REDIS_CONN_ERRORS)
+
 _BIND_RESPONSES: dict[int | str, dict[str, Any]] = {
     409: {
         "description": "The content cannot be bound now; ``detail.refusal`` names "
         "what its producer does next.",
     },
-    503: {"description": "This root no longer holds the root epoch."},
+    503: {"description": "A later root has replaced this one."},
 }
 
 
@@ -76,6 +79,12 @@ def _binding_scope(
     return assigned
 
 
+def _unavailable(exc: BaseException) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+    )
+
+
 def _bind(
     index: FinalizationIndex,
     principal: PrincipalContext,
@@ -83,13 +92,13 @@ def _bind(
     asserted: str,
     content: ContentReference,
 ) -> OutcomeManifest:
-    admitted = _binding_scope(index, principal, idempotency_key, asserted)
-    if content.authorization_scope != admitted:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="content is outside the admitted scope",
-        )
     try:
+        admitted = _binding_scope(index, principal, idempotency_key, asserted)
+        if content.authorization_scope != admitted:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="content is outside the admitted scope",
+            )
         return index.record(
             admitted,
             idempotency_key,
@@ -101,10 +110,8 @@ def _bind(
             status_code=status.HTTP_409_CONFLICT,
             detail={"refusal": exc.refusal.value},
         ) from exc
-    except StaleRootEpoch as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
-        ) from exc
+    except _UNAVAILABLE as exc:
+        raise _unavailable(exc) from exc
 
 
 def _resolve(
@@ -113,9 +120,13 @@ def _resolve(
     idempotency_key: str,
     asserted: str,
 ) -> OutcomeManifest | None:
-    return index.find(
-        _binding_scope(index, principal, idempotency_key, asserted), idempotency_key
-    )
+    try:
+        return index.find(
+            _binding_scope(index, principal, idempotency_key, asserted),
+            idempotency_key,
+        )
+    except REDIS_CONN_ERRORS as exc:
+        raise _unavailable(exc) from exc
 
 
 @router.put(

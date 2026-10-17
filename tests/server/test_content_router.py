@@ -13,6 +13,7 @@ from typing import Any
 
 import fakeredis
 import pytest
+import redis
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
@@ -165,6 +166,26 @@ def test_a_fenced_finalization_answers_503_and_stops_the_root() -> None:
     index._rds.sync.set_value(RECLAIM_ROOT_EPOCH_KEY, str(_EPOCH + 1))
     assert _bind(client, "idm-10").status_code == 503
     assert fenced == [True]
+
+
+@pytest.mark.parametrize("method", ["put", "get"])
+def test_a_control_store_outage_answers_503(
+    monkeypatch: pytest.MonkeyPatch, method: str
+) -> None:
+    client, index = _assigned("idm-outage")
+
+    def unreachable(*args: Any, **kwargs: Any) -> Any:
+        raise redis.exceptions.ConnectionError("control store unreachable")
+
+    if method == "put":
+        monkeypatch.setattr(index._rds.sync, "eval", unreachable)
+        resp = _bind(client, "idm-outage")
+    else:
+        monkeypatch.setattr(index._rds.sync, "get", unreachable)
+        resp = client.get(
+            f"{PREFIX}/content/finalizations", params={"idem": "idm-outage"}
+        )
+    assert resp.status_code == 503
 
 
 def test_the_schema_declares_the_refusal_and_the_fence() -> None:
