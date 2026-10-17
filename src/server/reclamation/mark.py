@@ -76,6 +76,15 @@ class ScopeMark:
     def add(self, digest: str) -> None:
         self.add_words(digest_words(digest))
 
+    def reserve(self, count: int) -> None:
+        """Make room for ``count`` more digests in one layer, so a batch of known size
+        never grows the filter a layer at a time."""
+        layer = self._layers[-1]
+        if layer.capacity - layer.count >= count:
+            return
+        capacity = max(layer.capacity * 2, count)
+        self._layers.append(_Layer(capacity, self._error / 2 ** len(self._layers)))
+
     def add_words(self, words: tuple[int, int]) -> None:
         if words in self:
             return
@@ -116,8 +125,12 @@ class Mark:
     def add(self, scope: str, digest: str) -> None:
         self.scope(scope).add(digest)
 
-    def add_all(self, scope: str, words: Iterable[tuple[int, int]]) -> None:
+    def add_all(
+        self, scope: str, words: Iterable[tuple[int, int]], count: int = 0
+    ) -> None:
+        """Add every digest of ``words``, ``count`` of them when known."""
         mark = self.scope(scope)
+        mark.reserve(count)
         for pair in words:
             mark.add_words(pair)
 

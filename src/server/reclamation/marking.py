@@ -533,6 +533,8 @@ class Marker:
             for record in records:
                 if isinstance(digest := record.get("source_digest"), str):
                     wanted[workflow_id].add(digest)
+            if pacer.tick():
+                raise _Stopped
         sources = self._sources(
             [(workflow_id, sorted(digests)) for workflow_id, digests in wanted.items()]
         )

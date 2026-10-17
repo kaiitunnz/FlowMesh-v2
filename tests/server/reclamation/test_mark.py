@@ -88,3 +88,15 @@ def test_counts_and_size_cover_every_scope() -> None:
     assert size == MarkSize(2, 5, size.bytes)
     assert size.bytes == mark.scope("org-a").nbytes + mark.scope("org-b").nbytes
     assert mark.scope("org-a").nbytes > mark.scope("org-b").nbytes
+
+
+def test_a_reserved_batch_lands_in_one_layer_sized_for_it() -> None:
+    mark = ScopeMark(1)
+    words = [digest_words(f"{i:064x}") for i in range(50_000)]
+
+    mark.reserve(len(words))
+    for pair in words:
+        mark.add_words(pair)
+
+    assert all(pair in mark for pair in words)
+    assert mark.nbytes * 8 / len(words) < 14

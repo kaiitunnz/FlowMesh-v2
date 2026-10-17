@@ -120,6 +120,7 @@ class TreeClosures:
         self._mark.add_all(
             tree.authorization_scope,
             zip(words[0::2], words[1::2], strict=True),
+            len(words) // 2,
         )
         self._expanded.add(identity)
         return Expansion.EXPANDED
