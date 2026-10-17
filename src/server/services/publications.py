@@ -106,9 +106,17 @@ class PublicationIntake:
         if (holds := preparation.holds) is None:
             if preparation.malformed and event.type == "TASK_SUCCEEDED":
                 self._refuse_success(event, preparation.reason)
+            refusal = preparation.refusal or PublicationDisposition.RETRY
+            self._logger.info(
+                "Publication %s of %s refused (%s): %s",
+                publication.key,
+                event.task_id,
+                refusal.value,
+                preparation.reason,
+            )
             self._answer_now(
                 publication,
-                preparation.refusal or PublicationDisposition.RETRY,
+                refusal,
                 preparation.reason,
                 list(preparation.digests),
             )
