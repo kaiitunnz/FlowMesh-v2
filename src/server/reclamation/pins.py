@@ -18,6 +18,7 @@ from itertools import batched
 from typing import Any
 
 from ..clients.redis import (
+    RECLAIM_SCOPES_KEY,
     RedisClient,
     reclaim_condemned_key,
     reclaim_deleting_key,
@@ -218,6 +219,34 @@ class PinStore:
             held.extend(d for d, v in zip(chunk, verdicts, strict=True) if v != "P")
         return Acquisition(Verdict.ACQUIRED, nonce, held=tuple(held))
 
+    def release_older(self, epoch: int, page: int = CHUNK) -> int:
+        """Release every hold an acquisition of an earlier root epoch took; returns
+        how many.
+
+        A root takes its epoch before anything else, which fences every commit an
+        earlier root could still issue, so what such a hold covered is either bound,
+        and protected with its binding, or never will be, and its publication is
+        reported again under this root.
+        """
+        released = 0
+        for scope in sorted(self._rds.sync.set_members(RECLAIM_SCOPES_KEY)):
+            key = reclaim_pins_key(scope)
+            cursor = 0
+            while True:
+                with self._rds.sync.control_pipeline(transaction=False) as pipe:
+                    pipe.hscan(key, cursor, count=page)
+                    cursor, fields = pipe.execute()[0]
+                stale: dict[str, list[str]] = {}
+                for digest, raw in dict(fields).items():
+                    for holder in json.loads(raw):
+                        if _epoch_of(str(holder.get("n", ""))) < epoch:
+                            stale.setdefault(holder["n"], []).append(digest)
+                for nonce, digests in stale.items():
+                    released += self.release(scope, digests, nonce)
+                if not int(cursor):
+                    break
+        return released
+
     def release(self, scope: str, digests: Sequence[str], nonce: str) -> int:
         """Release exactly ``nonce``'s holds on ``digests``; returns how many."""
         released = 0
@@ -226,6 +255,11 @@ class PinStore:
                 self._rds.sync.eval(_RELEASE, 1, reclaim_pins_key(scope), nonce, *chunk)
             )
         return released
+
+
+def _epoch_of(nonce: str) -> int:
+    head, _, _ = nonce.partition(":")
+    return int(head) if head.isdigit() else 0
 
 
 __all__ = ["AcquireMode", "Acquisition", "Nonces", "PinStore", "Verdict", "CHUNK"]

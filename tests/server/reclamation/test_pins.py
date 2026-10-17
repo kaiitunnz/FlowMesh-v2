@@ -115,3 +115,15 @@ def test_an_acquisition_refuses_a_key_of_the_wrong_type(store) -> None:
     with pytest.raises(Exception, match="WRONGTYPE"):
         pins.acquire(_SCOPE, ["x"], "1:1", _LOCATOR)
     assert raw.get(reclaim_pins_key(_SCOPE)) == "corrupt"
+
+
+def test_a_new_root_releases_only_the_holds_earlier_roots_took(store) -> None:
+    pins, raw = store
+    raw.sadd("rc:scopes", _SCOPE)
+    pins.acquire(_SCOPE, ["a", "b"], "3:1", _LOCATOR)
+    pins.acquire(_SCOPE, ["b"], "4:1", _LOCATOR)
+    pins.acquire(_SCOPE, ["c"], "5:2", _LOCATOR)
+    assert pins.release_older(5, page=1) == 3
+    assert _holders(raw, "a") == []
+    assert _holders(raw, "b") == []
+    assert _holders(raw, "c") == ["5:2"]

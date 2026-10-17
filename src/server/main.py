@@ -575,6 +575,18 @@ def _close_restored(runtime: TaskRuntime, workflow_id: str) -> bool:
     )
 
 
+def _release_earlier_holds(epoch: int) -> None:
+    try:
+        released = PinStore(REDIS_CLIENT).release_older(epoch)
+    except Exception:
+        logger.warning(
+            "Could not release the holds an earlier root left", exc_info=True
+        )
+        return
+    if released:
+        logger.info("Released %d hold(s) an earlier root left", released)
+
+
 def _start_root_threads() -> None:
     """Start orchestrator background threads. Only called on root nodes."""
     assert DISPATCHER is not None
@@ -607,6 +619,16 @@ def _start_root_threads() -> None:
     BACKGROUND_THREADS.append(settled_history_thread)
 
     runtime = RUNTIME
+    if (epoch := runtime.root_epoch) is not None:
+        holds_thread = threading.Thread(
+            target=_release_earlier_holds,
+            args=(epoch,),
+            name="earlier-holds",
+            daemon=True,
+        )
+        holds_thread.start()
+        BACKGROUND_THREADS.append(holds_thread)
+
     reclamation_thread = start_reclamation(
         config.content_store.reclamation_enabled,
         REDIS_CLIENT,
