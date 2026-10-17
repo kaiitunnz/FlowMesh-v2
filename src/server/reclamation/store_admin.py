@@ -16,7 +16,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Self
 from urllib.parse import urlsplit
 
 import boto3
@@ -70,35 +70,41 @@ class Listing(StrEnum):
     """What an audit lists of an eligible store."""
 
     VERSIONS = "versions"
-    """Every version of every object, the bucket keeping versions."""
+    """Every version of every object, the bucket keeping or having kept versions."""
     OBJECTS = "objects"
-    """Every object, the bucket keeping one version of each."""
+    """Every object, the bucket never having kept versions."""
 
 
 @dataclass(frozen=True)
-class Eligibility:
-    """Whether the store may be audited and what its audit lists, or why not."""
+class Eligible:
+    """A store the audit may list, and what it lists of it."""
 
-    reason: Ineligibility | None = None
-    detail: str = ""
-    listing: Listing | None = None
-    versioning: str = ""
+    listing: Listing
+    versioning: str
     """The bucket's versioning state as the store reports it."""
 
-    @property
-    def eligible(self) -> bool:
-        return self.reason is None
+
+@dataclass(frozen=True)
+class Ineligible:
+    """A store the audit cannot list, and why."""
+
+    reason: Ineligibility
+    detail: str = ""
+
+
+type Eligibility = Eligible | Ineligible
+
+
+class ListingError(Exception):
+    """The store answered a listing it cannot be paged through."""
 
 
 @dataclass(frozen=True)
 class StoredVersion:
     """One version of one key under a scope."""
 
-    key: str
-    version_id: str
     size_bytes: int
     last_modified: float
-    latest: bool
     digest: str | None
     """The content digest the key names, or None for a key that names no content
     object."""
@@ -110,12 +116,21 @@ class OpenUpload:
 
     key: str
     upload_id: str
-    initiated: float
     scope: str | None
 
 
 def _timestamp(value: Any) -> float:
     return value.timestamp() if isinstance(value, datetime) else 0.0
+
+
+def _next(page: dict[str, Any], *names: str) -> dict[str, str]:
+    """The markers continuing a truncated listing past ``page``."""
+    markers = {name: str(value) for name in names if (value := page.get(f"Next{name}"))}
+    if names[0] not in markers:
+        raise ListingError(
+            f"the store reported a truncated listing without a Next{names[0]}"
+        )
+    return markers
 
 
 class StoreAdmin:
@@ -127,7 +142,7 @@ class StoreAdmin:
         self._prefix = prefix.strip("/")
 
     @classmethod
-    def from_config(cls, cfg: ObjectStoreConfig) -> "StoreAdmin | None":
+    def from_config(cls, cfg: ObjectStoreConfig) -> Self | None:
         """The admin view of an S3-compatible store; None for a filesystem store."""
         if cfg.backend != BACKEND_S3:
             return None
@@ -138,7 +153,8 @@ class StoreAdmin:
         return "/".join(parts) + "/" if parts else ""
 
     def eligibility(self) -> Eligibility:
-        """What the credential can list of the bucket, and whether it keeps versions."""
+        """What the credential can list of the bucket: its versions where it keeps or
+        kept them, or may have, else its objects."""
         try:
             status = str(
                 self._client.get_bucket_versioning(Bucket=self._bucket).get("Status")
@@ -146,22 +162,32 @@ class StoreAdmin:
             )
         except Exception as exc:
             status = f"unreadable: {exc}"
-        listing = Listing.VERSIONS if status == "Enabled" else Listing.OBJECTS
         try:
-            if listing is Listing.VERSIONS:
-                self._client.list_object_versions(
-                    Bucket=self._bucket, Prefix=self._root(), MaxKeys=1
-                )
-            else:
-                self._client.list_objects_v2(
-                    Bucket=self._bucket, Prefix=self._root(), MaxKeys=1
-                )
+            listing = self._probe(status)
             self._client.list_multipart_uploads(
                 Bucket=self._bucket, Prefix=self._root(), MaxUploads=1
             )
         except Exception as exc:
-            return Eligibility(Ineligibility.CANNOT_LIST, str(exc), versioning=status)
-        return Eligibility(listing=listing, versioning=status)
+            return Ineligible(Ineligibility.CANNOT_LIST, str(exc))
+        return Eligible(listing, status)
+
+    def _probe(self, status: str) -> Listing:
+        """The listing the credential can make for a bucket of versioning ``status``;
+        a bucket of unreadable status is listed by version where that is allowed."""
+        if status == "off":
+            self._client.list_objects_v2(
+                Bucket=self._bucket, Prefix=self._root(), MaxKeys=1
+            )
+            return Listing.OBJECTS
+        try:
+            self._client.list_object_versions(
+                Bucket=self._bucket, Prefix=self._root(), MaxKeys=1
+            )
+        except Exception:
+            if status in ("Enabled", "Suspended"):
+                raise
+            return self._probe("off")
+        return Listing.VERSIONS
 
     def listed(self, listing: Listing, scope: str) -> Iterator[list[StoredVersion]]:
         """Every object, or every object version, under ``scope``, a page at a time."""
@@ -169,25 +195,39 @@ class StoreAdmin:
             return self.versions(scope)
         return self.objects(scope)
 
-    def scopes(self) -> Iterator[str]:
-        """Every scope the bucket holds a key under."""
+    def scopes(self, listing: Listing) -> Iterator[list[str]]:
+        """Every scope the bucket holds a key, or a key version, under, a page at a
+        time."""
         root = self._root()
-        token: str | None = None
+        markers: dict[str, str] = {}
         while True:
-            extra = {"ContinuationToken": token} if token else {}
-            page = self._client.list_objects_v2(
-                Bucket=self._bucket,
-                Prefix=root,
-                Delimiter="/",
-                MaxKeys=PAGE_SIZE,
-                **extra,
-            )
-            for common in page.get("CommonPrefixes", []):
-                if scope := common["Prefix"][len(root) :].rstrip("/"):
-                    yield scope
+            if listing is Listing.VERSIONS:
+                page = self._client.list_object_versions(
+                    Bucket=self._bucket,
+                    Prefix=root,
+                    Delimiter="/",
+                    MaxKeys=PAGE_SIZE,
+                    **markers,
+                )
+            else:
+                page = self._client.list_objects_v2(
+                    Bucket=self._bucket,
+                    Prefix=root,
+                    Delimiter="/",
+                    MaxKeys=PAGE_SIZE,
+                    **markers,
+                )
+            yield [
+                scope
+                for common in page.get("CommonPrefixes", [])
+                if (scope := common["Prefix"][len(root) :].rstrip("/"))
+            ]
             if not page.get("IsTruncated"):
                 return
-            token = page.get("NextContinuationToken")
+            if listing is Listing.VERSIONS:
+                markers = _next(page, "KeyMarker", "VersionIdMarker")
+            else:
+                markers = _next(page, "ContinuationToken")
 
     def versions(self, scope: str) -> Iterator[list[StoredVersion]]:
         """Every object version under ``scope``, a page at a time."""
@@ -198,56 +238,24 @@ class StoreAdmin:
             page = self._client.list_object_versions(
                 Bucket=self._bucket, Prefix=root, MaxKeys=PAGE_SIZE, **markers
             )
-            listed: list[StoredVersion] = []
-            for version in page.get("Versions", []):
-                key = version["Key"]
-                name = key[len(content) :] if key.startswith(content) else ""
-                listed.append(
-                    StoredVersion(
-                        key=key,
-                        version_id=str(version.get("VersionId") or "null"),
-                        size_bytes=int(version.get("Size") or 0),
-                        last_modified=_timestamp(version.get("LastModified")),
-                        latest=bool(version.get("IsLatest")),
-                        digest=name if _DIGEST.fullmatch(name) else None,
-                    )
-                )
-            yield listed
+            yield [_stored(version, content) for version in page.get("Versions", [])]
             if not page.get("IsTruncated"):
                 return
-            markers = {
-                "KeyMarker": page.get("NextKeyMarker", ""),
-                "VersionIdMarker": page.get("NextVersionIdMarker", ""),
-            }
+            markers = _next(page, "KeyMarker", "VersionIdMarker")
 
     def objects(self, scope: str) -> Iterator[list[StoredVersion]]:
         """Every object under ``scope``, each its one version, a page at a time."""
         root = self._root(scope)
         content = f"{root}{DigestAlgorithm.SHA256.value}/"
-        token: str | None = None
+        markers: dict[str, str] = {}
         while True:
-            extra = {"ContinuationToken": token} if token else {}
             page = self._client.list_objects_v2(
-                Bucket=self._bucket, Prefix=root, MaxKeys=PAGE_SIZE, **extra
+                Bucket=self._bucket, Prefix=root, MaxKeys=PAGE_SIZE, **markers
             )
-            listed: list[StoredVersion] = []
-            for item in page.get("Contents", []):
-                key = item["Key"]
-                name = key[len(content) :] if key.startswith(content) else ""
-                listed.append(
-                    StoredVersion(
-                        key=key,
-                        version_id="null",
-                        size_bytes=int(item.get("Size") or 0),
-                        last_modified=_timestamp(item.get("LastModified")),
-                        latest=True,
-                        digest=name if _DIGEST.fullmatch(name) else None,
-                    )
-                )
-            yield listed
+            yield [_stored(item, content) for item in page.get("Contents", [])]
             if not page.get("IsTruncated"):
                 return
-            token = page.get("NextContinuationToken")
+            markers = _next(page, "ContinuationToken")
 
     def uploads(self) -> Iterator[list[OpenUpload]]:
         """Every multipart upload the bucket holds open under the prefix, a page at a
@@ -263,20 +271,12 @@ class StoreAdmin:
                 key = upload["Key"]
                 scope, sep, _ = key[len(root) :].partition("/")
                 listed.append(
-                    OpenUpload(
-                        key=key,
-                        upload_id=upload["UploadId"],
-                        initiated=_timestamp(upload.get("Initiated")),
-                        scope=scope if sep else None,
-                    )
+                    OpenUpload(key, upload["UploadId"], scope if sep else None)
                 )
             yield listed
             if not page.get("IsTruncated"):
                 return
-            markers = {
-                "KeyMarker": page.get("NextKeyMarker", ""),
-                "UploadIdMarker": page.get("NextUploadIdMarker", ""),
-            }
+            markers = _next(page, "KeyMarker", "UploadIdMarker")
 
     def upload_bytes(self, upload: OpenUpload) -> tuple[int, int]:
         """The parts an open upload holds and their total size."""
@@ -295,13 +295,26 @@ class StoreAdmin:
                 size += int(part.get("Size") or 0)
             if not page.get("IsTruncated"):
                 return parts, size
-            marker = int(page.get("NextPartNumberMarker") or 0)
+            marker = int(_next(page, "PartNumberMarker")["PartNumberMarker"])
+
+
+def _stored(item: dict[str, Any], content: str) -> StoredVersion:
+    key = item["Key"]
+    name = key[len(content) :] if key.startswith(content) else ""
+    return StoredVersion(
+        size_bytes=int(item.get("Size") or 0),
+        last_modified=_timestamp(item.get("LastModified")),
+        digest=name if _DIGEST.fullmatch(name) else None,
+    )
 
 
 __all__ = [
     "Eligibility",
+    "Eligible",
     "Ineligibility",
+    "Ineligible",
     "Listing",
+    "ListingError",
     "OpenUpload",
     "PAGE_SIZE",
     "StoreAdmin",

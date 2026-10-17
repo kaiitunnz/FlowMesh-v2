@@ -14,7 +14,7 @@ from server.reclamation.audit import AuditTrail
 from server.reclamation.closures import TreeClosures
 from server.reclamation.collector import AuditCollector
 from server.reclamation.marking import Marker
-from server.reclamation.service import ReclamationService, start_reclamation
+from server.reclamation.service import ContentAuditService, start_content_audit
 from server.reclamation.store_admin import StoreAdmin
 from server.registries.artifacts import artifact_field
 from shared.content import (
@@ -33,32 +33,49 @@ _LOGGER = logging.getLogger("test.reclamation.service")
 _JOIN_SEC = 5
 
 
-class _Fixture:
+class _Waits(threading.Event):
     def __init__(self) -> None:
+        super().__init__()
+        self.waits = 0
+
+    def wait(self, timeout: float | None = None) -> bool:
+        self.waits += 1
+        return self.is_set()
+
+
+class _Fixture:
+    def __init__(self, reads_per_pause: int = 1000) -> None:
         server = fakeredis.FakeServer()
         self.rds = fake_redis_client(server)
         self.raw = fakeredis.FakeRedis(server=server, decode_responses=True)
         self.s3 = ReadOnlyS3()
         self.manifests: dict[str, bytes] = {}
         self.opened: list[str] = []
+        self.stop = _Waits()
+        self.waits_at_open: list[int] = []
         self.marker = Marker(
             self.rds, _LOGGER, page_pause_sec=0, duty=1.0, clock=lambda: NOW
         )
-        self.service = ReclamationService(
+        self.service = ContentAuditService(
             self.marker,
-            TreeClosures(self.open, _LOGGER, duty=1.0, min_pause_sec=0),
+            TreeClosures(self.open, _LOGGER),
             AuditCollector(
                 StoreAdmin(self.s3, "bucket", PREFIX),
                 _LOGGER,
                 AuditTrail(self.rds),
-                page_pause_sec=0,
+                duty=1.0,
+                min_pause_sec=0,
             ),
             _LOGGER,
             interval_sec=0,
+            reads_per_pause=reads_per_pause,
+            duty=1.0,
+            min_pause_sec=0,
         )
 
     def open(self, reference: ContentReference) -> Iterator[bytes]:
         self.opened.append(reference.content_digest)
+        self.waits_at_open.append(self.stop.waits)
         return iter([self.manifests[reference.content_digest]])
 
     def stored(self, data: bytes) -> ContentReference:
@@ -180,10 +197,10 @@ def test_run_survives_a_failed_sweep_and_stops_on_stop(
     assert len(calls) == 2
 
 
-def test_start_reclamation_runs_a_daemon_thread_until_stopped(fx) -> None:
+def test_start_content_audit_runs_a_daemon_thread_until_stopped(fx) -> None:
     stop = threading.Event()
 
-    thread = start_reclamation(
+    thread = start_content_audit(
         fx.rds,
         ObjectStoreConfig(backend=BACKEND_FILESYSTEM),
         fx.open,
@@ -195,3 +212,22 @@ def test_start_reclamation_runs_a_daemon_thread_until_stopped(fx) -> None:
     stop.set()
     thread.join(_JOIN_SEC)
     assert not thread.is_alive()
+
+
+def test_reading_many_small_trees_rests_between_them() -> None:
+    fx = _Fixture(reads_per_pause=10)
+    trees = []
+    for t in range(50):
+        members = [fx.stored(f"tree-{t}-member-{m}".encode()) for m in range(3)]
+        manifest = TreeManifest.of(
+            TreeMember(f"f{i}", ref.content_digest, ref.size_bytes)
+            for i, ref in enumerate(members)
+        ).encode()
+        trees.append(fx.tree(f"tree-{t}", manifest, files=3))
+    fx.bind(*trees)
+
+    result = fx.service.sweep(fx.stop)
+
+    assert len(fx.opened) == 50 and result.scopes[0].complete
+    # A tick per tree and per member, a rest every ten.
+    assert fx.waits_at_open[-1] - fx.waits_at_open[0] >= 19

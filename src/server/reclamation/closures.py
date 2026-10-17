@@ -9,8 +9,8 @@ the store cannot serve now is read again at the next sweep.
 """
 
 import logging
-import threading
 from array import array
+from collections import defaultdict
 from collections.abc import Callable, Generator, Iterator
 from enum import StrEnum
 
@@ -18,11 +18,11 @@ from shared.content import ContentReference
 from shared.content.tree import TreeManifestError, iter_members
 
 from ..task.results import ResultUnavailable, ResultUnreadable
-from .mark import Mark, digest_words
-from .pacing import DUTY, MIN_PAUSE_SEC, Pacer
+from .mark import DigestSet, Mark, digest_words
+from .pacing import Pacer
 
-# Members read between pauses.
-MEMBERS_PER_PAUSE = 1000
+# Trees and members read between pauses.
+READS_PER_PAUSE = 1000
 
 type OpenContent = Callable[[ContentReference], Iterator[bytes]]
 
@@ -38,56 +38,48 @@ class Expansion(StrEnum):
     UNAVAILABLE = "unavailable"
     """The store could not serve it now."""
     STOPPED = "stopped"
+    """The pass stopped before the read finished, so its members are unknown."""
 
 
 class TreeClosures:
     """The members of every tree read so far, by scope."""
 
-    def __init__(
-        self,
-        open_content: OpenContent,
-        logger: logging.Logger,
-        *,
-        members_per_pause: int = MEMBERS_PER_PAUSE,
-        duty: float = DUTY,
-        min_pause_sec: float = MIN_PAUSE_SEC,
-    ) -> None:
+    def __init__(self, open_content: OpenContent, logger: logging.Logger) -> None:
         self._open = open_content
         self._logger = logger
-        self._members_per_pause = members_per_pause
-        self._duty = duty
-        self._min_pause = min_pause_sec
         self._mark = Mark()
-        self._expanded: set[tuple[str, str]] = set()
-        self._malformed: dict[tuple[str, str], str] = {}
-        self.reads = 0
+        self._expanded: defaultdict[str, DigestSet] = defaultdict(DigestSet)
+        self._malformed: defaultdict[str, DigestSet] = defaultdict(DigestSet)
 
     @property
     def mark(self) -> Mark:
         return self._mark
 
+    @property
+    def nbytes(self) -> int:
+        """Bytes the closures hold: their mark and the trees they have settled."""
+        return self._mark.nbytes + sum(
+            digests.nbytes
+            for settled in (self._expanded, self._malformed)
+            for digests in settled.values()
+        )
+
     def known(self, tree: ContentReference) -> Expansion | None:
-        identity = (tree.authorization_scope, tree.content_digest)
-        if identity in self._expanded:
+        scope, digest = tree.authorization_scope, tree.content_digest
+        if scope in self._expanded and digest in self._expanded[scope]:
             return Expansion.EXPANDED
-        if identity in self._malformed:
+        if scope in self._malformed and digest in self._malformed[scope]:
             return Expansion.MALFORMED
         return None
 
-    def expand(self, tree: ContentReference, stop: threading.Event) -> Expansion:
-        """Read the tree's manifest unless an earlier read settled it."""
+    def expand(self, tree: ContentReference, pacer: Pacer) -> Expansion:
+        """Read the tree's manifest unless an earlier read settled it, ticking
+        ``pacer`` per member read."""
         if (settled := self.known(tree)) is not None:
             return settled
-        identity = (tree.authorization_scope, tree.content_digest)
-        self.reads += 1
+        scope = tree.authorization_scope
         # Two words per member, folded into the closure only once the bytes verify.
         words = array("Q")
-        pacer = Pacer(
-            stop,
-            self._members_per_pause,
-            duty=self._duty,
-            min_pause_sec=self._min_pause,
-        )
         chunks = self._open(tree)
         try:
             for member in iter_members(chunks):
@@ -95,20 +87,20 @@ class TreeClosures:
                 if pacer.tick():
                     return Expansion.STOPPED
         except TreeManifestError as exc:
-            self._malformed[identity] = str(exc)
+            self._malformed[scope].add(tree.content_digest)
             self._logger.error(
                 "Content audit cannot read bound tree %s in scope %s: %s",
                 tree.content_digest,
-                tree.authorization_scope,
+                scope,
                 exc,
             )
             return Expansion.MALFORMED
         except ResultUnreadable as exc:
-            self._malformed[identity] = str(exc)
+            self._malformed[scope].add(tree.content_digest)
             self._logger.error(
                 "Content audit finds bound tree %s in scope %s unreadable: %s",
                 tree.content_digest,
-                tree.authorization_scope,
+                scope,
                 exc,
             )
             return Expansion.MALFORMED
@@ -118,20 +110,16 @@ class TreeClosures:
             if isinstance(chunks, Generator):
                 chunks.close()
         self._mark.add_all(
-            tree.authorization_scope,
-            zip(words[0::2], words[1::2], strict=True),
-            len(words) // 2,
+            scope, zip(words[0::2], words[1::2], strict=True), len(words) // 2
         )
-        self._expanded.add(identity)
+        self._expanded[scope].add(tree.content_digest)
         return Expansion.EXPANDED
 
-    def malformed(self, scope: str) -> dict[str, str]:
-        """The trees of ``scope`` known not to be well formed, with why."""
-        return {
-            digest: why
-            for (tree_scope, digest), why in self._malformed.items()
-            if tree_scope == scope
-        }
+    def compact(self) -> None:
+        """Pack the trees settled since the last compaction."""
+        for settled in (self._expanded, self._malformed):
+            for digests in settled.values():
+                digests.compact()
 
 
-__all__ = ["Expansion", "OpenContent", "TreeClosures"]
+__all__ = ["READS_PER_PAUSE", "Expansion", "OpenContent", "TreeClosures"]

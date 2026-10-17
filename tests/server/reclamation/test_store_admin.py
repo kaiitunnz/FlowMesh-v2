@@ -13,10 +13,13 @@ from server.reclamation.audit import AuditTrail
 from server.reclamation.closures import TreeClosures
 from server.reclamation.collector import AuditCollector
 from server.reclamation.marking import Marker
-from server.reclamation.service import ReclamationService
+from server.reclamation.service import ContentAuditService
 from server.reclamation.store_admin import (
+    Eligible,
     Ineligibility,
+    Ineligible,
     Listing,
+    ListingError,
     StoreAdmin,
     uploads_listing_complete,
 )
@@ -55,6 +58,8 @@ class ReadOnlyS3:
     def __init__(self, versioning: str | None = "Enabled", page: int = 1000) -> None:
         self.versioning = versioning
         self.page = page
+        self.untokened = False
+        """Answer a truncated page with no continuation, as a broken store might."""
         self.items: list[dict[str, Any]] = []
         self.uploads: list[dict[str, Any]] = []
         self.parts: dict[str, list[dict[str, Any]]] = {}
@@ -62,14 +67,27 @@ class ReadOnlyS3:
         self.calls: list[str] = []
 
     def put(
-        self, scope: str, data: bytes, *, at: float = OLD, version: str = "v1"
+        self,
+        scope: str,
+        data: bytes,
+        *,
+        at: float = OLD,
+        version: str = "v1",
+        latest: bool = True,
     ) -> str:
         digest = content_digest(data)
-        self.put_key(f"{PREFIX}/{scope}/sha256/{digest}", len(data), at, version)
+        self.put_key(
+            f"{PREFIX}/{scope}/sha256/{digest}", len(data), at, version, latest
+        )
         return digest
 
     def put_key(
-        self, key: str, size: int = 1, at: float = OLD, version: str = "v1"
+        self,
+        key: str,
+        size: int = 1,
+        at: float = OLD,
+        version: str = "v1",
+        latest: bool = True,
     ) -> None:
         self.items.append(
             {
@@ -77,7 +95,7 @@ class ReadOnlyS3:
                 "VersionId": version,
                 "Size": size,
                 "LastModified": when(at),
-                "IsLatest": True,
+                "IsLatest": latest,
             }
         )
         self.items.sort(key=lambda item: (item["Key"], item["VersionId"]))
@@ -86,6 +104,20 @@ class ReadOnlyS3:
         self.calls.append(name)
         if name in self.fail:
             raise PermissionError("AccessDenied")
+
+    def _continued(self, out: dict[str, Any], **markers: Any) -> dict[str, Any]:
+        if out["IsTruncated"] and not self.untokened:
+            out.update(markers)
+        return out
+
+    @staticmethod
+    def _delimited(prefix: str, keys: list[str], delimiter: str) -> list[str]:
+        return sorted(
+            {
+                f"{prefix}{key[len(prefix):].split(delimiter)[0]}{delimiter}"
+                for key in keys
+            }
+        )
 
     def get_bucket_versioning(self, Bucket: str) -> dict[str, Any]:
         self._call("get_bucket_versioning")
@@ -100,14 +132,9 @@ class ReadOnlyS3:
         ContinuationToken: str = "",
     ) -> dict[str, Any]:
         self._call("list_objects_v2")
-        latest = {item["Key"]: item for item in self.items}
+        latest = {item["Key"]: item for item in self.items if item["IsLatest"]}
         keys = sorted(key for key in latest if key.startswith(Prefix))
-        if Delimiter:
-            entries = sorted(
-                {f"{Prefix}{key[len(Prefix):].split(Delimiter)[0]}/" for key in keys}
-            )
-        else:
-            entries = keys
+        entries = self._delimited(Prefix, keys, Delimiter) if Delimiter else keys
         start = int(ContinuationToken or 0)
         size = min(MaxKeys, self.page)
         page = entries[start : start + size]
@@ -119,32 +146,44 @@ class ReadOnlyS3:
                 {k: latest[key][k] for k in ("Key", "Size", "LastModified")}
                 for key in page
             ]
-        if out["IsTruncated"]:
-            out["NextContinuationToken"] = str(start + size)
-        return out
+        return self._continued(out, NextContinuationToken=str(start + size))
 
     def list_object_versions(
         self,
         Bucket: str,
         Prefix: str,
         MaxKeys: int,
+        Delimiter: str = "",
         KeyMarker: str = "",
         VersionIdMarker: str = "",
     ) -> dict[str, Any]:
         self._call("list_object_versions")
+        size = min(MaxKeys, self.page)
+        if Delimiter:
+            keys = [
+                item["Key"] for item in self.items if item["Key"].startswith(Prefix)
+            ]
+            prefixes = [
+                p for p in self._delimited(Prefix, keys, Delimiter) if p > KeyMarker
+            ]
+            out = {
+                "CommonPrefixes": [{"Prefix": p} for p in prefixes[:size]],
+                "IsTruncated": len(prefixes) > size,
+            }
+            return self._continued(out, NextKeyMarker="".join(prefixes[:size][-1:]))
         listed = [
             item
             for item in self.items
             if item["Key"].startswith(Prefix)
             and (item["Key"], item["VersionId"]) > (KeyMarker, VersionIdMarker)
         ]
-        size = min(MaxKeys, self.page)
         page = listed[:size]
-        out: dict[str, Any] = {"Versions": page, "IsTruncated": len(listed) > size}
-        if out["IsTruncated"]:
-            out["NextKeyMarker"] = page[-1]["Key"]
-            out["NextVersionIdMarker"] = page[-1]["VersionId"]
-        return out
+        out = {"Versions": page, "IsTruncated": len(listed) > size}
+        return self._continued(
+            out,
+            NextKeyMarker=page[-1]["Key"] if page else "",
+            NextVersionIdMarker=page[-1]["VersionId"] if page else "",
+        )
 
     def list_multipart_uploads(
         self,
@@ -174,41 +213,63 @@ def _admin(s3: ReadOnlyS3) -> StoreAdmin:
     return StoreAdmin(s3, "bucket", PREFIX)
 
 
-def test_a_versioned_bucket_is_listed_by_version() -> None:
-    s3 = ReadOnlyS3("Enabled")
+@pytest.mark.parametrize("status", ["Enabled", "Suspended"])
+def test_a_bucket_that_keeps_or_kept_versions_is_listed_by_version(status: str) -> None:
+    s3 = ReadOnlyS3(status)
 
     eligibility = _admin(s3).eligibility()
 
-    assert eligibility.eligible and eligibility.listing is Listing.VERSIONS
-    assert eligibility.versioning == "Enabled"
-    assert "list_object_versions" in s3.calls
+    assert eligibility == Eligible(Listing.VERSIONS, status)
+    assert "list_objects_v2" not in s3.calls
 
 
-@pytest.mark.parametrize("status", ["Suspended", None, "unreadable"])
-def test_a_bucket_not_keeping_versions_is_listed_by_object(status: str | None) -> None:
-    s3 = ReadOnlyS3("Enabled" if status == "unreadable" else status)
-    if status == "unreadable":
-        s3.fail.add("get_bucket_versioning")
+def test_a_bucket_that_never_kept_versions_is_listed_by_object() -> None:
+    s3 = ReadOnlyS3(None)
 
     eligibility = _admin(s3).eligibility()
 
-    assert eligibility.eligible and eligibility.listing is Listing.OBJECTS
+    assert eligibility == Eligible(Listing.OBJECTS, "off")
     assert "list_object_versions" not in s3.calls
-    if status == "unreadable":
-        assert eligibility.versioning.startswith("unreadable: ")
+
+
+@pytest.mark.parametrize("versions_refused", [False, True])
+def test_a_bucket_of_unreadable_versioning_is_listed_by_version_where_allowed(
+    versions_refused: bool,
+) -> None:
+    s3 = ReadOnlyS3()
+    s3.fail.add("get_bucket_versioning")
+    if versions_refused:
+        s3.fail.add("list_object_versions")
+
+    eligibility = _admin(s3).eligibility()
+
+    assert isinstance(eligibility, Eligible)
+    assert eligibility.listing is (
+        Listing.OBJECTS if versions_refused else Listing.VERSIONS
+    )
+    assert eligibility.versioning.startswith("unreadable: ")
 
 
 @pytest.mark.parametrize(
-    "refused", ["list_object_versions", "list_objects_v2", "list_multipart_uploads"]
+    ("status", "refused"),
+    [
+        ("Enabled", "list_object_versions"),
+        ("Suspended", "list_object_versions"),
+        (None, "list_objects_v2"),
+        ("Enabled", "list_multipart_uploads"),
+    ],
 )
-def test_a_credential_that_cannot_list_is_ineligible(refused: str) -> None:
-    s3 = ReadOnlyS3("Suspended" if refused == "list_objects_v2" else "Enabled")
+def test_a_credential_that_cannot_list_is_ineligible(
+    status: str | None, refused: str
+) -> None:
+    s3 = ReadOnlyS3(status)
     s3.fail.add(refused)
 
     eligibility = _admin(s3).eligibility()
 
+    assert isinstance(eligibility, Ineligible)
     assert eligibility.reason is Ineligibility.CANNOT_LIST
-    assert "AccessDenied" in eligibility.detail and eligibility.listing is None
+    assert "AccessDenied" in eligibility.detail
 
 
 @pytest.mark.parametrize("listing", list(Listing))
@@ -226,10 +287,7 @@ def test_a_listing_pages_every_key_and_names_only_content_digests(
     listed = [version for page in pages for version in page]
     assert len(pages) == 4 and all(len(page) <= 2 for page in pages)
     assert {v.digest for v in listed if v.digest} == digests
-    assert sorted(v.key for v in listed if v.digest is None) == [
-        f"{PREFIX}/org-a/sha256/not-a-digest",
-        f"{PREFIX}/org-a/staging/leftover",
-    ]
+    assert len([v for v in listed if v.digest is None]) == 2
     assert all(v.last_modified == OLD for v in listed)
 
 
@@ -240,27 +298,59 @@ def test_versions_lists_every_version_of_a_key() -> None:
 
     listed = [v for page in _admin(s3).versions("org-a") for v in page]
 
-    assert [v.version_id for v in listed] == ["v1", "v2"]
-    assert len({v.digest for v in listed}) == 1
+    assert len(listed) == 2 and len({v.digest for v in listed}) == 1
 
 
-def test_objects_lists_one_null_version_per_key() -> None:
-    s3 = ReadOnlyS3("Suspended")
+def test_objects_lists_one_version_per_key() -> None:
+    s3 = ReadOnlyS3(None)
     s3.put("org-a", b"same", version="v1")
     s3.put("org-a", b"same", version="v2")
 
     (listed,) = list(_admin(s3).objects("org-a"))
 
-    assert [(v.version_id, v.latest) for v in listed] == [("null", True)]
+    assert len(listed) == 1
 
 
-def test_scopes_pages_every_scope_under_the_prefix() -> None:
+@pytest.mark.parametrize("listing", list(Listing))
+def test_scopes_pages_every_scope_under_the_prefix(listing: Listing) -> None:
     s3 = ReadOnlyS3(page=1)
     for scope in ("org-c", "org-a", "org-b"):
         s3.put(scope, scope.encode())
     s3.put_key("elsewhere/org-z/sha256/x")
 
-    assert list(_admin(s3).scopes()) == ["org-a", "org-b", "org-c"]
+    pages = list(_admin(s3).scopes(listing))
+
+    assert pages == [["org-a"], ["org-b"], ["org-c"]]
+    assert ("list_object_versions" in s3.calls) is (listing is Listing.VERSIONS)
+
+
+def test_a_scope_holding_only_noncurrent_versions_is_found_by_version() -> None:
+    s3 = ReadOnlyS3("Suspended")
+    s3.put("org-a", b"current")
+    s3.put("org-old", b"deleted", latest=False)
+
+    admin = _admin(s3)
+
+    assert [s for page in admin.scopes(Listing.OBJECTS) for s in page] == ["org-a"]
+    assert [s for page in admin.scopes(Listing.VERSIONS) for s in page] == [
+        "org-a",
+        "org-old",
+    ]
+
+
+@pytest.mark.parametrize("listing", list(Listing))
+def test_a_truncated_page_with_no_continuation_stops_the_listing(
+    listing: Listing,
+) -> None:
+    s3 = ReadOnlyS3(page=1)
+    for i in range(3):
+        s3.put("org-a", f"object-{i}".encode())
+    s3.untokened = True
+    listed = _admin(s3).listed(listing, "org-a")
+
+    assert len(next(listed)) == 1
+    with pytest.raises(ListingError):
+        next(listed)
 
 
 def test_uploads_name_their_scope_and_are_sized_by_their_parts() -> None:
@@ -274,9 +364,9 @@ def test_uploads_name_their_scope_and_are_sized_by_their_parts() -> None:
 
     (uploads,) = list(admin.uploads())
 
-    assert [(u.upload_id, u.scope, u.initiated) for u in uploads] == [
-        ("u-1", "org-a", OLD),
-        ("u-2", None, OLD),
+    assert [(u.upload_id, u.scope) for u in uploads] == [
+        ("u-1", "org-a"),
+        ("u-2", None),
     ]
     assert admin.upload_bytes(uploads[0]) == (3, 18)
 
@@ -311,19 +401,26 @@ def test_a_full_sweep_only_reads_the_store() -> None:
         {"Key": f"{PREFIX}/org-a/sha256/x", "UploadId": "u-1", "Initiated": when(OLD)}
     ]
     s3.parts = {"u-1": [{"Size": 4}]}
-    service = ReclamationService(
+    service = ContentAuditService(
         Marker(rds, _LOGGER, page_pause_sec=0, duty=1.0),
         TreeClosures(lambda ref: iter(()), _LOGGER),
         AuditCollector(
-            _admin(s3), _LOGGER, AuditTrail(rds), page_pause_sec=0, recent_sec=0
+            _admin(s3),
+            _LOGGER,
+            AuditTrail(rds),
+            recent_sec=0,
+            duty=1.0,
+            min_pause_sec=0,
         ),
         _LOGGER,
+        duty=1.0,
+        min_pause_sec=0,
     )
 
     result = service.sweep(threading.Event())
 
-    assert result.eligibility.eligible and result.unbound == 1
+    assert isinstance(result.eligibility, Eligible) and result.unbound == 1
     assert result.uploads is not None
     assert (result.uploads.uploads, result.uploads.bytes) == (1, 4)
     assert result.uploads.unsized == 0
-    assert set(s3.calls) == READS
+    assert set(s3.calls) <= READS and "list_parts" in s3.calls
