@@ -127,6 +127,13 @@ def test_a_later_root_stops_this_one_before_it_acts(rig) -> None:
     with pytest.raises(EpochFenced):
         rig.runtime.cancel_workflow(rig.workflow_id)
     assert rig.fenced == [True]
+    # Not even an answer that owes no write goes out.
+    publication = Publication.of(
+        "wkr-1", "dsp-1", "tsk-gone", "TASK_SUCCEEDED", rig.payload()
+    )
+    assert publication is not None
+    rig.runtime.answer_publication("tsk-gone", publication)
+    assert rig.answers == []
 
 
 def test_a_write_that_faults_keeps_its_scope_out_of_collection(rig) -> None:

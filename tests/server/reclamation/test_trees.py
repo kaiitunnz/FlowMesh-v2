@@ -53,7 +53,10 @@ class _Store:
         if data is None:
             raise ResultUnreadable("missing")
         if reference.content_digest in self.corrupt:
-            data = data.replace(b'"m/0', b'"m/9', 1)
+            # Still a well-formed tree, naming another member: only the digest
+            # check at the end of the stream catches it.
+            first = TreeManifest.decode(data).members[0].digest.encode()
+            data = data.replace(first, b"f" * 64, 1)
         for start in range(0, len(data), 7):
             yield data[start : start + 7]
         if hashlib.sha256(data).hexdigest() != reference.content_digest:
@@ -207,11 +210,13 @@ def test_a_staged_tree_is_expanded_once_its_binding_is_durable(rig) -> None:
 
 
 def test_a_corrupt_read_never_protects_a_member(rig) -> None:
-    members = _members(5)
+    # More than a page, so members are held before the stream's digest check.
+    members = _members(2500)
     manifest = _tree(rig.store, members)
     rig.store.corrupt.add(manifest.content_digest)
     outcome = rig.holds.expand(manifest, _LOCATOR)
     assert outcome.status is TreeStatus.MALFORMED
+    assert rig.store.reads == 1
     assert rig.protected() == set()
     assert rig.pinned() == set()
 
