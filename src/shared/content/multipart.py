@@ -19,8 +19,9 @@ CONTENT_PROTOCOL = 1
 
 MULTIPART_ACK_FRAME_KIND = "content_multipart_ack"
 
-type MultipartInitiated = Callable[[str, str], None]
-"""Register one initiated upload by its object key and UploadId; raises to refuse."""
+type MultipartInitiated = Callable[[str, str, Callable[[], bool] | None], None]
+"""Register one initiated upload by its object key and UploadId, given the write's
+cancellation predicate if it has one; raises to refuse."""
 
 
 class MultipartVerdict(StrEnum):
@@ -39,11 +40,6 @@ class MultipartDoomed(ContentStoreError):
 
 class MultipartUnowned(ContentStoreError):
     """Control found no live owner for this upload, so the write is refused."""
-
-
-class MultipartUnregistered(ContentStoreError):
-    """The upload could not be registered in time; nothing was sent, and the write may
-    be retried."""
 
 
 _FINALIZATION: ContextVar[str | None] = ContextVar(
@@ -72,7 +68,6 @@ __all__ = [
     "MultipartDoomed",
     "MultipartInitiated",
     "MultipartUnowned",
-    "MultipartUnregistered",
     "MultipartVerdict",
     "current_finalization",
     "finalizing",

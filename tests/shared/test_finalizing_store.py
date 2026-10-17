@@ -1,6 +1,10 @@
 """Outcome finalization split across the shared store and the control-plane index."""
 
+import threading
+from typing import Any
+
 import pytest
+import requests
 
 from shared.content import (
     OCTET_STREAM,
@@ -9,10 +13,15 @@ from shared.content import (
     ContentStoreError,
     FabricObjectStore,
     StoreRefusal,
+    WriteCancelled,
     reference_for,
 )
 from shared.outcome import FinalizingContentStore, OutcomeManifest
-from shared.outcome.finalizing_store import FinalizationRefusedError
+from shared.outcome.finalizing_store import (
+    FinalizationIndexClient,
+    FinalizationRefusedError,
+    FinalizationUnavailableError,
+)
 
 
 class _SharedStore(FabricObjectStore):
@@ -119,13 +128,27 @@ class _RefusingIndex(_Index):
         return super().record(scope, idempotency_key, content)
 
 
-def test_a_refused_recording_records_the_same_bytes_again(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr("shared.outcome.finalizing_store.time.sleep", lambda _: None)
+class _Pauses:
+    """Records each pause and never waits; reports a stop once ``stop_after`` pauses
+    have been taken."""
+
+    def __init__(self, stop_after: int | None = None) -> None:
+        self.delays: list[float] = []
+        self.stop_after = stop_after
+
+    def __call__(self, stop: threading.Event, delay: float) -> bool:
+        self.delays.append(delay)
+        if self.stop_after is not None and len(self.delays) >= self.stop_after:
+            stop.set()
+        return stop.is_set()
+
+
+def test_a_refused_recording_records_the_same_bytes_again() -> None:
     shared = _SharedStore()
     index = _RefusingIndex("retry_retirement", "rematerialize", "retry")
-    store = FinalizingContentStore(shared, index)  # type: ignore[arg-type]
+    store = FinalizingContentStore(
+        shared, index, pause=_Pauses()  # type: ignore[arg-type]
+    )
 
     manifest = store.materialize("local", "idm-9", b"once", media_type="text/plain")
 
@@ -133,3 +156,112 @@ def test_a_refused_recording_records_the_same_bytes_again(
     assert index.records == 4
     # Written once, and again only for the refusal that found its copy gone.
     assert shared.writes == 2
+
+
+class _OutIndex(_Index):
+    """An index control cannot answer for the first ``outages`` calls of each kind."""
+
+    def __init__(self, finds: int = 0, records: int = 0) -> None:
+        super().__init__()
+        self.find_outages = finds
+        self.record_outages = records
+        self.finds = 0
+        self.records = 0
+
+    def find(self, scope: str, idempotency_key: str) -> OutcomeManifest | None:
+        self.finds += 1
+        if self.find_outages:
+            self.find_outages -= 1
+            raise FinalizationUnavailableError("control restarting")
+        return super().find(scope, idempotency_key)
+
+    def record(
+        self, scope: str, idempotency_key: str, content: ContentReference
+    ) -> OutcomeManifest:
+        self.records += 1
+        if self.record_outages:
+            self.record_outages -= 1
+            raise FinalizationUnavailableError("control restarting")
+        return super().record(scope, idempotency_key, content)
+
+
+def test_an_unavailable_control_is_waited_out_in_place() -> None:
+    shared = _SharedStore()
+    index = _OutIndex(finds=2, records=7)
+    pauses = _Pauses()
+    store = FinalizingContentStore(
+        shared, index, pause=pauses  # type: ignore[arg-type]
+    )
+
+    manifest = store.materialize("local", "idm-5", b"once", media_type="text/plain")
+
+    assert manifest.content == reference_for("local", b"once", media_type="text/plain")
+    assert (index.finds, index.records) == (3, 8)
+    assert shared.writes == 1
+    assert pauses.delays == [0.5, 1.0, 0.5, 1.0, 2.0, 4.0, 8.0, 15.0, 15.0]
+
+
+def test_a_stop_ends_a_materialization_waiting_on_control() -> None:
+    shared = _SharedStore()
+    index = _OutIndex(records=1_000)
+    pauses = _Pauses(stop_after=3)
+    store = FinalizingContentStore(
+        shared, index, pause=pauses  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(WriteCancelled):
+        store.materialize("local", "idm-6", b"once", media_type="text/plain")
+
+    assert index.records == 3
+    assert index.bindings == {}
+
+
+def test_a_stopped_store_does_not_wait() -> None:
+    stop = threading.Event()
+    stop.set()
+    pauses = _Pauses()
+    store = FinalizingContentStore(
+        _SharedStore(), _OutIndex(finds=1), stop=stop, pause=pauses  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(WriteCancelled):
+        store.materialize("local", "idm-7", b"once", media_type="text/plain")
+
+    assert pauses.delays == []
+
+
+class _Response:
+    def __init__(self, status_code: int) -> None:
+        self.status_code = status_code
+        self.content = b"{}"
+
+    def json(self) -> Any:
+        return {}
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        _Response(503),
+        requests.ConnectionError("refused"),
+        requests.Timeout("timed out"),
+    ],
+    ids=["503", "transport", "timeout"],
+)
+@pytest.mark.parametrize("method", ["get", "put"])
+def test_the_index_client_reports_an_unreachable_control_as_unavailable(
+    monkeypatch: pytest.MonkeyPatch, outcome: Any, method: str
+) -> None:
+    def answer(*args: Any, **kwargs: Any) -> Any:
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(f"shared.outcome.finalizing_store.requests.{method}", answer)
+    client = FinalizationIndexClient("http://control")
+
+    with pytest.raises(FinalizationUnavailableError):
+        if method == "get":
+            client.find("local", "idm-8")
+        else:
+            client.record("local", "idm-8", reference_for("local", b"x"))

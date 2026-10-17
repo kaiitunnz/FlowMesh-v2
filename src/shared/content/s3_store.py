@@ -265,7 +265,7 @@ class S3ObjectStore(FabricObjectStore):
         key = self._key(reference)
         if self._present(reference):
             return
-        upload_id = self._initiate(key, reference.media_type)
+        upload_id = self._initiate(key, reference.media_type, cancelled)
         try:
             parts = self._send_parts(key, upload_id, checksums, read_part, cancelled)
             _committing(
@@ -289,10 +289,13 @@ class S3ObjectStore(FabricObjectStore):
                 raise
             raise _write_error(exc) from exc
 
-    def _initiate(self, key: str, media_type: str) -> str:
+    def _initiate(
+        self, key: str, media_type: str, cancelled: Callable[[], bool] | None
+    ) -> str:
         """Start an upload and register its UploadId before any part is sent.
 
-        An UploadId control answers is doomed is aborted and replaced by a new one, a
+        Registration waits out an unanswering control until the write is cancelled. An
+        UploadId control answers is doomed is aborted and replaced by a new one, a
         bounded number of times; any other refusal aborts it and fails the write, which
         has sent nothing.
         """
@@ -309,7 +312,7 @@ class S3ObjectStore(FabricObjectStore):
             if self._on_initiated is None:
                 return upload_id
             try:
-                self._on_initiated(key, upload_id)
+                self._on_initiated(key, upload_id, cancelled)
             except MultipartDoomed:
                 self._abort(key, upload_id)
                 continue

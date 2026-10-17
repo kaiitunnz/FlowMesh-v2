@@ -9,7 +9,7 @@ the store never learns what an outcome is.
 """
 
 import logging
-import time
+import threading
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
@@ -22,6 +22,7 @@ from shared.content import (
     ContentStoreError,
     ScopedObjectStore,
     StoreRefusal,
+    WriteCancelled,
 )
 from shared.content.multipart import finalizing
 from shared.telemetry.propagation import inject_ambient_traceparent
@@ -31,9 +32,17 @@ from .content_store import FabricContentStore
 from .manifest import OutcomeManifest
 
 _LOGGER = logging.getLogger(__name__)
-# How long a refused recording waits before it records again, doubling to the cap.
-_REFUSED_BACKOFF_SEC = 0.5
-_REFUSED_BACKOFF_CAP_SEC = 15.0
+# How long a refused or unanswered call waits before it is made again, doubling to the
+# cap.
+_RETRY_BACKOFF_SEC = 0.5
+_RETRY_BACKOFF_CAP_SEC = 15.0
+
+type Pause = Callable[[threading.Event, float], bool]
+"""Wait up to a timeout for a stop event; returns whether it is set."""
+
+
+def _pause(stop: threading.Event, timeout: float) -> bool:
+    return stop.wait(timeout)
 
 
 class FinalizationRefusedError(ContentStoreError):
@@ -43,6 +52,11 @@ class FinalizationRefusedError(ContentStoreError):
     def __init__(self, refusal: StoreRefusal) -> None:
         super().__init__(f"finalization not recorded: {refusal.value}")
         self.refusal = refusal
+
+
+class FinalizationUnavailableError(ContentStoreError):
+    """Control could not be reached or is not answering now, as while it restarts; the
+    same call is made again."""
 
 
 class FinalizationIndexClient:
@@ -65,12 +79,19 @@ class FinalizationIndexClient:
         return inject_ambient_traceparent(auth_headers())
 
     def find(self, scope: str, idempotency_key: str) -> OutcomeManifest | None:
-        resp = requests.get(
-            self._url(),
-            params={"scope": scope, "idem": idempotency_key},
-            headers=self._headers(),
-            timeout=self._timeout,
-        )
+        try:
+            resp = requests.get(
+                self._url(),
+                params={"scope": scope, "idem": idempotency_key},
+                headers=self._headers(),
+                timeout=self._timeout,
+            )
+        except (requests.ConnectionError, requests.Timeout) as exc:
+            raise FinalizationUnavailableError(
+                f"finalization lookup did not reach control: {exc}"
+            ) from exc
+        if resp.status_code == 503:
+            raise FinalizationUnavailableError("finalization lookup unavailable")
         if resp.status_code == 404:
             return None
         if resp.status_code >= 400:
@@ -80,13 +101,20 @@ class FinalizationIndexClient:
     def record(
         self, scope: str, idempotency_key: str, content: ContentReference
     ) -> OutcomeManifest:
-        resp = requests.put(
-            self._url(),
-            params={"scope": scope, "idem": idempotency_key},
-            json=content.model_dump(mode="json"),
-            headers=self._headers(),
-            timeout=self._timeout,
-        )
+        try:
+            resp = requests.put(
+                self._url(),
+                params={"scope": scope, "idem": idempotency_key},
+                json=content.model_dump(mode="json"),
+                headers=self._headers(),
+                timeout=self._timeout,
+            )
+        except (requests.ConnectionError, requests.Timeout) as exc:
+            raise FinalizationUnavailableError(
+                f"finalization did not reach control: {exc}"
+            ) from exc
+        if resp.status_code == 503:
+            raise FinalizationUnavailableError("finalization unavailable")
         if resp.status_code == 409:
             detail = resp.json().get("detail")
             if isinstance(detail, dict) and detail.get("refusal") in set(StoreRefusal):
@@ -97,13 +125,23 @@ class FinalizationIndexClient:
 
 
 class FinalizingContentStore(FabricContentStore):
-    """Outcome finalization: content in the shared store, its binding in control."""
+    """Outcome finalization: content in the shared store, its binding in control.
+
+    Setting ``stop`` ends a materialization waiting on control.
+    """
 
     def __init__(
-        self, objects: ScopedObjectStore, index: FinalizationIndexClient
+        self,
+        objects: ScopedObjectStore,
+        index: FinalizationIndexClient,
+        *,
+        stop: threading.Event | None = None,
+        pause: Pause = _pause,
     ) -> None:
         self._objects = objects
         self._index = index
+        self._stop = stop or threading.Event()
+        self._pause = pause
 
     def write(
         self, scope: str, data: bytes, *, media_type: str = OCTET_STREAM
@@ -149,8 +187,18 @@ class FinalizingContentStore(FabricContentStore):
         reader could resolve, so the content is durable before anything can learn of it.
         A re-drive that reaches a binding already recorded takes it and discards what it
         just wrote, which costs a write of identical bytes and settles as the first.
+        Control refusing, failing to answer, or answering that it is unavailable is
+        waited out here, so it never drives the producer again; a stop ends the wait as
+        ``WriteCancelled``.
         """
-        if (found := self._index.find(scope, idempotency_key)) is not None:
+        delay = _RETRY_BACKOFF_SEC
+        while True:
+            try:
+                found = self._index.find(scope, idempotency_key)
+                break
+            except FinalizationUnavailableError as exc:
+                delay = self._back_off(idempotency_key, str(exc), delay)
+        if found is not None:
             return found
         with finalizing(idempotency_key):
             return self._materialize(scope, idempotency_key, data, media_type)
@@ -159,20 +207,25 @@ class FinalizingContentStore(FabricContentStore):
         self, scope: str, idempotency_key: str, data: bytes, media_type: str
     ) -> OutcomeManifest:
         content = self.write(scope, data, media_type=media_type)
-        delay = _REFUSED_BACKOFF_SEC
+        delay = _RETRY_BACKOFF_SEC
         while True:
             try:
                 return self._index.record(scope, idempotency_key, content)
+            except FinalizationUnavailableError as exc:
+                delay = self._back_off(idempotency_key, str(exc), delay)
             except FinalizationRefusedError as refused:
                 # A refusal is about the stored copy, never the outcome: the same bytes
                 # are recorded again, written again first when the copy is gone, and
                 # the producer is never driven again for them.
-                _LOGGER.info(
-                    "Finalization %s not recorded (%s); recording again",
-                    idempotency_key,
-                    refused.refusal.value,
-                )
-                time.sleep(delay)
-                delay = min(delay * 2, _REFUSED_BACKOFF_CAP_SEC)
+                delay = self._back_off(idempotency_key, refused.refusal.value, delay)
                 if refused.refusal is StoreRefusal.REMATERIALIZE:
                     content = self.write(scope, data, media_type=media_type)
+
+    def _back_off(self, idempotency_key: str, reason: str, delay: float) -> float:
+        """Wait ``delay`` before the next call, returning the delay after it."""
+        _LOGGER.info(
+            "Finalization %s not recorded (%s); trying again", idempotency_key, reason
+        )
+        if self._stop.is_set() or self._pause(self._stop, delay):
+            raise WriteCancelled(f"finalization {idempotency_key} was stopped")
+        return min(delay * 2, _RETRY_BACKOFF_CAP_SEC)

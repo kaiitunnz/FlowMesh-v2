@@ -1,16 +1,13 @@
 """A multipart write registers its exact UploadId before it sends any part."""
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from shared.content import ContentStoreError, content_digest
-from shared.content.multipart import (
-    MultipartDoomed,
-    MultipartUnowned,
-    MultipartUnregistered,
-)
+from shared.content import ContentStoreError, WriteCancelled, content_digest
+from shared.content.multipart import MultipartDoomed, MultipartUnowned
 from shared.content.s3_store import S3ObjectStore
 from tests.shared.fake_s3 import FakeS3
 
@@ -44,10 +41,14 @@ class _Registrar:
         self._s3 = s3
         self._answers = list(answers)
         self.registered: list[tuple[str, str]] = []
+        self.cancelled: list[Callable[[], bool] | None] = []
 
-    def __call__(self, key: str, upload_id: str) -> None:
+    def __call__(
+        self, key: str, upload_id: str, cancelled: Callable[[], bool] | None
+    ) -> None:
         self._s3.calls.append(("register", upload_id))
         self.registered.append((key, upload_id))
+        self.cancelled.append(cancelled)
         answer = self._answers.pop(0) if self._answers else None
         if answer is not None:
             raise answer
@@ -124,11 +125,11 @@ def test_an_upload_doomed_every_time_fails_after_bounded_attempts() -> None:
 @pytest.mark.parametrize(
     "failure, raised",
     [
-        (MultipartUnregistered("no answer"), MultipartUnregistered),
+        (WriteCancelled("cancelled"), WriteCancelled),
         (MultipartUnowned("no owner"), MultipartUnowned),
         (ConnectionError("stream down"), ContentStoreError),
     ],
-    ids=["unanswered", "unowned", "unexpected"],
+    ids=["cancelled", "unowned", "unexpected"],
 )
 def test_a_registration_that_fails_aborts_the_upload_and_sends_nothing(
     failure: Exception, raised: type[Exception]
@@ -164,3 +165,17 @@ def test_an_object_already_stored_registers_nothing() -> None:
     store.write("org", _DATA)
 
     assert registrar.registered == []
+
+
+def test_a_file_write_registers_under_its_own_cancellation(tmp_path: Path) -> None:
+    s3 = _OrderedS3()
+    registrar = _Registrar(s3)
+    path = tmp_path / "src.bin"
+    path.write_bytes(_DATA)
+
+    def cancelled() -> bool:
+        return False
+
+    _store(s3, registrar).write_file("org", path, cancelled=cancelled)
+
+    assert registrar.cancelled == [cancelled]

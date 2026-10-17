@@ -66,7 +66,9 @@ class ContentAccessRegistry:
         logger: logging.Logger | None = None,
         *,
         request_access: Callable[[str], None] | None = None,
-        register_multipart: Callable[[str, str, str, str], None] | None = None,
+        register_multipart: (
+            Callable[[str, str, str, str, Callable[[], bool] | None], None] | None
+        ) = None,
         arrival_wait_sec: float = 5.0,
         renewal_wait_sec: float = 15.0,
         clock: Callable[[], float] = time.time,
@@ -232,8 +234,10 @@ class ContentAccessRegistry:
             return None
         task_id, scope = key
 
-        def initiated(object_key: str, upload_id: str) -> None:
-            register(task_id, scope, object_key, upload_id)
+        def initiated(
+            object_key: str, upload_id: str, cancelled: Callable[[], bool] | None
+        ) -> None:
+            register(task_id, scope, object_key, upload_id, cancelled)
 
         return initiated
 

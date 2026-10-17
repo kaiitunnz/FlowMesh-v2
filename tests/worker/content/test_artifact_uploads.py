@@ -144,6 +144,34 @@ def _nudge(uploader: ArtifactUploader, clock: _Clock, seconds: float) -> None:
         uploader._cv.notify_all()
 
 
+def _advance_until_idle(
+    uploader: ArtifactUploader,
+    clock: _Clock,
+    seconds: float,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Advance the clock, and return once the uploader has gone back to waiting with
+    nothing due at the advanced time.
+
+    The clock moves under the uploader's lock, so a step that reaches its wait at the
+    advanced time found nothing to send or store in that same step.
+    """
+    idle = threading.Event()
+    advanced_to = clock.now + seconds
+    wait_sec = uploader._wait_sec
+
+    def waiting() -> float:
+        if clock.now >= advanced_to:
+            idle.set()
+        return wait_sec()
+
+    monkeypatch.setattr(uploader, "_wait_sec", waiting)
+    with uploader._cv:
+        clock.now = advanced_to
+        uploader._cv.notify_all()
+    assert idle.wait(5.0), "the uploader never went back to waiting"
+
+
 def test_staged_artifacts_are_stored_then_reported_uploaded(tmp_path) -> None:
     ports = _Ports()
     uploader = _uploader(tmp_path / "content", ports)
@@ -230,7 +258,9 @@ def test_a_pending_answer_has_a_lost_receipt_reported_again(
     uploader.stop(0.5)
 
 
-def test_an_answer_to_wait_stores_nothing_and_reports_again_later(tmp_path) -> None:
+def test_an_answer_to_wait_stores_nothing_and_reports_again_later(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     ports = _Ports()
     clock = _Clock()
     uploader = _uploader(tmp_path / "content", ports, clock)
@@ -248,8 +278,7 @@ def test_an_answer_to_wait_stores_nothing_and_reports_again_later(tmp_path) -> N
             digests=[digest],
         )
     )
-    _nudge(uploader, clock, 1)
-    time.sleep(0.1)
+    _advance_until_idle(uploader, clock, 1, monkeypatch)
     assert len(ports.reports) == 1 and len(ports.stored) == 1
 
     _nudge(uploader, clock, 5)
@@ -448,7 +477,9 @@ def test_a_failed_task_is_reported_once_its_other_files_are_stored(tmp_path) -> 
     uploader.stop(1.0)
 
 
-def test_a_pending_answer_reports_no_failed_task_still_uploading(tmp_path) -> None:
+def test_a_pending_answer_reports_no_failed_task_still_uploading(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     ports = _Ports()
     ports.poisoned.add(b"beta")
     root = tmp_path / "content"
@@ -464,8 +495,7 @@ def test_a_pending_answer_reports_no_failed_task_still_uploading(tmp_path) -> No
     assert journal.tasks["tsk-1"].failed is not None
 
     uploader.settle(_settled(UploadDisposition.PENDING))
-    _nudge(uploader, clock, 1)
-    time.sleep(0.3)
+    _advance_until_idle(uploader, clock, 1, monkeypatch)
 
     assert ports.reports == []
     uploader.stop(0.2)
@@ -531,7 +561,7 @@ def test_another_workers_custody_is_kept_while_a_task_it_names_is_unanswered(
 
 
 def test_a_crashed_peers_unreported_custody_is_released_once_control_rejects_it(
-    tmp_path,
+    tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = tmp_path / "content"
     _stage(
@@ -547,8 +577,7 @@ def test_a_crashed_peers_unreported_custody_is_released_once_control_rejects_it(
     ports.wait(lambda: ports.reports)
 
     mine.settle(_settled(UploadDisposition.REJECTED))
-    _nudge(mine, clock, EVIDENCE_SCAN_SEC + 1)
-    time.sleep(0.2)
+    _advance_until_idle(mine, clock, EVIDENCE_SCAN_SEC + 1, monkeypatch)
     mine.stop(0.5)
 
     assert list(ArtifactCustody(root).journals()) == []
@@ -578,7 +607,7 @@ def test_an_earlier_registrations_custody_is_reported_and_never_uploaded(
 
 
 def test_another_workers_custody_is_asked_about_and_released_once_settled(
-    tmp_path,
+    tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = tmp_path / "content"
     ports = _Ports()
@@ -595,8 +624,7 @@ def test_another_workers_custody_is_asked_about_and_released_once_settled(
     assert ports.reports[0][2] is UploadReport.ABANDONED
 
     mine.settle(_settled(UploadDisposition.PENDING))
-    _nudge(mine, clock, RESEND_SEC + 1)
-    time.sleep(0.2)
+    _advance_until_idle(mine, clock, RESEND_SEC + 1, monkeypatch)
     assert len(ports.reports) == 1 and list(ArtifactCustody(root).journals())
 
     _nudge(mine, clock, EVIDENCE_RESEND_SEC)
