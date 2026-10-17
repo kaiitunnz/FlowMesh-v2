@@ -893,7 +893,6 @@ class _SubmitTimeRegistry(FakeRegistry):
         ledger: Any = None,
         submitted_at: str | None = None,
         blueprints: Any = (),
-        guard: Any = None,
     ) -> None:
         # Falls back to stamping here, exactly as the record's own default does, so
         # the assertion measures the ordering rather than the plumbing.

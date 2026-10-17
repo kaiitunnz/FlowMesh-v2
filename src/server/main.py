@@ -4,7 +4,6 @@ import atexit
 import importlib
 import inspect
 import os
-import signal
 import threading
 from contextlib import AsyncExitStack, asynccontextmanager
 from functools import partial
@@ -66,11 +65,6 @@ from .network.reverse_relay import (
 )
 from .network.service import NetworkPlane
 from .orchestration.telemetry import build_workflow_span_emitter
-from .reclamation.multipart import MultipartRegistrations, MultipartStore
-from .reclamation.pins import PinStore
-from .reclamation.publications import PublicationHolds
-from .reclamation.service import start_reclamation
-from .reclamation.trees import TreeExpander
 from .registries import WorkerRegistry, WorkflowRegistry
 from .registries.node import NodeRegistry
 from .registries.resident import ResidentRegistry
@@ -187,8 +181,6 @@ PORT_FORWARD_SERVICE = None
 SSH_RELAY: SshRelayOrigin | None = None
 WATCHDOG = None
 EVENT_MONITOR = None
-TREE_EXPANDER: TreeExpander | None = None
-PUBLICATION_HOLDS: PublicationHolds | None = None
 WORKFLOW_SPAN_EMITTER = None
 LOG_ARCHIVER = None
 AGENT_MODEL_GATEWAY = None
@@ -209,14 +201,10 @@ FLEET_SAMPLER = None
 ROOT_NODE_ID: str | None = None
 
 
-def _stop_fenced_root() -> None:
-    """Stop a root a later root has fenced, rather than keep serving stale state."""
-    os.kill(os.getpid(), signal.SIGTERM)
-
-
 if IS_ROOT_NODE:
     WORKFLOW_REGISTRY = WorkflowRegistry(REDIS_CLIENT)
     WORKER_REGISTRY = WorkerRegistry(REDIS_CLIENT)
+    FINALIZATION_INDEX = FinalizationIndex(REDIS_CLIENT)
     CREDENTIAL_VAULT = CredentialVault(REDIS_CLIENT)
     POLICY_SURFACE = build_policy_surface(config.orchestration.policy)
     SERVER_TRACER = build_tracer(
@@ -236,19 +224,17 @@ if IS_ROOT_NODE:
         },
     )
     CONTROL_TRACER = ControlPlaneTracer(SERVER_TRACER, config.telemetry)
-    RESULT_READER = ResultReader(
-        open_deployment_store(
-            config.object_store,
-            read_stall_timeout_sec=config.content_store.read_stall_timeout_sec,
-            read_attempts=config.content_store.read_attempts,
-        )
-    )
-    FINALIZATION_INDEX = FinalizationIndex(REDIS_CLIENT)
     RUNTIME = TaskRuntime(
         WORKFLOW_REGISTRY,
         WORKER_REGISTRY,
         config.orchestration,
-        RESULT_READER,
+        ResultReader(
+            open_deployment_store(
+                config.object_store,
+                read_stall_timeout_sec=config.content_store.read_stall_timeout_sec,
+                read_attempts=config.content_store.read_attempts,
+            )
+        ),
         logger,
         credential_vault=CREDENTIAL_VAULT,
         surface=POLICY_SURFACE,
@@ -259,7 +245,6 @@ if IS_ROOT_NODE:
         content_scope_authority=FINALIZATION_INDEX.assign_scope,
         n8n=config.n8n,
     )
-    RUNTIME.on_fenced = _stop_fenced_root
     TELEMETRY_STORE = build_telemetry_store(config.telemetry_store)
     AGENT_MODEL_GATEWAY = AgentModelGateway(
         RUNTIME, config.orchestration.gateway, logger
@@ -335,9 +320,6 @@ if IS_ROOT_NODE:
         interval_sec=config.telemetry.resource_sample_sec,
         enabled=config.telemetry.metrics_enabled
         and config.telemetry.emits(TelemetryLevel.COARSE),
-        publication_lane=lambda: (
-            EVENT_MONITOR.publication_lane_depth() if EVENT_MONITOR else None
-        ),
     )
 
     FABRIC_TOOL_BROKER = FabricToolBroker.build(
@@ -475,18 +457,6 @@ if IS_ROOT_NODE:
         )
 
     WORKFLOW_SPAN_EMITTER = build_workflow_span_emitter(SERVER_TRACER, config.telemetry)
-    MULTIPART_STORE = MultipartStore(REDIS_CLIENT)
-    TREE_EXPANDER = TreeExpander(
-        REDIS_CLIENT, RESULT_READER.open, RESULT_READER.stored_size, logger
-    )
-    pins = PinStore(REDIS_CLIENT)
-    PUBLICATION_HOLDS = PublicationHolds(
-        pins,
-        lambda: RUNTIME.nonces if RUNTIME else None,
-        RESULT_READER.backed,
-        TREE_EXPANDER,
-        logger,
-    )
     EVENT_MONITOR = EventMonitor(
         redis_client=REDIS_CLIENT.sync,
         logger=logger,
@@ -508,10 +478,6 @@ if IS_ROOT_NODE:
         ),
         content_authority=CONTENT_AUTHORITY,
         content_access=CONTENT_ACCESS,
-        publication_holds=PUBLICATION_HOLDS,
-        multipart=MultipartRegistrations(
-            MULTIPART_STORE, RUNTIME.multipart_owner, WORKER_REGISTRY, logger
-        ),
     )
     # The runtime settles terminals the task-event stream never carries, so it tells
     # the monitor's finalizer when a workflow may have ended; the finalizer decides.
@@ -588,39 +554,6 @@ def _close_restored(runtime: TaskRuntime, workflow_id: str) -> bool:
     )
 
 
-def _release_earlier_holds(epoch: int) -> None:
-    try:
-        released = PinStore(REDIS_CLIENT).release_older(epoch)
-    except Exception:
-        logger.warning(
-            "Could not release the holds an earlier root left", exc_info=True
-        )
-        return
-    if released:
-        logger.info("Released %d hold(s) an earlier root left", released)
-
-
-def _expand_bound_trees(stop: threading.Event) -> None:
-    trees, holds = TREE_EXPANDER, PUBLICATION_HOLDS
-    if trees is None or holds is None:
-        return
-    if owed := holds.repay():
-        logger.info("%d tree hold release(s) wait for the store", owed)
-    staged = (
-        {manifest.content_digest for _, manifest in RUNTIME.staged_trees()}
-        if RUNTIME is not None
-        else set()
-    )
-    waiting = trees.reconcile(
-        trees.scopes(),
-        lambda manifest: holds.expand(manifest, {"kind": "expansion"}, staged=False),
-        stop.is_set,
-        staged,
-    )
-    if waiting:
-        logger.info("%d bound tree(s) wait to have their members protected", waiting)
-
-
 def _start_root_threads() -> None:
     """Start orchestrator background threads. Only called on root nodes."""
     assert DISPATCHER is not None
@@ -651,31 +584,6 @@ def _start_root_threads() -> None:
     )
     settled_history_thread.start()
     BACKGROUND_THREADS.append(settled_history_thread)
-
-    runtime = RUNTIME
-    if (epoch := runtime.root_epoch) is not None:
-        holds_thread = threading.Thread(
-            target=_release_earlier_holds,
-            args=(epoch,),
-            name="earlier-holds",
-            daemon=True,
-        )
-        holds_thread.start()
-        BACKGROUND_THREADS.append(holds_thread)
-
-    BACKGROUND_THREADS.extend(
-        start_reclamation(
-            config.content_store.reclamation_enabled,
-            REDIS_CLIENT,
-            config.object_store,
-            lambda: runtime.root_epoch,
-            runtime.multipart_owner,
-            logger,
-            STOP_EVENT,
-            SERVER_METER,
-            _expand_bound_trees,
-        )
-    )
 
     watchdog_thread = WATCHDOG.start(STOP_EVENT)
     if watchdog_thread and watchdog_thread not in BACKGROUND_THREADS:

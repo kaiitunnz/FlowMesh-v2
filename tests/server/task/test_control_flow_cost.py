@@ -255,7 +255,6 @@ def _records_commit_comparisons(size: int) -> int:
         _sched_locked=lambda workflow_id: None,
         _workflow_registry=SimpleNamespace(commit_transition=lambda *a, **k: None),
         _after_records_locked=lambda *a: None,
-        _guard=lambda workflow_id: None,
     )
     ids = [_CountedId(task_id) for task_id in tasks]
     moves = [_CountedId(task_id) for task_id in tasks]

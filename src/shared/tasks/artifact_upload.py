@@ -8,9 +8,7 @@ answers each report, and the success itself, with the upload's settled state.
 
 from enum import StrEnum
 
-from pydantic import BaseModel, Field
-
-from shared.content.refusal import StoreRefusal
+from pydantic import BaseModel
 
 # The success-payload flag marking the final artifacts it reports, its merged
 # children's included, as staged rather than stored.
@@ -53,21 +51,10 @@ class UploadDisposition(StrEnum):
     LOST = "lost"
     # No accepted upload matches the report, so nothing is owed for it.
     REJECTED = "rejected"
-    # It cannot settle durable now; its refusal says what the worker does before it
-    # reports the upload again.
-    REFUSED = "refused"
 
     @property
     def settled(self) -> bool:
-        return self not in _OWED
-
-
-_OWED = frozenset(
-    {
-        UploadDisposition.PENDING,
-        UploadDisposition.REFUSED,
-    }
-)
+        return self is not UploadDisposition.PENDING
 
 
 class UploadSettled(BaseModel):
@@ -76,6 +63,3 @@ class UploadSettled(BaseModel):
     task_id: str
     dispatch_id: str
     disposition: UploadDisposition
-    refusal: StoreRefusal | None = None
-    digests: list[str] = Field(default_factory=list)
-    """The objects a refusal concerns."""

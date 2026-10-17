@@ -27,7 +27,6 @@ from server.task.history import OutputHistory, TaskHistory
 from shared.content import ContentReference, reference_for
 from shared.outcome.manifest import OutcomeManifest
 from shared.tasks.artifact_binding import ArtifactBinding
-from tests.server.orchestration.helpers import chain_bundle, engine
 
 _VALUE_REF = {"content", "members[].value_ref@ValueRef"}
 
@@ -132,28 +131,6 @@ def test_every_reference_at_a_classified_path_is_found(
     found = list(references_of(value))
     assert {r.identity for r in found} == {r.identity for r in minted.references}
     assert len(distinct(found)) == len(minted.references) == len(found)
-
-
-def test_a_settled_result_reference_is_captured_with_its_ledger_write() -> None:
-    eng = engine(chain_bundle())
-    eng.ledger_written(eng.ledger_changes())
-    result = reference_for("org", b"result of A", media_type="application/json")
-
-    eng.on_dispatched("A", "w1")
-    eng.on_succeeded("A", content=result)
-    changes = eng.ledger_changes()
-
-    publication = eng.output_publication("out:A")
-    assert publication is not None and publication.value_ref is not None
-    assert publication.value_ref.content == result
-    assert not changes.reset
-    assert result.identity in {r.identity for r in changes.references}
-
-    eng.ledger_written(changes)
-    eng.owe_ledger_rewrite()
-    rewrite = eng.ledger_changes()
-    assert rewrite.reset
-    assert result.identity in {r.identity for r in rewrite.references}
 
 
 def test_a_model_reached_back_through_a_cycle_bears_what_the_cycle_reaches() -> None:

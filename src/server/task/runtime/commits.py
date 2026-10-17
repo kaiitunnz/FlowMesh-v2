@@ -1,6 +1,5 @@
 """Durable commits of task transitions and workflow ledgers."""
 
-import itertools
 import logging
 import threading
 from collections import defaultdict
@@ -22,7 +21,6 @@ from shared.tasks.artifact_binding import final_set
 
 from ...clients.redis import REDIS_CONN_ERRORS
 from ...orchestration import OrchestrationEngine
-from ...reclamation.epoch import CommitGuard, EpochFenced
 from ...registries.workflow import (
     PersistedTask,
     WorkflowControl,
@@ -250,18 +248,7 @@ class TransitionCommitter:
         # Workflows owing a rewrite after a write raised a fault of its own, and what
         # runs once a write of one is made again.
         self.faulted: set[str] = set()
-        self.on_faulted: Callable[[str], None] | None = None
         self.on_fault_cleared: Callable[[str], None] | None = None
-        # The root epoch this runtime commits asserted state under, and the
-        # publications asserted into each workflow's state whose answers are not yet
-        # delivered; every write of such a workflow is made under the epoch.
-        self.epoch: int | None = None
-        self._asserted: dict[str, set[int]] = {}
-        self._assertions: dict[int, tuple[str, ...]] = {}
-        self._assertion_ids = itertools.count(1)
-        # Set once a later root took the epoch: this runtime commits nothing more.
-        self.fenced = False
-        self.on_fenced: Callable[[EpochFenced], None] | None = None
 
     # ------------------------------------------------------------------ #
     # Transition scopes and debt
@@ -364,38 +351,6 @@ class TransitionCommitter:
         if (engine := self._engines.get(workflow_id)) is not None:
             engine.owe_ledger_rewrite()
 
-    def assert_locked(self, workflow_ids: Collection[str]) -> int:
-        """Make the workflows' writes under the root epoch until the returned
-        assertion is released."""
-        token = next(self._assertion_ids)
-        self._assertions[token] = tuple(dict.fromkeys(workflow_ids))
-        for workflow_id in self._assertions[token]:
-            self._asserted.setdefault(workflow_id, set()).add(token)
-        return token
-
-    def release_assertion_locked(self, token: int) -> None:
-        """End an assertion; releasing one already ended does nothing."""
-        for workflow_id in self._assertions.pop(token, ()):
-            tokens = self._asserted.get(workflow_id)
-            if tokens is not None:
-                tokens.discard(token)
-                if not tokens:
-                    del self._asserted[workflow_id]
-
-    def _guard(self, workflow_id: str) -> CommitGuard | None:
-        if not self._asserted.get(workflow_id):
-            return None
-        if self.epoch is None:
-            raise EpochFenced("no root epoch is held to commit asserted state under")
-        return CommitGuard(self.epoch)
-
-    def _fence(self, exc: EpochFenced) -> None:
-        if not self.fenced:
-            self.fenced = True
-            self._logger.critical("This root no longer holds the root epoch: %s", exc)
-            if self.on_fenced is not None:
-                self.on_fenced(exc)
-
     def _write_locked(self, workflow_id: str, write: _Write) -> bool:
         """Make one durable write of a workflow with the writes it holds, or hold it
         with them; returns whether it was made."""
@@ -419,15 +374,10 @@ class TransitionCommitter:
         never spins.
         """
         owed = self.debt[workflow_id]
-        if self.fenced:
-            raise EpochFenced("this root no longer holds the root epoch")
         self._making.add(workflow_id)
         try:
             while owed:
                 self._make_locked(workflow_id, owed)
-        except EpochFenced as exc:
-            self._fence(exc)
-            raise
         except Exception as exc:
             if not store_unavailable(exc):
                 if before is None:
@@ -437,8 +387,6 @@ class TransitionCommitter:
                 self._owe_rewrite_locked(workflow_id)
                 if workflow_id not in self.faulted:
                     self.faulted.add(workflow_id)
-                    if self.on_faulted is not None:
-                        self.on_faulted(workflow_id)
                     self._logger.error(
                         "A write of workflow %s raised; its next write rewrites it: %s",
                         workflow_id,
@@ -546,7 +494,6 @@ class TransitionCommitter:
             cancelled=by_status[TaskStatus.CANCELLED],
             sched=self._sched_locked(workflow_id) if sched else None,
             control=control,
-            guard=self._guard(workflow_id),
         )
         if control is not None:
             self._written_control[workflow_id] = control
@@ -613,7 +560,6 @@ class TransitionCommitter:
             cancelled=by_status[TaskStatus.CANCELLED],
             sched=self._sched_locked(workflow_id) if children else None,
             control=control,
-            guard=self._guard(workflow_id),
         )
         self._written_control[workflow_id] = control
         engine.ledger_written(changes)
@@ -637,9 +583,7 @@ class TransitionCommitter:
             if not changes.stores_nothing or (
                 self._written_control.get(workflow_id) != control
             ):
-                self._workflow_registry.save_ledger(
-                    workflow_id, changes, control, guard=self._guard(workflow_id)
-                )
+                self._workflow_registry.save_ledger(workflow_id, changes, control)
                 self._written_control[workflow_id] = control
         engine.ledger_written(changes)
         return []

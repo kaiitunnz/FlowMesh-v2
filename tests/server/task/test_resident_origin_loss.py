@@ -148,12 +148,7 @@ def test_a_failed_save_holds_the_credit_until_the_next_save_succeeds() -> None:
         registry = cast(FakeRegistry, runtime._workflow_registry)
         save = registry.save_ledger
 
-        def down(
-            workflow_id: str,
-            ledger: LedgerChanges,
-            control: Any = None,
-            guard: Any = None,
-        ) -> None:
+        def down(workflow_id: str, ledger: LedgerChanges, control: Any = None) -> None:
             raise ConnectionError("control redis unavailable")
 
         registry.save_ledger = down  # type: ignore[method-assign]

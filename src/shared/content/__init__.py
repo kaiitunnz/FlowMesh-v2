@@ -29,7 +29,6 @@ from .reference import (
     ContentReference,
     DigestAlgorithm,
 )
-from .refusal import StoreRefusal
 from .store import (
     STREAM_CHUNK_BYTES,
     ContentHydrationError,
@@ -83,7 +82,6 @@ __all__ = [
     "FilesystemObjectBacking",
     "ScopedContentCredential",
     "SharedFilesystemObjectStore",
-    "StoreRefusal",
     "ScopedObjectStore",
     "GrantRejection",
     "HolderGrantGate",

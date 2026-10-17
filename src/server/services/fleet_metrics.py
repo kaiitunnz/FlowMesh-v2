@@ -19,7 +19,6 @@ from opentelemetry.metrics import Meter
 
 from shared.telemetry.semconv import PHYSICAL_SERVICE_FAMILY, RESOURCE_NODE_ID
 
-from ..reclamation.lane import LANE_STATES, LaneDepth
 from ..resident.capacity import outstanding_slots
 from ..resident.stores import ResidentStores
 from ..task.runtime import TaskRuntime
@@ -46,10 +45,8 @@ class FleetResidencySampler:
         node_id: Callable[[], str | None],
         interval_sec: float,
         enabled: bool,
-        publication_lane: Callable[[], LaneDepth | None] = lambda: None,
     ) -> None:
         self._stores = stores
-        self._publication_lane = publication_lane
         self._runtime = runtime
         self._node_id = node_id
         self._interval_sec = interval_sec
@@ -77,14 +74,6 @@ class FleetResidencySampler:
             "flowmesh.resident.queue_depth",
             unit="{task}",
             description="Tasks waiting in the ready queue.",
-        )
-        self._publication_lane_depth = meter.create_gauge(
-            "flowmesh.content.publication_lane",
-            unit="{publication}",
-            description=(
-                "Publications on the lane committing them, per state: held, waiting "
-                "for a slot, or holding a reserved one."
-            ),
         )
 
     @property
@@ -141,11 +130,6 @@ class FleetResidencySampler:
                 self._claim_credit.set(len(claims), attrs)
 
         self._queue_depth.set(self._runtime.ready_queue_length(), resource_attrs)
-        if (lane := self._publication_lane()) is not None:
-            for state, count in zip(LANE_STATES, lane, strict=True):
-                self._publication_lane_depth.set(
-                    count, {**resource_attrs, "state": state}
-                )
 
 
 def build_fleet_sampler(
@@ -156,14 +140,12 @@ def build_fleet_sampler(
     node_id: Callable[[], str | None],
     interval_sec: float,
     enabled: bool,
-    publication_lane: Callable[[], LaneDepth | None] = lambda: None,
 ) -> FleetResidencySampler:
     """Build the fleet/residency sampler for the root server.
 
     ``stores`` is ``None`` when resident-capacity control is disabled; the sampler
-    then reports queue depth only. ``publication_lane`` reads the publication lane's
-    depth once the event monitor runs one. The caller starts it on the root event loop
-    once it is running (``sampler.start(loop)``) and stops it at shutdown
+    then reports queue depth only. The caller starts it on the root event loop once
+    it is running (``sampler.start(loop)``) and stops it at shutdown
     (``sampler.shutdown()``), the same lifecycle ``ResidentCapacityControl`` uses.
     """
     return FleetResidencySampler(
@@ -173,5 +155,4 @@ def build_fleet_sampler(
         node_id=node_id,
         interval_sec=interval_sec,
         enabled=enabled,
-        publication_lane=publication_lane,
     )

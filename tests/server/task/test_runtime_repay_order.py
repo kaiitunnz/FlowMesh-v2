@@ -62,11 +62,7 @@ class _Store(_FaultyRegistry):
         super().commit_dynamic_tasks(workflow_id, *args, **kwargs)
 
     def save_ledger(
-        self,
-        workflow_id: str,
-        ledger: LedgerChanges,
-        control: Any = None,
-        guard: Any = None,
+        self, workflow_id: str, ledger: LedgerChanges, control: Any = None
     ) -> None:
         self._refuse("ledger")
         super().save_ledger(workflow_id, ledger)
@@ -236,11 +232,7 @@ class _Ambiguous(_FaultyRegistry):
         super().commit_transition(workflow_id, **kwargs)
 
     def save_ledger(
-        self,
-        workflow_id: str,
-        ledger: LedgerChanges,
-        control: Any = None,
-        guard: Any = None,
+        self, workflow_id: str, ledger: LedgerChanges, control: Any = None
     ) -> None:
         if self.down:
             raise ConnectionError("down")

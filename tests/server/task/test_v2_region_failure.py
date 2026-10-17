@@ -1029,10 +1029,7 @@ def test_a_failed_agent_persists_its_records_before_the_ledger(path: str) -> Non
             dynamic(*args, **kwargs)
 
         def save_ledger(
-            workflow_id: str,
-            ledger: LedgerChanges,
-            control: Any = None,
-            guard: Any = None,
+            workflow_id: str, ledger: LedgerChanges, control: Any = None
         ) -> None:
             writes.append("ledger")
             save(workflow_id, ledger)
@@ -1131,10 +1128,7 @@ def test_a_fan_out_persists_what_it_failed_before_the_ledger(shape: str) -> None
             dynamic(*args, **kwargs)
 
         def save_ledger(
-            workflow_id: str,
-            ledger: LedgerChanges,
-            control: Any = None,
-            guard: Any = None,
+            workflow_id: str, ledger: LedgerChanges, control: Any = None
         ) -> None:
             writes.append("ledger")
             save(workflow_id, ledger)

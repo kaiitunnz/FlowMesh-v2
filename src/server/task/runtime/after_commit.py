@@ -6,7 +6,6 @@ from dataclasses import dataclass
 
 from shared.schemas.command import InterruptMessage, RevokeMessage
 from shared.tasks.artifact_upload import UploadSettled
-from shared.tasks.publication import PublicationAnswer
 from shared.tools.contract import AgentModelTurnProposal
 
 from ..models import TaskRecord, TaskStatus
@@ -92,64 +91,6 @@ class UploadAck:
     settled: UploadSettled
 
 
-class PublicationJoint:
-    """One publication's settlement: its answer, the end of its holds and of its
-    epoch assertion, made once every workflow its commit touched is durable."""
-
-    def __init__(
-        self,
-        answer: PublicationAnswer,
-        parts: int,
-        finish: Callable[[], None] | None = None,
-        assertion: int | None = None,
-    ) -> None:
-        self.answer = answer
-        self.assertion = assertion
-        self._finish = finish
-        self._parts = parts
-        self._arrived: set[int] = set()
-        self._lock = threading.Lock()
-
-    def arrive(self, part: int) -> bool:
-        """Record one workflow's part as durable; returns whether every part is."""
-        with self._lock:
-            self._arrived.add(part)
-            return len(self._arrived) == self._parts
-
-    def finish_once(self) -> None:
-        """End the publication's holds; a second call does nothing."""
-        with self._lock:
-            finish, self._finish = self._finish, None
-        if finish is not None:
-            finish()
-
-
-@dataclass(frozen=True)
-class SettlePublication:
-    """One workflow's part of a publication's settlement."""
-
-    joint: PublicationJoint
-    part: int
-
-
-@dataclass(frozen=True)
-class TransferMultipart:
-    """Move the multipart uploads a dispatch owns in a scope to the upload obligation
-    its success left owed."""
-
-    scope: str
-    dispatch_id: str
-
-
-@dataclass(frozen=True)
-class ReleaseMultipart:
-    """End a dispatch's ownership of the multipart uploads it registered in a scope:
-    it ended owing no upload, or the upload its success left owed settled."""
-
-    scope: str
-    dispatch_id: str
-
-
 type AfterCommit = (
     CreditRelease
     | Reap
@@ -160,9 +101,6 @@ type AfterCommit = (
     | Settled
     | AuthorizeTurn
     | UploadAck
-    | TransferMultipart
-    | ReleaseMultipart
-    | SettlePublication
 )
 
 

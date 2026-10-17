@@ -27,7 +27,6 @@ from shared.schemas.event import (
 )
 from shared.schemas.worker import WorkerStatus
 from shared.tasks.artifact_upload import UploadReport
-from shared.tasks.publication import CHECKPOINT_FIELD, Publication
 from shared.tools.contract import AgentModelTurnProposal, MediatedOperationOutcome
 from shared.utils.recent import RecentMap
 
@@ -57,9 +56,6 @@ from ..orchestration.telemetry import (
     NULL_WORKFLOW_SPAN_EMITTER,
     WorkflowSpanEmitter,
 )
-from ..reclamation.lane import LaneDepth
-from ..reclamation.multipart import MultipartRegistrations
-from ..reclamation.publications import PublicationHolds
 from ..registries.node import NodeRegistry
 from ..registries.worker import ReportOutcome, StatusReport, WorkerRegistry
 from ..schemas.logs import LogEvent
@@ -83,7 +79,6 @@ from ..utils.logging import log_node_event, log_worker_event
 from ..utils.time import now_iso
 from .metrics import MetricsRecorder
 from .port_forward import PortForwardService
-from .publications import PublicationIntake, artifacts_unaccepted
 from .watchdog import WorkerWatchdog
 
 if TYPE_CHECKING:
@@ -154,8 +149,6 @@ class EventMonitor:
         workflow_span_emitter: WorkflowSpanEmitter | None = None,
         content_authority: ContentHydrationAuthority | None = None,
         content_access: ContentAccessBroker | None = None,
-        publication_holds: PublicationHolds | None = None,
-        multipart: MultipartRegistrations | None = None,
     ) -> None:
         self._redis_client = redis_client
         self._on_node_removed = on_node_removed
@@ -175,7 +168,6 @@ class EventMonitor:
         self._server_base_url = self._validate_server_base_url(server_base_url)
         self._content_authority = content_authority
         self._content_access = content_access
-        self._multipart = multipart
         self._warned_cache_off: set[str] = set()
         self._finalizer = WorkflowFinalizer(
             redis_client=redis_client,
@@ -187,14 +179,6 @@ class EventMonitor:
                 else NULL_WORKFLOW_SPAN_EMITTER
             ),
             log_stream_ttl_sec=self._log_stream_ttl_sec,
-        )
-
-        self._publications = (
-            PublicationIntake(
-                runtime, publication_holds, self._apply_publication, logger=logger
-            )
-            if publication_holds is not None
-            else None
         )
 
         # Per-entry handler-failure counts backing the consumer's retry budget.
@@ -232,10 +216,6 @@ class EventMonitor:
     # ------------------------------------------------------------------ # Public API
     # ------------------------------------------------------------------ #
 
-    def publication_lane_depth(self) -> LaneDepth | None:
-        """Return the publication lane's depth, or None without one."""
-        return self._publications.depth() if self._publications is not None else None
-
     def start(self) -> None:
         """Spawn task/worker listener threads."""
         if self._threads is not None:
@@ -262,10 +242,6 @@ class EventMonitor:
                 target=self._finalizer_loop, name="workflow-completion", daemon=True
             ),
         ]
-        # Before any task event is consumed, so an upload reported stored waits for
-        # the staged trees restored with it.
-        if self._publications is not None:
-            self._publications.start()
         for thread in self._threads:
             thread.start()
 
@@ -309,8 +285,6 @@ class EventMonitor:
         for thread in self._threads:
             thread.join(timeout=thread_join_timeout)
         self._threads = None
-        if self._publications is not None:
-            self._publications.stop(thread_join_timeout)
         self._finalizer.stop()
 
         with self._pending_coros_lock:
@@ -538,12 +512,14 @@ class EventMonitor:
     ) -> dict[str, Any]:
         """Bind a reported checkpoint publication and keep it out of the task's
         updates."""
-        if (published := payload.get(CHECKPOINT_FIELD)) is None:
+        if (published := payload.get("artifact_published")) is None:
             return payload
         self._runtime.record_artifact_published(
             event.task_id, event.worker_id, published, event.dispatch_id
         )
-        return {key: value for key, value in payload.items() if key != CHECKPOINT_FIELD}
+        return {
+            key: value for key, value in payload.items() if key != "artifact_published"
+        }
 
     def _handle_artifact_upload(
         self, event: TaskEvent, worker_id: str, payload: dict[str, Any]
@@ -583,22 +559,6 @@ class EventMonitor:
             )
             return
         payload = event.payload or {}
-        if self._publications is not None and (
-            publication := Publication.of(
-                worker_id, event.dispatch_id, event.task_id, event.type, payload
-            )
-        ):
-            self._publications.receive(event, publication)
-            return
-        self._apply_task_event(event, worker_id, payload)
-
-    def _apply_publication(self, event: TaskEvent) -> None:
-        if event.worker_id:
-            self._apply_task_event(event, event.worker_id, event.payload or {})
-
-    def _apply_task_event(
-        self, event: TaskEvent, worker_id: str, payload: dict[str, Any]
-    ) -> None:
         event_type = event.type
         match event_type:
             case "TASK_STARTED":
@@ -648,7 +608,15 @@ class EventMonitor:
                     # A success whose publications cannot all be bound would settle
                     # with artifacts its result names missing.
                     self._handle_task_failed(
-                        artifacts_unaccepted(event, refusal), worker_id, payload
+                        event.model_copy(
+                            update={
+                                "type": "TASK_FAILED",
+                                "error": f"artifacts_unaccepted: {refusal}",
+                                "retryable": False,
+                            }
+                        ),
+                        worker_id,
+                        payload,
                     )
                     return
                 if settles and (failure := export_failure(payload)) is not None:
@@ -1087,8 +1055,6 @@ class EventMonitor:
                     )
                 else:
                     self._content_access.issue(worker_id, task_id, scope)
-            case "CONTENT_MULTIPART_REGISTER" if self._multipart is not None:
-                self._multipart.on_registration(worker_id, event.payload)
             case "CONTENT_HYDRATION_REQUEST" if self._content_authority is not None:
                 self._content_authority.on_request(
                     worker_id,

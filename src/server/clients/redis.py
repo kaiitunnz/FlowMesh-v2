@@ -324,62 +324,7 @@ def content_finalization_scope_key(idempotency_key: str) -> str:
     return f"ct:finalization-scope:{idempotency_key}"
 
 
-RECLAIM_ROOT_EPOCH_KEY = "rc:root-epoch"
-RECLAIM_SCOPES_KEY = "rc:scopes"
-
-
-def reclaim_protected_key(scope: str) -> str:
-    return f"rc:{scope}:protected"
-
-
-def reclaim_pins_key(scope: str) -> str:
-    return f"rc:{scope}:pins"
-
-
-def reclaim_deleting_key(scope: str) -> str:
-    return f"rc:{scope}:deleting"
-
-
-def reclaim_history_key(scope: str) -> str:
-    return f"rc:{scope}:history"
-
-
-def reclaim_condemned_key(scope: str) -> str:
-    return f"rc:{scope}:condemned"
-
-
-def reclaim_unexpanded_key(scope: str) -> str:
-    return f"rc:{scope}:unexpanded"
-
-
-def reclaim_expanded_key(scope: str) -> str:
-    return f"rc:{scope}:expanded"
-
-
-def reclaim_uncertified_key(scope: str) -> str:
-    return f"rc:{scope}:uncertified"
-
-
-RECLAIM_HOOKS_ON_KEY = "rc:hooks-on"
-RECLAIM_BACKFILL_KEY = "rc:backfill"
-RECLAIM_BACKFILL_FAULTS_KEY = "rc:backfill-faults"
 RECLAIM_AUDIT_KEY = "rc:audit"
-
-
-def reclaim_cert_key(scope: str) -> str:
-    return f"rc:{scope}:cert"
-
-
-def reclaim_coverage_key(scope: str) -> str:
-    return f"rc:{scope}:coverage"
-
-
-def reclaim_multipart_key(scope: str) -> str:
-    return f"rc:{scope}:mpu"
-
-
-def reclaim_multipart_dispatch_key(scope: str, dispatch_id: str) -> str:
-    return f"rc:{scope}:mpu-dispatch:{dispatch_id}"
 
 
 def ssh_connection_key(connection_id: str) -> str:

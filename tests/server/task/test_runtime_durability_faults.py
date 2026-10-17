@@ -86,11 +86,7 @@ class _FaultyRegistry(FakeRegistry):
         )
 
     def save_ledger(
-        self,
-        workflow_id: str,
-        ledger: LedgerChanges,
-        control: Any = None,
-        guard: Any = None,
+        self, workflow_id: str, ledger: LedgerChanges, control: Any = None
     ) -> None:
         self._write(
             lambda: super(_FaultyRegistry, self).save_ledger(workflow_id, ledger)

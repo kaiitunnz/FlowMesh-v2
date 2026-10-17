@@ -84,7 +84,6 @@ class _Registry(FakeRegistry):
         cancelled: Sequence[str] = (),
         sched: WorkflowSched | None = None,
         control: Any = None,
-        guard: Any = None,
     ) -> None:
         if self.down or self.fail_next:
             self.fail_next = False

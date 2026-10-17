@@ -11,7 +11,7 @@ from collections.abc import (
 from contextlib import aclosing, closing
 from enum import StrEnum
 from itertools import batched
-from typing import Any, cast
+from typing import Any
 
 from pydantic import (
     BaseModel,
@@ -22,17 +22,14 @@ from pydantic import (
 )
 from redis.asyncio.client import Pipeline as AsyncPipeline
 from redis.client import Pipeline
-from redis.exceptions import WatchError
 
 from shared.utils.time import iso_to_ns
 
 from ..clients.redis import (
-    RECLAIM_ROOT_EPOCH_KEY,
     WORKFLOWS_BY_SUBMISSION_KEY,
     WORKFLOWS_OPEN_KEY,
     WORKFLOWS_SET_KEY,
     RedisClient,
-    reclaim_uncertified_key,
     task_artifacts_key,
     task_state_key,
     workflow_blueprints_key,
@@ -51,11 +48,6 @@ from ..clients.redis import (
     workflow_v2_key,
 )
 from ..orchestration.ledger_layout import LedgerChanges, StoredLedger, decode_ledger
-from ..reclamation.epoch import CommitGuard, EpochFenced, GuardInterrupted
-from ..reclamation.multipart import MultipartOwner, MultipartStore
-from ..reclamation.pins import PinStore, Retirement
-from ..reclamation.protection import queue_protection
-from ..reclamation.references import references_of
 from ..task.models import TaskRecord, TaskStatus
 from ..task.v2 import PersistedV2Workflow
 from ..utils.cursors import page_slice
@@ -345,10 +337,8 @@ def _queue_task_states(pipe: _AnyPipeline, items: Sequence[PersistedTask]) -> No
     for item in items:
         record = item.record
         pipe.set(task_state_key(record.task_id), item.model_dump_json())
-        unwritten = record.internal.runtime.unwritten_artifacts
-        queue_artifact_bindings(pipe, record.task_id, unwritten)
-        queue_protection(
-            pipe, references_of(record.internal.result_reference, unwritten)
+        queue_artifact_bindings(
+            pipe, record.task_id, record.internal.runtime.unwritten_artifacts
         )
         _queue_upload_state(pipe, record)
 
@@ -431,7 +421,6 @@ def _queue_registration(
             workflow_blueprints_key(workflow_id),
             TaskBlueprints(tasks=list(blueprints)).model_dump_json(),
         )
-        queue_protection(pipe, references_of(*blueprints))
 
 
 def _queue_transition(
@@ -517,7 +506,6 @@ def _queue_ledger_changes(
         pipe.hset(key, mapping=changes.fields)
     if changes.deleted:
         pipe.hdel(key, *changes.deleted)
-    queue_protection(pipe, changes.references)
 
 
 def _queue_ledger(
@@ -553,138 +541,9 @@ def _queue_workflow_sources(
     pipe.hset(workflow_sources_key(workflow_id), mapping=sources)
 
 
-def _epoch_of(value: str | bytes | None) -> int:
-    return int(value or 0)
-
-
-def _guard_sync(pipe: Pipeline, guard: CommitGuard | None) -> None:
-    """Watch the root epoch on ``pipe`` and start its transaction, refusing a write
-    under an epoch a later root has taken."""
-    if guard is None:
-        return
-    pipe.watch(RECLAIM_ROOT_EPOCH_KEY)
-    if _epoch_of(cast(str | None, pipe.get(RECLAIM_ROOT_EPOCH_KEY))) != guard.epoch:
-        raise EpochFenced(f"the root epoch moved past {guard.epoch}")
-    pipe.multi()
-
-
-async def _guard_async(pipe: AsyncPipeline, guard: CommitGuard | None) -> None:
-    if guard is None:
-        return
-    await pipe.watch(RECLAIM_ROOT_EPOCH_KEY)
-    if _epoch_of(await pipe.get(RECLAIM_ROOT_EPOCH_KEY)) != guard.epoch:
-        raise EpochFenced(f"the root epoch moved past {guard.epoch}")
-    pipe.multi()
-
-
 class WorkflowRegistry(WorkflowHistoryStore, ArtifactCatalogStore):
     def __init__(self, rds: RedisClient) -> None:
         self._rds = rds
-        self._pins = PinStore(rds)
-        self._multipart = MultipartStore(rds)
-
-    def claim_root_epoch(self) -> int:
-        """Take a new root epoch, fencing every guarded commit an earlier root made
-        under its own."""
-        return self._rds.sync.incr(RECLAIM_ROOT_EPOCH_KEY)
-
-    async def claim_root_epoch_async(self) -> int:
-        return await self._rds.asyncio.incr(RECLAIM_ROOT_EPOCH_KEY)
-
-    def retirement(self, scope: str, digests: Sequence[str]) -> dict[str, Retirement]:
-        """Return where each of ``digests`` stands in its retirement now."""
-        return self._pins.retirement(scope, digests)
-
-    def transfer_multipart(self, scope: str, dispatch_id: str) -> None:
-        """Move the multipart uploads a dispatch registered to the upload its success
-        left owed."""
-        self._multipart.transfer(scope, dispatch_id, MultipartOwner.upload(dispatch_id))
-
-    def release_multipart(self, scope: str, dispatch_id: str) -> None:
-        """End a dispatch's ownership of the multipart uploads it registered."""
-        self._multipart.release(scope, dispatch_id)
-
-    async def retirement_async(
-        self, scope: str, digests: Sequence[str]
-    ) -> dict[str, Retirement]:
-        return await self._pins.retirement_async(scope, digests)
-
-    async def transfer_multipart_async(self, scope: str, dispatch_id: str) -> None:
-        await self._multipart.transfer_async(
-            scope, dispatch_id, MultipartOwner.upload(dispatch_id)
-        )
-
-    async def release_multipart_async(self, scope: str, dispatch_id: str) -> None:
-        await self._multipart.release_async(scope, dispatch_id)
-
-    def mark_uncovered(self, scope: str, workflow_id: str) -> None:
-        """Record that a write of the workflow faulted partway, so the scope's
-        protection may miss a binding until the workflow's rewrite lands."""
-        self._rds.sync.sadd(reclaim_uncertified_key(scope), workflow_id)
-
-    def clear_uncovered(self, scope: str, workflow_id: str) -> None:
-        """Record that the workflow's rewrite landed with its protection."""
-        self._rds.sync.srem(reclaim_uncertified_key(scope), workflow_id)
-
-    async def mark_uncovered_async(self, scope: str, workflow_id: str) -> None:
-        await self._rds.asyncio.sadd(reclaim_uncertified_key(scope), workflow_id)
-
-    async def clear_uncovered_async(self, scope: str, workflow_id: str) -> None:
-        await self._rds.asyncio.srem(reclaim_uncertified_key(scope), workflow_id)
-
-    def _watch_lost(self, guard: CommitGuard, exc: WatchError) -> Exception:
-        """What a guarded commit whose watch fired means: a later root, or a lost
-        connection that leaves the write to retry."""
-        try:
-            current = _epoch_of(self._rds.sync.get(RECLAIM_ROOT_EPOCH_KEY))
-        except Exception:
-            return GuardInterrupted(f"a guarded commit lost its watch: {exc}")
-        if current != guard.epoch:
-            return EpochFenced(f"the root epoch moved past {guard.epoch}")
-        return GuardInterrupted(f"a guarded commit lost its watch: {exc}")
-
-    async def _watch_lost_async(self, guard: CommitGuard, exc: WatchError) -> Exception:
-        try:
-            current = _epoch_of(await self._rds.asyncio.get(RECLAIM_ROOT_EPOCH_KEY))
-        except Exception:
-            return GuardInterrupted(f"a guarded commit lost its watch: {exc}")
-        if current != guard.epoch:
-            return EpochFenced(f"the root epoch moved past {guard.epoch}")
-        return GuardInterrupted(f"a guarded commit lost its watch: {exc}")
-
-    def _begin(self, pipe: Pipeline, guard: CommitGuard | None) -> None:
-        try:
-            _guard_sync(pipe, guard)
-        except WatchError as exc:
-            assert guard is not None
-            raise self._watch_lost(guard, exc) from exc
-
-    async def _begin_async(
-        self, pipe: AsyncPipeline, guard: CommitGuard | None
-    ) -> None:
-        try:
-            await _guard_async(pipe, guard)
-        except WatchError as exc:
-            assert guard is not None
-            raise await self._watch_lost_async(guard, exc) from exc
-
-    def _execute(self, pipe: Pipeline, guard: CommitGuard | None) -> list[Any]:
-        try:
-            return pipe.execute()
-        except WatchError as exc:
-            if guard is None:
-                raise
-            raise self._watch_lost(guard, exc) from exc
-
-    async def _execute_async(
-        self, pipe: AsyncPipeline, guard: CommitGuard | None
-    ) -> list[Any]:
-        try:
-            return await pipe.execute()
-        except WatchError as exc:
-            if guard is None:
-                raise
-            raise await self._watch_lost_async(guard, exc) from exc
 
     def register_workflow(
         self,
@@ -695,16 +554,14 @@ class WorkflowRegistry(WorkflowHistoryStore, ArtifactCatalogStore):
         ledger: LedgerChanges | None = None,
         submitted_at: str | None = None,
         blueprints: Sequence[PersistedTask] = (),
-        guard: CommitGuard | None = None,
     ) -> None:
         """Register a workflow with its task states, schedule, plan, ledger and task
         blueprints as one atomic transaction."""
         with self._rds.sync.control_pipeline() as pipe:
-            self._begin(pipe, guard)
             _queue_registration(
                 pipe, workflow_id, tasks, sched, v2, ledger, submitted_at, blueprints
             )
-            self._execute(pipe, guard)
+            pipe.execute()
 
     async def register_workflow_async(
         self,
@@ -715,15 +572,13 @@ class WorkflowRegistry(WorkflowHistoryStore, ArtifactCatalogStore):
         ledger: LedgerChanges | None = None,
         submitted_at: str | None = None,
         blueprints: Sequence[PersistedTask] = (),
-        guard: CommitGuard | None = None,
     ) -> None:
         """Register a workflow as ``register_workflow`` does."""
         async with self._rds.asyncio.control_pipeline() as pipe:
-            await self._begin_async(pipe, guard)
             _queue_registration(
                 pipe, workflow_id, tasks, sched, v2, ledger, submitted_at, blueprints
             )
-            await self._execute_async(pipe, guard)
+            await pipe.execute()
 
     def unregister_workflows(self, *workflow_ids: str) -> None:
         task_ids, members = self._collect(workflow_ids)
@@ -991,7 +846,6 @@ class WorkflowRegistry(WorkflowHistoryStore, ArtifactCatalogStore):
         cancelled: Sequence[str] = (),
         sched: WorkflowSched | None = None,
         control: WorkflowControl | None = None,
-        guard: CommitGuard | None = None,
     ) -> None:
         """Apply a workflow state delta as one atomic control-Redis transaction.
 
@@ -1003,7 +857,6 @@ class WorkflowRegistry(WorkflowHistoryStore, ArtifactCatalogStore):
         never leave durable state half-applied.
         """
         with self._rds.sync.control_pipeline() as pipe:
-            self._begin(pipe, guard)
             _queue_transition(
                 pipe,
                 workflow_id,
@@ -1016,7 +869,7 @@ class WorkflowRegistry(WorkflowHistoryStore, ArtifactCatalogStore):
                 sched,
                 control,
             )
-            self._execute(pipe, guard)
+            pipe.execute()
 
     async def commit_transition_async(
         self,
@@ -1030,11 +883,9 @@ class WorkflowRegistry(WorkflowHistoryStore, ArtifactCatalogStore):
         cancelled: Sequence[str] = (),
         sched: WorkflowSched | None = None,
         control: WorkflowControl | None = None,
-        guard: CommitGuard | None = None,
     ) -> None:
         """Apply a workflow state delta as ``commit_transition`` does."""
         async with self._rds.asyncio.control_pipeline() as pipe:
-            await self._begin_async(pipe, guard)
             _queue_transition(
                 pipe,
                 workflow_id,
@@ -1047,7 +898,7 @@ class WorkflowRegistry(WorkflowHistoryStore, ArtifactCatalogStore):
                 sched,
                 control,
             )
-            await self._execute_async(pipe, guard)
+            await pipe.execute()
 
     def commit_dynamic_tasks(
         self,
@@ -1062,7 +913,6 @@ class WorkflowRegistry(WorkflowHistoryStore, ArtifactCatalogStore):
         cancelled: Sequence[str] = (),
         sched: WorkflowSched | None = None,
         control: WorkflowControl | None = None,
-        guard: CommitGuard | None = None,
     ) -> None:
         """Persist newly materialized dynamic-child records with the ledger changes.
 
@@ -1082,7 +932,6 @@ class WorkflowRegistry(WorkflowHistoryStore, ArtifactCatalogStore):
         if not records and not retire:
             return
         with self._rds.sync.control_pipeline() as pipe:
-            self._begin(pipe, guard)
             _queue_dynamic_tasks(
                 pipe,
                 workflow_id,
@@ -1096,7 +945,7 @@ class WorkflowRegistry(WorkflowHistoryStore, ArtifactCatalogStore):
                 sched,
                 control,
             )
-            self._execute(pipe, guard)
+            pipe.execute()
 
     async def commit_dynamic_tasks_async(
         self,
@@ -1111,13 +960,11 @@ class WorkflowRegistry(WorkflowHistoryStore, ArtifactCatalogStore):
         cancelled: Sequence[str] = (),
         sched: WorkflowSched | None = None,
         control: WorkflowControl | None = None,
-        guard: CommitGuard | None = None,
     ) -> None:
         """Persist dynamic-child records as ``commit_dynamic_tasks`` does."""
         if not records and not retire:
             return
         async with self._rds.asyncio.control_pipeline() as pipe:
-            await self._begin_async(pipe, guard)
             _queue_dynamic_tasks(
                 pipe,
                 workflow_id,
@@ -1131,7 +978,7 @@ class WorkflowRegistry(WorkflowHistoryStore, ArtifactCatalogStore):
                 sched,
                 control,
             )
-            await self._execute_async(pipe, guard)
+            await pipe.execute()
 
     def get_dynamic_task_ids(self, workflow_id: str) -> set[str]:
         return self._rds.sync.set_members(workflow_dynamic_tasks_key(workflow_id))
@@ -1249,27 +1096,23 @@ class WorkflowRegistry(WorkflowHistoryStore, ArtifactCatalogStore):
         workflow_id: str,
         ledger: LedgerChanges,
         control: WorkflowControl | None = None,
-        guard: CommitGuard | None = None,
     ) -> None:
         """Store a workflow's ledger changes with what it holds beyond its tasks."""
         with self._rds.sync.control_pipeline() as pipe:
-            self._begin(pipe, guard)
             _queue_revision(pipe, workflow_id)
             _queue_ledger(pipe, workflow_id, ledger, control)
-            self._execute(pipe, guard)
+            pipe.execute()
 
     async def save_ledger_async(
         self,
         workflow_id: str,
         ledger: LedgerChanges,
         control: WorkflowControl | None = None,
-        guard: CommitGuard | None = None,
     ) -> None:
         async with self._rds.asyncio.control_pipeline() as pipe:
-            await self._begin_async(pipe, guard)
             _queue_revision(pipe, workflow_id)
             _queue_ledger(pipe, workflow_id, ledger, control)
-            await self._execute_async(pipe, guard)
+            await pipe.execute()
 
     def load_ledger(self, workflow_id: str) -> StoredLedger | None:
         fields = self._rds.sync.hash_getall(workflow_ds_key(workflow_id))

@@ -849,11 +849,7 @@ class _FlakyWrites(_Registry):
         self.children_down = False
 
     def save_ledger(
-        self,
-        workflow_id: str,
-        ledger: LedgerChanges,
-        control: Any = None,
-        guard: Any = None,
+        self, workflow_id: str, ledger: LedgerChanges, control: Any = None
     ) -> None:
         if self.ledger_saves_to_failure:
             self.ledger_saves_to_failure -= 1

@@ -10,7 +10,6 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 
 from server.clients.redis import workflow_credential_key
 from server.config import OrchestrationConfig
-from server.reclamation.pins import Retirement
 from server.registries.workflow import (
     PersistedTask,
     WorkflowRecord,
@@ -50,7 +49,6 @@ class FakeWorkflowRegistry(StoredTaskStates, StoredLedgers):
         ledger: Any = None,
         submitted_at: str | None = None,
         blueprints: Any = (),
-        guard: Any = None,
     ) -> None:
         self.workflow_task_ids[workflow_id] = [t.record.task_id for t in tasks]
         self.put_sources([*tasks, *blueprints])
@@ -71,9 +69,7 @@ class FakeWorkflowRegistry(StoredTaskStates, StoredLedgers):
         blob = self.v2_blobs.get(workflow_id)
         return PersistedV2Workflow.model_validate_json(blob) if blob else None
 
-    def save_ledger(
-        self, workflow_id: str, ledger: Any, control: Any = None, guard: Any = None
-    ) -> None:
+    def save_ledger(self, workflow_id: str, ledger: Any, control: Any = None) -> None:
         self.put_ledger(workflow_id, ledger)
 
     async def get_remaining_tasks_async(self, workflow_id: str) -> set[str]:
@@ -96,30 +92,6 @@ class FakeWorkflowRegistry(StoredTaskStates, StoredLedgers):
         return self.get_workflow_ids()
 
     # Nothing here is ever freed, so every workflow it holds is open.
-    def claim_root_epoch(self) -> int:
-        self.root_epoch = getattr(self, "root_epoch", 0) + 1
-        return self.root_epoch
-
-    def mark_uncovered(self, scope: str, workflow_id: str) -> None:
-        current: set[tuple[str, str]] = getattr(self, "uncovered", set())
-        self.uncovered = current | {(scope, workflow_id)}
-
-    def clear_uncovered(self, scope: str, workflow_id: str) -> None:
-        current: set[tuple[str, str]] = getattr(self, "uncovered", set())
-        self.uncovered = current - {(scope, workflow_id)}
-
-    async def claim_root_epoch_async(self) -> int:
-        return self.claim_root_epoch()
-
-    def retirement(self, scope: str, digests: Sequence[str]) -> dict[str, Retirement]:
-        return dict.fromkeys(digests, Retirement.NONE)
-
-    def transfer_multipart(self, scope: str, dispatch_id: str) -> None:
-        pass
-
-    def release_multipart(self, scope: str, dispatch_id: str) -> None:
-        pass
-
     async def open_workflow_ids_async(self) -> set[str]:
         return self.get_workflow_ids()
 
@@ -172,7 +144,6 @@ class FakeWorkflowRegistry(StoredTaskStates, StoredLedgers):
         cancelled: Sequence[str] = (),
         sched: WorkflowSched | None = None,
         control: Any = None,
-        guard: Any = None,
     ) -> None:
         self.put_tasks(records)
         if sched is not None:
