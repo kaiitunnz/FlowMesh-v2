@@ -8,6 +8,8 @@ sampled producer. Neither half holds the other's: the server never sees the byte
 the store never learns what an outcome is.
 """
 
+import logging
+import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
@@ -25,6 +27,22 @@ from shared.utils.http import auth_headers
 
 from .content_store import FabricContentStore
 from .manifest import OutcomeManifest
+
+_LOGGER = logging.getLogger(__name__)
+# How long a refused recording waits before it records again, doubling to the cap.
+_REFUSED_BACKOFF_SEC = 0.5
+_REFUSED_BACKOFF_CAP_SEC = 15.0
+_REMATERIALIZE = "rematerialize"
+
+
+class FinalizationRefusedError(ContentStoreError):
+    """Control did not record a finalization now; ``disposition`` says what next:
+    ``retry_retirement`` or ``retry`` to record again, ``rematerialize`` to write the
+    same bytes again first."""
+
+    def __init__(self, disposition: str) -> None:
+        super().__init__(f"finalization not recorded: {disposition}")
+        self.disposition = disposition
 
 
 class FinalizationIndexClient:
@@ -69,6 +87,12 @@ class FinalizationIndexClient:
             headers=self._headers(),
             timeout=self._timeout,
         )
+        if resp.status_code == 409:
+            detail = resp.json().get("detail")
+            if isinstance(detail, dict) and isinstance(
+                disposition := detail.get("disposition"), str
+            ):
+                raise FinalizationRefusedError(disposition)
         if resp.status_code >= 400:
             raise ContentStoreError(f"finalization failed: {resp.status_code}")
         return OutcomeManifest.model_validate_json(resp.content)
@@ -131,4 +155,20 @@ class FinalizingContentStore(FabricContentStore):
         if (found := self._index.find(scope, idempotency_key)) is not None:
             return found
         content = self.write(scope, data, media_type=media_type)
-        return self._index.record(scope, idempotency_key, content)
+        delay = _REFUSED_BACKOFF_SEC
+        while True:
+            try:
+                return self._index.record(scope, idempotency_key, content)
+            except FinalizationRefusedError as refused:
+                # A refusal is about the stored copy, never the outcome: the same bytes
+                # are recorded again, written again first when the copy is gone, and
+                # the producer is never driven again for them.
+                _LOGGER.info(
+                    "Finalization %s not recorded (%s); recording again",
+                    idempotency_key,
+                    refused.disposition,
+                )
+                time.sleep(delay)
+                delay = min(delay * 2, _REFUSED_BACKOFF_CAP_SEC)
+                if refused.disposition == _REMATERIALIZE:
+                    content = self.write(scope, data, media_type=media_type)

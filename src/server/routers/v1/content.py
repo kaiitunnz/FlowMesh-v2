@@ -20,6 +20,7 @@ from ...auth.security import (
     require_permission,
 )
 from ...content import FinalizationIndex
+from ...content.finalizations import FinalizationRefused, StaleRootEpoch
 from ...hooks import ResourceAction, ResourceKind
 
 router = APIRouter(prefix="/content", tags=["Content"])
@@ -88,9 +89,19 @@ async def put_finalization(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="content is outside the admitted scope",
         )
-    return bound.record(
-        admitted, idem, content, provenance=f"principal:{principal.principal_id}"
-    )
+    try:
+        return bound.record(
+            admitted, idem, content, provenance=f"principal:{principal.principal_id}"
+        )
+    except FinalizationRefused as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"disposition": exc.disposition.value},
+        ) from exc
+    except StaleRootEpoch as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
 
 
 @router.get(

@@ -204,6 +204,17 @@ class ResultReader:
                 f"{reference.size_bytes}"
             )
 
+    def backed(self, reference: ContentReference) -> bool | None:
+        """Whether the store now holds the reference's object at its size; None when
+        the store cannot say, as while it is unreachable or refuses the read."""
+        try:
+            self.verify_stored(reference)
+        except ResultUnavailable:
+            return None
+        except ResultUnreadable:
+            return False
+        return True
+
     def _hydrate(self, reference: ContentReference) -> bytes:
         key = reference
         with self._lock:

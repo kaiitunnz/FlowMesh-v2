@@ -1061,6 +1061,11 @@ class TaskRuntime:
         await self.start_settled_history()
         return restored
 
+    @property
+    def root_epoch(self) -> int | None:
+        """The root epoch this runtime commits asserted state under."""
+        return self._committer.epoch
+
     def _on_fenced(self, exc: Exception) -> None:
         if self.on_fenced is not None:
             self.on_fenced()

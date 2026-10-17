@@ -225,17 +225,18 @@ if IS_ROOT_NODE:
         },
     )
     CONTROL_TRACER = ControlPlaneTracer(SERVER_TRACER, config.telemetry)
+    RESULT_READER = ResultReader(
+        open_deployment_store(
+            config.object_store,
+            read_stall_timeout_sec=config.content_store.read_stall_timeout_sec,
+            read_attempts=config.content_store.read_attempts,
+        )
+    )
     RUNTIME = TaskRuntime(
         WORKFLOW_REGISTRY,
         WORKER_REGISTRY,
         config.orchestration,
-        ResultReader(
-            open_deployment_store(
-                config.object_store,
-                read_stall_timeout_sec=config.content_store.read_stall_timeout_sec,
-                read_attempts=config.content_store.read_attempts,
-            )
-        ),
+        RESULT_READER,
         logger,
         credential_vault=CREDENTIAL_VAULT,
         surface=POLICY_SURFACE,
@@ -248,6 +249,8 @@ if IS_ROOT_NODE:
     )
     # A root a later root has fenced stops rather than keep serving stale state.
     RUNTIME.on_fenced = lambda: os.kill(os.getpid(), signal.SIGTERM)
+    FINALIZATION_INDEX.epoch = lambda: RUNTIME.root_epoch if RUNTIME else None
+    FINALIZATION_INDEX.verify = RESULT_READER.backed
     TELEMETRY_STORE = build_telemetry_store(config.telemetry_store)
     AGENT_MODEL_GATEWAY = AgentModelGateway(
         RUNTIME, config.orchestration.gateway, logger

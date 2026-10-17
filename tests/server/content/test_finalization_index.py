@@ -1,107 +1,123 @@
-"""Which content an outcome finalization is bound to, and which drive decides it."""
+"""Which content an outcome finalization is bound to, which drive decides it, and
+what its binding protects."""
 
-from types import SimpleNamespace
-from typing import Any, cast
+import fakeredis
+import pytest
 
+from server.clients.redis import (
+    RECLAIM_ROOT_EPOCH_KEY,
+    reclaim_deleting_key,
+    reclaim_history_key,
+    reclaim_pins_key,
+    reclaim_protected_key,
+)
 from server.content import FinalizationIndex
-from shared.content import reference_for
+from server.content.finalizations import (
+    FinalizationDisposition,
+    FinalizationRefused,
+    StaleRootEpoch,
+)
+from shared.content import ContentReference, reference_for
+from tests.server.redis_helpers import fake_redis_client
 
 _SCOPE = "tenant-a"
 
 
-class _FakeRedis:
-    """A redis whose set-if-absent is the only way a first writer is decided."""
-
-    def __init__(self) -> None:
-        self.values: dict[str, str] = {}
-        self.expirations: dict[str, int] = {}
-
-    def get(self, key: str) -> str | None:
-        return self.values.get(key)
-
-    def set_value(self, key: str, value: str) -> None:
-        self.values[key] = value
-
-    def set_value_if_absent(self, key: str, value: str) -> bool:
-        if key in self.values:
-            return False
-        self.values[key] = value
-        return True
-
-    def expire(self, key: str, ttl: int) -> None:
-        self.expirations[key] = ttl
+@pytest.fixture
+def server() -> fakeredis.FakeServer:
+    return fakeredis.FakeServer()
 
 
-def _index(fake: _FakeRedis, ttl: float = 0.0) -> FinalizationIndex:
-    return FinalizationIndex(cast(Any, SimpleNamespace(sync=fake)), ttl_sec=ttl)
+@pytest.fixture
+def raw(server: fakeredis.FakeServer) -> fakeredis.FakeRedis:
+    return fakeredis.FakeRedis(server=server, decode_responses=True)
 
 
-def test_a_finalization_binds_the_content_it_materialized() -> None:
-    fake = _FakeRedis()
+def _index(server: fakeredis.FakeServer, **kwargs) -> FinalizationIndex:
+    return FinalizationIndex(fake_redis_client(server), **kwargs)
+
+
+def test_a_finalization_binds_and_protects_the_content_it_materialized(
+    server, raw
+) -> None:
     reference = reference_for(_SCOPE, b"the outcome", media_type="application/json")
 
-    manifest = _index(fake).record(_SCOPE, "idm-1", reference)
+    manifest = _index(server).record(_SCOPE, "idm-1", reference)
 
     assert manifest.content == reference
     assert manifest.idempotency_key == "idm-1"
+    assert raw.sismember(reclaim_protected_key(_SCOPE), reference.content_digest)
+    assert not raw.exists(reclaim_pins_key(_SCOPE))
 
 
-def test_a_re_drive_resolves_the_first_materialization() -> None:
-    fake = _FakeRedis()
-    index = _index(fake)
+def test_a_re_drive_resolves_the_first_materialization_and_protects_nothing(
+    server, raw
+) -> None:
+    index = _index(server)
     first = reference_for(_SCOPE, b"sampled once", media_type="application/json")
     index.record(_SCOPE, "idm-1", first)
+    loser = reference_for(_SCOPE, b"sampled twice", media_type="application/json")
 
-    again = index.record(
-        _SCOPE,
-        "idm-1",
-        reference_for(_SCOPE, b"sampled twice", media_type="application/json"),
-    )
+    again = index.record(_SCOPE, "idm-1", loser)
 
     assert again.content == first
     settled = index.find(_SCOPE, "idm-1")
     assert settled is not None and settled.content == first
+    assert not raw.sismember(reclaim_protected_key(_SCOPE), loser.content_digest)
 
 
-class _RacingRedis(_FakeRedis):
-    """A redis where another drive wins the key before this one writes."""
-
-    def __init__(self, winner: str) -> None:
-        super().__init__()
-        self._winner = winner
-
-    def set_value_if_absent(self, key: str, value: str) -> bool:
-        if key not in self.values:
-            self.values[key] = self._winner
-            return False
-        return super().set_value_if_absent(key, value)
-
-
-def test_a_drive_that_loses_the_write_takes_the_winners_content() -> None:
-    """Two drives race the same key and the refused one adopts what the winner bound.
-
-    Both drives see no binding when they look, so the decision has to be the write
-    itself. Reading first and then writing would let both believe they were first: the
-    later one's content would end up bound and each caller would be told its own stood,
-    which is exactly the outcome this index exists to prevent.
-    """
-    winner = reference_for(_SCOPE, b"sampled once", media_type="application/json")
-    index_for_winner = _index(_FakeRedis())
-    winning_manifest = index_for_winner.record(_SCOPE, "idm-1", winner)
-
-    fake = _RacingRedis(winning_manifest.model_dump_json())
-    loser = _index(fake).record(
-        _SCOPE, "idm-1", reference_for(_SCOPE, b"sampled twice")
-    )
-
-    assert loser.content == winner
-    settled = _index(fake).find(_SCOPE, "idm-1")
-    assert settled is not None and settled.content == winner
-
-
-def test_a_scope_does_not_see_another_scopes_finalization() -> None:
-    fake = _FakeRedis()
-    index = _index(fake)
+def test_a_scope_does_not_see_another_scopes_finalization(server) -> None:
+    index = _index(server)
     index.record(_SCOPE, "idm-1", reference_for(_SCOPE, b"mine"))
 
     assert index.find("tenant-b", "idm-1") is None
+
+
+def test_content_being_retired_is_refused_and_nothing_is_bound(server, raw) -> None:
+    reference = reference_for(_SCOPE, b"doomed")
+    raw.hset(reclaim_deleting_key(_SCOPE), reference.content_digest, "{}")
+    with pytest.raises(FinalizationRefused) as refused:
+        _index(server).record(_SCOPE, "idm-1", reference)
+    assert refused.value.disposition is FinalizationDisposition.RETRY_RETIREMENT
+    assert _index(server).find(_SCOPE, "idm-1") is None
+
+
+@pytest.mark.parametrize(
+    ("present", "disposition"),
+    [
+        (False, FinalizationDisposition.REMATERIALIZE),
+        (None, FinalizationDisposition.RETRY),
+    ],
+)
+def test_a_retired_identity_binds_only_on_a_verified_backing(
+    server, raw, present: bool | None, disposition: FinalizationDisposition
+) -> None:
+    reference = reference_for(_SCOPE, b"retired once")
+    raw.hset(reclaim_history_key(_SCOPE), reference.content_digest, "4")
+    with pytest.raises(FinalizationRefused) as refused:
+        _index(server, verify=lambda _: present).record(_SCOPE, "idm-1", reference)
+    assert refused.value.disposition is disposition
+    assert _index(server).find(_SCOPE, "idm-1") is None
+
+
+def test_a_verified_backing_binds_a_retired_identity(server, raw) -> None:
+    reference = reference_for(_SCOPE, b"retired once")
+    raw.hset(reclaim_history_key(_SCOPE), reference.content_digest, "4")
+    seen: list[ContentReference] = []
+
+    def verify(ref: ContentReference) -> bool:
+        seen.append(ref)
+        return True
+
+    manifest = _index(server, verify=verify).record(_SCOPE, "idm-1", reference)
+    assert manifest.content == reference and seen == [reference]
+    assert raw.sismember(reclaim_protected_key(_SCOPE), reference.content_digest)
+
+
+def test_a_root_past_its_epoch_records_nothing(server, raw) -> None:
+    raw.set(RECLAIM_ROOT_EPOCH_KEY, "2")
+    with pytest.raises(StaleRootEpoch):
+        _index(server, epoch=lambda: 1).record(
+            _SCOPE, "idm-1", reference_for(_SCOPE, b"late")
+        )
+    assert _index(server).find(_SCOPE, "idm-1") is None

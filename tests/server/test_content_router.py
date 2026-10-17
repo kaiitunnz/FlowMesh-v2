@@ -6,44 +6,27 @@ keys it has not.
 """
 
 import logging
-from typing import Any, cast
+from typing import Any
 
+import fakeredis
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from server.clients.redis import reclaim_history_key
 from server.content import FinalizationIndex
 from server.routers.v1 import content as content_router
 from shared.content import reference_for
 from shared.outcome import OutcomeManifest
+from tests.server.redis_helpers import fake_redis_client
 
 PREFIX = "/api/v1"
 _CONTENT = reference_for("local", b"result-body", media_type="application/json")
 
 
-class _FakeRedis:
-    def __init__(self) -> None:
-        self.values: dict[str, str] = {}
-
-    def get(self, key: str) -> str | None:
-        return self.values.get(key)
-
-    def set_value(self, key: str, value: str) -> None:
-        self.values[key] = value
-
-    def set_value_if_absent(self, key: str, value: str) -> bool:
-        if key in self.values:
-            return False
-        self.values[key] = value
-        return True
-
-    def expire(self, key: str, ttl_sec: int) -> bool:
-        return True
-
-
 def _client() -> tuple[TestClient, FinalizationIndex]:
     app = FastAPI()
     app.state.logger = logging.getLogger("test.content_router")
-    index = FinalizationIndex(cast(Any, type("C", (), {"sync": _FakeRedis()})()))
+    index = FinalizationIndex(fake_redis_client(fakeredis.FakeServer()))
     app.state.finalization_index = index
     app.include_router(content_router.router, prefix=PREFIX)
     return TestClient(app), index
@@ -137,3 +120,13 @@ def test_no_payload_crosses_the_surface() -> None:
     # store directly, never through the server.
     paths = {getattr(route, "path", "") for route in content_router.router.routes}
     assert paths == {"/content/finalizations"}
+
+
+def test_a_refused_finalization_answers_its_disposition() -> None:
+    client, index = _assigned("idm-9")
+    index.verify = lambda _: False
+    raw = index._rds.sync._control
+    raw.hset(reclaim_history_key("local"), _CONTENT.content_digest, "1")
+    resp = _bind(client, "idm-9")
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == {"disposition": "rematerialize"}
