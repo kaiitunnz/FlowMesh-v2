@@ -9,9 +9,11 @@ fields at a time, holding no runtime lock and reading nothing the runtime holds 
 memory. The pass pauses between pages and every few decoded values, for long enough
 that it takes only a small share of the interpreter.
 
-A value that does not decode leaves the scope it names incomplete, or every scope when
-its scope cannot be read. The pass names each tree manifest it finds, for its members
-to be marked through it.
+A value that does not decode leaves incomplete the scope it names, or else the scope of
+the workflow or task its key belongs to, and every scope when neither can be read. A
+pass across which the control store restarted or another server took over leaves every
+scope incomplete, since a scan cursor does not survive that. The pass names each tree
+manifest it finds, packed, for its members to be marked through it.
 """
 
 import json
@@ -20,17 +22,16 @@ import re
 import threading
 import time
 from collections import defaultdict
-from collections.abc import Callable, Container, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from fnmatch import translate
-from functools import cache
 from typing import Any, Self
 
 from pydantic import BaseModel, ValidationError
 from redis.exceptions import ResponseError
 
-from shared.content import ContentReference
+from shared.content import ContentReference, DigestAlgorithm
 from shared.content.tree import TREE_MEDIA_TYPE
 from shared.outcome import OutcomeManifest
 from shared.tasks.artifact_binding import ArtifactBinding, ArtifactKind
@@ -43,6 +44,7 @@ from ..clients.redis import (
     workflow_blueprints_key,
     workflow_ds_key,
     workflow_history_key,
+    workflow_key,
     workflow_sources_key,
 )
 from ..orchestration.ledger_layout import HISTORIES, KEYED, KEYED_TEXTS, META, SETS
@@ -58,7 +60,7 @@ from ..task.history import (
 )
 from .mark import Mark
 from .pacing import DUTY, Pacer
-from .references import reference_paths, references_of
+from .references import model_bears, references_of
 
 # Keys one SCAN page asks for and fields one HSCAN page asks for.
 SCAN_COUNT = 500
@@ -90,7 +92,6 @@ _PATTERNS: dict[Family, str] = {
     Family.HISTORY: workflow_history_key("*"),
     Family.FINALIZATION: content_finalization_key("*", "*"),
 }
-_HASHES = frozenset({Family.LEDGER, Family.ARTIFACTS, Family.HISTORY})
 
 # The control store's key builders by the family each marks, None for one whose keys
 # bind no content, so a key family added later is classified before it ships.
@@ -165,7 +166,7 @@ KEY_FAMILIES: dict[str, Family | None] = {
     "content_held_seq_key": None,
     "CONTENT_HELD_WORKERS_KEY": None,
     "content_finalization_scope_key": None,
-    "RECLAIM_AUDIT_KEY": None,
+    "CONTENT_AUDIT_KEY": None,
     "ssh_connection_key": None,
     "SSH_CONNECTION_IDS_KEY": None,
 }
@@ -175,13 +176,11 @@ _FAMILY_KEY = re.compile(
 )
 
 
-def _family_of(key: str, families: Container[Family]) -> Family | None:
-    """The family among ``families`` a key belongs to, matched as a key-pattern scan
-    would match it."""
+def _family_of(key: str) -> Family | None:
+    """The family a key belongs to, matched as a key-pattern scan would match it."""
     if (match := _FAMILY_KEY.match(key)) is None or match.lastgroup is None:
         return None
-    family = Family[match.lastgroup]
-    return family if family in families else None
+    return Family[match.lastgroup]
 
 
 class Undecodable(Exception):
@@ -203,13 +202,13 @@ class Found:
     @classmethod
     def of(cls, *values: Any, trees: Iterable[ContentReference] = ()) -> Self:
         references = list(references_of(*values))
-        manifests = [r for r in references if r.media_type == TREE_MEDIA_TYPE]
-        return cls(references, [*manifests, *trees])
-
-
-@cache
-def _bears(model: type[BaseModel]) -> bool:
-    return bool(reference_paths(model))
+        named = tuple(trees)
+        manifests = {
+            r.identity: r
+            for r in (*references, *named)
+            if r.media_type == TREE_MEDIA_TYPE or r in named
+        }
+        return cls(references, list(manifests.values()))
 
 
 def _validated(model: type[BaseModel], raw: str, scope: str | None = None) -> Found:
@@ -232,7 +231,7 @@ def ledger_field(name: str, value: str) -> Found:
         return Found()
     if collection in KEYED:
         model = KEYED[collection][0]
-        if not _bears(model):
+        if not model_bears(model):
             return Found()
         ordinal, sep, body = value.partition(":")
         if not sep or not ordinal.isascii() or not ordinal.isdigit():
@@ -240,7 +239,7 @@ def ledger_field(name: str, value: str) -> Found:
         return _validated(model, body)
     if collection in HISTORIES:
         model = HISTORIES[collection]
-        return _validated(model, value) if _bears(model) else Found()
+        return _validated(model, value) if model_bears(model) else Found()
     raise Undecodable(f"unknown ledger collection {collection!r}")
 
 
@@ -288,16 +287,8 @@ _FIELD_DECODERS: dict[Family, Callable[[str, str], Found]] = {
     Family.HISTORY: history_field,
 }
 
-
-@dataclass
-class FamilyReport:
-    """What one family's pass read and marked."""
-
-    keys: int = 0
-    values: int = 0
-    references: int = 0
-    trees: int = 0
-    faults: int = 0
+# A packed tree reference: its digest, then its size as 8 big-endian bytes.
+_TREE_RECORD = 40
 
 
 @dataclass
@@ -307,20 +298,44 @@ class MarkPass:
     mark: Mark
     started: float
     """The wall-clock time the pass began."""
-    trees: dict[tuple[str, str], ContentReference] = field(default_factory=dict)
-    """Every bound tree manifest, by scope and digest."""
     faults: dict[str, int] = field(default_factory=lambda: defaultdict(int))
-    """Values that did not decode, by the scope they name."""
+    """Values that did not decode, by the scope they belong to."""
     unattributed: int = 0
-    """Values that did not decode and name no readable scope."""
+    """Values that did not decode and belong to no readable scope."""
     complete: bool = False
     """Whether the pass read the whole keyspace."""
-    reports: dict[str, FamilyReport] = field(default_factory=dict)
+    interrupted: str = ""
+    """Why the pass cannot vouch for what it read, when it cannot."""
     seconds: float = 0.0
+    _trees: dict[str, bytearray] = field(default_factory=lambda: defaultdict(bytearray))
+
+    def add_tree(self, tree: ContentReference) -> None:
+        self._trees[tree.authorization_scope] += bytes.fromhex(
+            tree.content_digest
+        ) + tree.size_bytes.to_bytes(8, "big")
+
+    def tree_references(self) -> Iterator[ContentReference]:
+        """Every bound tree manifest the pass found, once per binding that names it."""
+        for scope, records in self._trees.items():
+            for at in range(0, len(records), _TREE_RECORD):
+                record = records[at : at + _TREE_RECORD]
+                yield ContentReference(
+                    authorization_scope=scope,
+                    digest_algorithm=DigestAlgorithm.SHA256,
+                    content_digest=record[:32].hex(),
+                    size_bytes=int.from_bytes(record[32:], "big"),
+                    media_type=TREE_MEDIA_TYPE,
+                )
+
+    @property
+    def trees_nbytes(self) -> int:
+        return sum(len(records) for records in self._trees.values())
 
     def gap(self, scope: str) -> str:
         """Why the pass leaves ``scope``'s coverage incomplete, or "" when it does
         not."""
+        if self.interrupted:
+            return self.interrupted
         if not self.complete:
             return "the marking pass did not finish"
         if self.unattributed:
@@ -332,6 +347,35 @@ class MarkPass:
 
 class _Stopped(Exception):
     pass
+
+
+class _Pass:
+    """The state one marking pass reads through: its result, its pacer, and what it
+    has already looked up."""
+
+    def __init__(self, result: MarkPass, pacer: Pacer) -> None:
+        self.result = result
+        self.pacer = pacer
+        self.sources: dict[str, dict[str, str]] = defaultdict(dict)
+        self.task_scopes: dict[str, str | None] = {}
+        self.workflow_scopes: dict[str, str | None] = {}
+
+    def tick(self) -> None:
+        if self.pacer.tick():
+            raise _Stopped
+
+    def pause(self) -> None:
+        if self.pacer.pause():
+            raise _Stopped
+
+
+def _owner(key: str) -> tuple[str, str] | None:
+    """Whether ``key`` belongs to a task or a workflow, and which."""
+    prefix, _, rest = key.partition(":")
+    owner_id, _, _ = rest.partition(":")
+    if prefix in ("task", "workflow") and owner_id:
+        return prefix, owner_id
+    return None
 
 
 class Marker:
@@ -361,52 +405,48 @@ class Marker:
         ``capacities``; a set ``stop`` ends the pass incomplete."""
         started = time.monotonic()
         result = MarkPass(Mark(capacities), self._clock())
-        result.reports = {family.value: FamilyReport() for family in Family}
-        pacer = Pacer(
-            stop,
-            self._values_per_pause,
-            duty=self._duty,
-            min_pause_sec=self._page_pause,
+        state = _Pass(
+            result,
+            Pacer(
+                stop,
+                self._values_per_pause,
+                duty=self._duty,
+                min_pause_sec=self._page_pause,
+            ),
         )
+        identity = self._rds.sync.server_identity()
         try:
             cursor = 0
             while True:
-                cursor, keys = self._scan_page(cursor)
+                cursor, keys = self._rds.sync.scan_step(cursor, SCAN_COUNT)
                 classified: dict[Family, list[str]] = defaultdict(list)
                 for key in keys:
-                    if (family := _family_of(key, Family)) is not None:
+                    if (family := _family_of(key)) is not None:
                         classified[family].append(key)
                 for family, members in classified.items():
-                    report = result.reports[family.value]
-                    report.keys += len(members)
-                    if family in _HASHES:
-                        for key in members:
-                            self._scan_hash(family, key, result, report, pacer)
+                    if decode := _FIELD_DECODERS.get(family):
+                        self._hashes(members, decode, identity, state)
                     elif family in (Family.TASK_STATE, Family.BLUEPRINTS):
-                        self._tasks(family, members, result, report, pacer)
+                        self._tasks(family, members, state)
                     else:
-                        self._finalizations(members, result, report, pacer)
+                        self._finalizations(members, state)
                 if cursor == 0:
-                    result.complete = True
+                    self._check_identity(identity, result)
+                    result.complete = not result.interrupted
                     break
-                if pacer.pause():
-                    break
+                state.pause()
         except _Stopped:
             pass
         result.seconds = time.monotonic() - started
         return result
 
-    def _scan_page(self, cursor: int) -> tuple[int, list[str]]:
-        with self._rds.sync.control_pipeline(transaction=False) as pipe:
-            pipe.scan(cursor, count=SCAN_COUNT)
-            next_cursor, keys = pipe.execute()[0]
-        return int(next_cursor), list(keys)
-
-    def _hscan_page(self, key: str, cursor: int) -> tuple[int, dict[str, str]]:
-        with self._rds.sync.control_pipeline(transaction=False) as pipe:
-            pipe.hscan(key, cursor, count=FIELD_COUNT)
-            next_cursor, fields = pipe.execute()[0]
-        return int(next_cursor), dict(fields)
+    def _check_identity(self, identity: str, result: MarkPass) -> None:
+        if result.interrupted or self._rds.sync.server_identity() == identity:
+            return
+        result.interrupted = (
+            "the control store restarted or another server took over mid-pass"
+        )
+        self._logger.warning("Content audit pass is incomplete: %s", result.interrupted)
 
     def _get_many(self, keys: Sequence[str]) -> list[Any]:
         """Each key's value, or the error reading it raised."""
@@ -415,106 +455,133 @@ class Marker:
                 pipe.get(key)
             return pipe.execute(raise_on_error=False)
 
-    def _sources(
-        self, wanted: Sequence[tuple[str, list[str]]]
-    ) -> dict[str, dict[str, str]]:
-        """The stored sources each workflow's task states name, by digest."""
+    def _load_sources(self, wanted: Mapping[str, set[str]], state: _Pass) -> None:
+        """Read the stored sources the pass has not read yet that task states name."""
+        missing = [
+            (workflow_id, sorted(digests - state.sources[workflow_id].keys()))
+            for workflow_id, digests in wanted.items()
+        ]
+        missing = [
+            (workflow_id, digests) for workflow_id, digests in missing if digests
+        ]
+        if not missing:
+            return
         with self._rds.sync.control_pipeline(transaction=False) as pipe:
-            for workflow_id, digests in wanted:
+            for workflow_id, digests in missing:
                 pipe.hmget(workflow_sources_key(workflow_id), digests)
             replies = pipe.execute()
-        return {
-            workflow_id: {
-                digest: text
+        for (workflow_id, digests), texts in zip(missing, replies, strict=True):
+            state.sources[workflow_id].update(
+                (digest, text)
                 for digest, text in zip(digests, texts, strict=True)
                 if text is not None
-            }
-            for (workflow_id, digests), texts in zip(wanted, replies, strict=True)
-        }
+            )
 
-    def _fault(
-        self,
-        result: MarkPass,
-        report: FamilyReport,
-        key: str,
-        exc: Exception,
-        pacer: Pacer | None = None,
-    ) -> None:
+    def _task_scope(self, task_id: str, state: _Pass) -> str | None:
+        if task_id not in state.task_scopes:
+            raw = self._rds.sync.get(task_state_key(task_id))
+            scope = None
+            try:
+                org = json.loads(raw)["record"]["org_id"] if raw else None
+                scope = org if isinstance(org, str) and org else None
+            except (ValueError, KeyError, TypeError):
+                pass
+            state.task_scopes[task_id] = scope
+        return state.task_scopes[task_id]
+
+    def _workflow_scope(self, workflow_id: str, state: _Pass) -> str | None:
+        if workflow_id not in state.workflow_scopes:
+            scope = None
+            raw = self._rds.sync.hash_mget(workflow_key(workflow_id), ["task_ids"])[0]
+            try:
+                task_ids = json.loads(raw) if raw else []
+            except ValueError:
+                task_ids = []
+            for task_id in task_ids if isinstance(task_ids, list) else []:
+                if isinstance(task_id, str) and (
+                    scope := self._task_scope(task_id, state)
+                ):
+                    break
+            state.workflow_scopes[workflow_id] = scope
+        return state.workflow_scopes[workflow_id]
+
+    def _key_scope(self, key: str, state: _Pass) -> str | None:
+        """The scope of the task or workflow ``key`` belongs to, when it can be read."""
+        match _owner(key):
+            case ("task", task_id):
+                return self._task_scope(task_id, state)
+            case ("workflow", workflow_id):
+                return self._workflow_scope(workflow_id, state)
+        return None
+
+    def _fault(self, key: str, label: str, exc: Exception, state: _Pass) -> None:
         scope = exc.scope if isinstance(exc, Undecodable) else None
-        report.faults += 1
+        scope = scope or self._key_scope(key, state)
         if scope:
-            result.faults[scope] += 1
+            state.result.faults[scope] += 1
         else:
-            result.unattributed += 1
+            state.result.unattributed += 1
         self._logger.error(
             "Content audit cannot decode %s; %s stays incomplete: %s",
-            key,
+            label,
             f"scope {scope}" if scope else "every scope",
             exc,
         )
-        if pacer is not None and pacer.tick():
-            raise _Stopped
+        state.tick()
 
-    def _add(
-        self, result: MarkPass, report: FamilyReport, found: Found, pacer: Pacer
-    ) -> None:
+    def _add(self, found: Found, state: _Pass) -> None:
         for reference in found.references:
-            result.mark.add(reference.authorization_scope, reference.content_digest)
+            state.result.mark.add(
+                reference.authorization_scope, reference.content_digest
+            )
         for tree in found.trees:
-            result.trees[(tree.authorization_scope, tree.content_digest)] = tree
-        report.references += len(found.references)
-        report.trees += len(found.trees)
-        if pacer.tick():
-            raise _Stopped
+            state.result.add_tree(tree)
+        state.tick()
 
-    def _scan_hash(
+    def _hashes(
         self,
-        family: Family,
-        key: str,
-        result: MarkPass,
-        report: FamilyReport,
-        pacer: Pacer,
-    ) -> None:
-        decode = _FIELD_DECODERS[family]
-        cursor = 0
-        while True:
-            try:
-                cursor, fields = self._hscan_page(key, cursor)
-            except ResponseError as exc:
-                if "WRONGTYPE" not in str(exc):
-                    raise
-                self._fault(result, report, key, exc, pacer)
-                return
-            for name, value in fields.items():
-                report.values += 1
-                try:
-                    found = decode(name, value)
-                except Undecodable as exc:
-                    self._fault(result, report, f"{key} field {name!r}", exc, pacer)
-                    continue
-                self._add(result, report, found, pacer)
-            if cursor == 0:
-                return
-            if pacer.pause():
-                raise _Stopped
-
-    def _tasks(
-        self,
-        family: Family,
         keys: Sequence[str],
-        result: MarkPass,
-        report: FamilyReport,
-        pacer: Pacer,
+        decode: Callable[[str, str], Found],
+        identity: str,
+        state: _Pass,
     ) -> None:
+        """Decode every field of each hash, reading the first page of all of them in
+        one round trip."""
+        for key, first in zip(
+            keys, self._rds.sync.scan_hashes(keys, FIELD_COUNT), strict=True
+        ):
+            page, paged = first, False
+            while True:
+                if isinstance(page, Exception):
+                    if not isinstance(page, ResponseError) or "WRONGTYPE" not in str(
+                        page
+                    ):
+                        raise page
+                    self._fault(key, key, page, state)
+                    break
+                cursor, fields = page
+                for name, value in fields.items():
+                    try:
+                        found = decode(name, value)
+                    except Undecodable as exc:
+                        self._fault(key, f"{key} field {name!r}", exc, state)
+                        continue
+                    self._add(found, state)
+                if cursor == 0:
+                    break
+                state.pause()
+                page, paged = self._rds.sync.scan_hash(key, cursor, FIELD_COUNT), True
+            if paged:
+                self._check_identity(identity, state.result)
+
+    def _tasks(self, family: Family, keys: Sequence[str], state: _Pass) -> None:
         """Decode task states or blueprints, which load under their workflow's stored
         sources."""
-        raws = self._get_many(keys)
-        loaded: list[tuple[str, str, Any, str | None]] = []
+        loaded: list[tuple[str, str, Any]] = []
         wanted: dict[str, set[str]] = defaultdict(set)
-        for key, raw in zip(keys, raws, strict=True):
+        for key, raw in zip(keys, self._get_many(keys), strict=True):
             if raw is None:
                 continue
-            report.values += 1
             try:
                 if isinstance(raw, Exception):
                     raise raw
@@ -522,55 +589,39 @@ class Marker:
                 records = data["tasks"] if family is Family.BLUEPRINTS else [data]
                 workflow_id = _workflow_of(records, key)
             except Exception as exc:
-                self._fault(result, report, key, exc, pacer)
+                self._fault(key, key, exc, state)
                 continue
-            org = next(
-                (r["record"].get("org_id") for r in records if "record" in r), None
-            )
-            loaded.append(
-                (key, workflow_id, raw, org if isinstance(org, str) else None)
-            )
+            loaded.append((key, workflow_id, data))
             for record in records:
                 if isinstance(digest := record.get("source_digest"), str):
                     wanted[workflow_id].add(digest)
-            if pacer.tick():
-                raise _Stopped
-        sources = self._sources(
-            [(workflow_id, sorted(digests)) for workflow_id, digests in wanted.items()]
-        )
+            state.tick()
+        self._load_sources(wanted, state)
         model: type[BaseModel] = (
             TaskBlueprints if family is Family.BLUEPRINTS else PersistedTask
         )
-        for key, workflow_id, raw, org in loaded:
+        for key, workflow_id, data in loaded:
             try:
-                value = model.model_validate_json(
-                    raw, context=load_context(sources.get(workflow_id, {}))
+                value = model.model_validate(
+                    data, context=load_context(state.sources[workflow_id])
                 )
             except ValidationError as exc:
-                self._fault(result, report, key, Undecodable(str(exc), org), pacer)
+                self._fault(key, key, exc, state)
                 continue
-            self._add(result, report, Found.of(value), pacer)
+            self._add(Found.of(value), state)
 
-    def _finalizations(
-        self,
-        keys: Sequence[str],
-        result: MarkPass,
-        report: FamilyReport,
-        pacer: Pacer,
-    ) -> None:
-        raws = self._get_many(keys)
-        for key, raw in zip(keys, raws, strict=True):
+    def _finalizations(self, keys: Sequence[str], state: _Pass) -> None:
+        for key, raw in zip(keys, self._get_many(keys), strict=True):
             if raw is None:
                 continue
-            report.values += 1
             try:
                 if isinstance(raw, Exception):
                     raise Undecodable(str(raw), finalization_scope(key) or None)
                 found = finalization_value(key, raw)
             except Undecodable as exc:
-                self._fault(result, report, key, exc, pacer)
+                self._fault(key, key, exc, state)
                 continue
-            self._add(result, report, found, pacer)
+            self._add(found, state)
 
 
 def _workflow_of(records: Sequence[Any], key: str) -> str:
@@ -591,7 +642,6 @@ def _workflow_of(records: Sequence[Any], key: str) -> str:
 __all__ = [
     "KEY_FAMILIES",
     "Family",
-    "FamilyReport",
     "Found",
     "MarkPass",
     "Marker",

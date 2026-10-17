@@ -11,6 +11,7 @@ from typing import Any
 
 import fakeredis
 import pytest
+from pydantic import BaseModel
 
 import server.clients.redis as redis_module
 import server.reclamation.marking as marking
@@ -36,9 +37,12 @@ from server.reclamation.marking import (
     Marker,
     MarkPass,
 )
+from server.reclamation.references import reference_paths
 from server.registries.artifacts import artifact_field
 from server.registries.task_states import PersistedTask
-from server.registries.workflow import WorkflowRegistry, WorkflowSched
+from server.registries.workflow import WorkflowRecord, WorkflowRegistry, WorkflowSched
+from server.resident.state import ResidentSnapshot
+from server.serve.binding import ServeSnapshot
 from server.task.history import (
     CERTIFICATE_FIELD,
     HistoryCertificate,
@@ -46,13 +50,14 @@ from server.task.history import (
     TaskHistory,
 )
 from server.task.models import TaskRecord, TaskStatus
+from server.task.v2.representations.bundle import PersistedV2Workflow
 from shared.content import ContentReference, reference_for
 from shared.content.tree import TREE_MEDIA_TYPE
 from shared.outcome import OutcomeManifest
 from shared.tasks.artifact_binding import ArtifactBinding, ArtifactKind
 from shared.tasks.result_binding import ResultBinding, ResultMember
 from tests.server.orchestration.helpers import WORKFLOW_ID, chain_bundle, engine
-from tests.server.redis_helpers import fake_redis_client
+from tests.server.redis_helpers import fake_redis_client, restart_fake_server
 
 _A = "org-a"
 _B = "org-b"
@@ -75,7 +80,7 @@ def _identity(reference: ContentReference) -> Identity:
 
 class _Fixture:
     def __init__(self) -> None:
-        server = fakeredis.FakeServer()
+        self.server = server = fakeredis.FakeServer()
         self.rds = fake_redis_client(server)
         self.raw = fakeredis.FakeRedis(server=server, decode_responses=True)
         self.marker = Marker(self.rds, _LOGGER, page_pause_sec=0, duty=1.0)
@@ -260,15 +265,12 @@ def test_every_reference_each_family_binds_is_marked(fx: _Fixture) -> None:
         _A: sum(scope == _A for scope, _ in expected),
         _B: sum(scope == _B for scope, _ in expected),
     }
-    assert set(result.trees) == trees
-    assert all(
-        (r.authorization_scope, r.content_digest) == identity
-        for identity, r in result.trees.items()
-    )
+    found = list(result.tree_references())
+    assert {_identity(r) for r in found} == trees
+    assert all(r.media_type == TREE_MEDIA_TYPE for r in found)
+    assert result.trees_nbytes == 40 * len(found)
     assert result.unattributed == 0 and not result.faults
     assert result.gap(_A) == result.gap(_B) == ""
-    assert set(result.reports) == {family.value for family in Family}
-    assert all(report.keys for report in result.reports.values())
 
 
 def test_one_scan_of_the_keyspace_reads_every_family(
@@ -276,13 +278,13 @@ def test_one_scan_of_the_keyspace_reads_every_family(
 ) -> None:
     expected, _ = _seed_everything(fx)
     pages: list[int] = []
-    original = fx.marker._scan_page
+    original = fx.rds.sync.scan_step
 
-    def counting(cursor: int) -> tuple[int, list[str]]:
+    def counting(cursor: int, count: int) -> tuple[int, list[str]]:
         pages.append(cursor)
-        return original(cursor)
+        return original(cursor, count)
 
-    monkeypatch.setattr(fx.marker, "_scan_page", counting)
+    monkeypatch.setattr(fx.rds.sync, "scan_step", counting)
     result = fx.run()
 
     assert pages == [0]
@@ -301,18 +303,23 @@ def test_a_large_hash_is_read_a_page_of_fields_at_a_time(
         },
     )
     pages: list[int] = []
-    original = fx.marker._hscan_page
+    first, later = fx.rds.sync.scan_hashes, fx.rds.sync.scan_hash
 
-    def counting(key: str, cursor: int) -> tuple[int, dict[str, str]]:
-        cursor, fields = original(key, cursor)
+    def counting_first(keys: Any, count: int) -> Any:
+        replies = first(keys, count)
+        pages.extend(len(r[1]) for r in replies if not isinstance(r, Exception))
+        return replies
+
+    def counting(key: str, cursor: int, count: int) -> tuple[int, dict[str, str]]:
+        cursor, fields = later(key, cursor, count)
         pages.append(len(fields))
         return cursor, fields
 
-    monkeypatch.setattr(fx.marker, "_hscan_page", counting)
+    monkeypatch.setattr(fx.rds.sync, "scan_hashes", counting_first)
+    monkeypatch.setattr(fx.rds.sync, "scan_hash", counting)
     result = fx.run()
 
     assert all(result.mark.binds(_A, ref.content_digest) for ref in refs)
-    assert result.reports[Family.LEDGER.value].values == 1500
     assert len(pages) > 1 and sum(pages) == 1500
     assert max(pages) < 1500
 
@@ -435,7 +442,8 @@ def test_the_pass_waits_on_stop_every_few_values_and_between_pages(
     trail = _Trail()
     marker = Marker(fx.rds, _LOGGER, page_pause_sec=0.0001, duty=1.0)
     decode, finalize = marking.ledger_field, marking.finalization_value
-    scan_page, hscan_page = marker._scan_page, marker._hscan_page
+    scan_step = fx.rds.sync.scan_step
+    scan_hash, scan_hashes = fx.rds.sync.scan_hash, fx.rds.sync.scan_hashes
 
     def decoding(name: str, value: str) -> Any:
         trail.steps.append("value")
@@ -445,19 +453,24 @@ def test_the_pass_waits_on_stop_every_few_values_and_between_pages(
         trail.steps.append("value")
         return finalize(key, value)
 
-    def scanning(cursor: int) -> tuple[int, list[str]]:
+    def scanning(cursor: int, count: int) -> tuple[int, list[str]]:
         trail.steps.append("page:keys")
-        return scan_page(cursor)
+        return scan_step(cursor, count)
 
-    def hscanning(key: str, cursor: int) -> tuple[int, dict[str, str]]:
+    def hscanning(key: str, cursor: int, count: int) -> tuple[int, dict[str, str]]:
         trail.steps.append(f"page:{key}")
-        return hscan_page(key, cursor)
+        return scan_hash(key, cursor, count)
+
+    def first_pages(keys: Any, count: int) -> Any:
+        trail.steps.extend(f"page:{key}" for key in keys)
+        return scan_hashes(keys, count)
 
     monkeypatch.setitem(marking._FIELD_DECODERS, Family.LEDGER, decoding)
     monkeypatch.setattr(marking, "finalization_value", finalizing)
     monkeypatch.setattr(marking, "SCAN_COUNT", 50)
-    monkeypatch.setattr(marker, "_scan_page", scanning)
-    monkeypatch.setattr(marker, "_hscan_page", hscanning)
+    monkeypatch.setattr(fx.rds.sync, "scan_step", scanning)
+    monkeypatch.setattr(fx.rds.sync, "scan_hash", hscanning)
+    monkeypatch.setattr(fx.rds.sync, "scan_hashes", first_pages)
 
     result = marker.run(_WatchedStop(trail))
 
@@ -530,4 +543,112 @@ def test_each_classified_builder_keys_its_own_family() -> None:
         else:
             key = builder
         assert isinstance(key, str), name
-        assert marking._family_of(key, Family) is family, name
+        assert marking._family_of(key) is family, name
+
+
+def test_a_control_store_restart_mid_pass_leaves_every_scope_incomplete(
+    fx: _Fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_everything(fx)
+    for i in range(300):
+        fx.raw.set(f"filler:{i}", "x")
+    scan_step = fx.rds.sync.scan_step
+    pages = 0
+
+    def restarting(cursor: int, count: int) -> tuple[int, list[str]]:
+        nonlocal pages
+        pages += 1
+        if pages == 2:
+            restart_fake_server(fx.server, "restarted")
+        return scan_step(cursor, count)
+
+    monkeypatch.setattr(marking, "SCAN_COUNT", 50)
+    monkeypatch.setattr(fx.rds.sync, "scan_step", restarting)
+    result = fx.run()
+
+    assert pages > 2
+    assert not result.complete and result.interrupted
+    assert "restarted" in result.gap(_A) and "restarted" in result.gap(_B)
+
+
+def test_a_restart_while_a_large_hash_is_read_leaves_the_pass_incomplete(
+    fx: _Fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fx.raw.hset(
+        workflow_ds_key("wfl-big"),
+        mapping={
+            f"records:[{i}]": _record(_ref(f"r-{i}".encode())).model_dump_json()
+            for i in range(1500)
+        },
+    )
+    scan_hash = fx.rds.sync.scan_hash
+
+    def restarting(key: str, cursor: int, count: int) -> tuple[int, dict[str, str]]:
+        restart_fake_server(fx.server, "promoted")
+        return scan_hash(key, cursor, count)
+
+    monkeypatch.setattr(fx.rds.sync, "scan_hash", restarting)
+    result = fx.run()
+
+    assert not result.complete and result.gap(_A)
+
+
+def test_an_undecodable_ledger_field_leaves_its_workflows_scope_incomplete(
+    fx: _Fixture,
+) -> None:
+    record = _task_record("tsk-1", _ref(b"result", _B), _B)
+    WorkflowRegistry(fx.rds).save_task_states([PersistedTask(record=record)])
+    fx.raw.hset(
+        "workflow:wfl-tasks",
+        mapping=WorkflowRecord(workflow_id="wfl-tasks", task_ids=["tsk-1"]).model_dump(
+            mode="json"
+        )
+        | {"task_ids": '["tsk-1"]'},
+    )
+    _ledger(fx, "wfl-tasks", [_ref(b"a", _B), _ref(b"b", _B)])
+    fx.raw.hset(workflow_ds_key("wfl-tasks"), "records:[1]", '{"value_ref": 3}')
+
+    result = fx.run()
+
+    assert result.faults == {_B: 1} and result.unattributed == 0
+    assert result.gap(_B) and result.gap(_A) == ""
+
+
+def test_an_undecodable_catalog_binding_leaves_its_tasks_scope_incomplete(
+    fx: _Fixture,
+) -> None:
+    record = _task_record("tsk-1", _ref(b"result", _B), _B)
+    WorkflowRegistry(fx.rds).save_task_states([PersistedTask(record=record)])
+    fx.raw.hset(task_artifacts_key("tsk-1"), "final/x", "not a binding")
+
+    result = fx.run()
+
+    assert result.faults == {_B: 1} and result.unattributed == 0
+    assert result.gap(_A) == ""
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        WorkflowRecord,
+        WorkflowSched,
+        PersistedV2Workflow,
+        ResidentSnapshot,
+        ServeSnapshot,
+    ],
+)
+def test_a_family_marked_reference_free_stores_a_model_bearing_no_reference(
+    model: type[BaseModel],
+) -> None:
+    assert reference_paths(model) == frozenset()
+
+
+def test_a_tree_a_catalog_binding_names_twice_is_listed_once() -> None:
+    tree = _ref(b"manifest", media_type=TREE_MEDIA_TYPE)
+    binding = ArtifactBinding(
+        name="model", kind=ArtifactKind.TREE, reference=tree, size_bytes=3
+    )
+
+    found = marking.artifact_field("final/model", binding.model_dump_json())
+
+    assert found.trees == [tree]
