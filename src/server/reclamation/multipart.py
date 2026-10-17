@@ -22,7 +22,7 @@ import time
 from collections.abc import Set
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from shared.content.multipart import MULTIPART_ACK_FRAME_KIND, MultipartVerdict
 from shared.schemas.command import MediatedOpMessage
@@ -36,7 +36,9 @@ from ..clients.redis import (
     reclaim_multipart_key,
     worker_key,
 )
-from ..registries.worker import WorkerRegistry
+
+if TYPE_CHECKING:
+    from ..registries.worker import WorkerRegistry
 
 # KEYS: records, dispatch index, scopes[, finalization scope, finalization].
 # ARGV: upload id, object key, owner, registration, initiated at (ms), scope.
@@ -264,6 +266,19 @@ class MultipartStore:
             )
         )
 
+    async def transfer_async(
+        self, scope: str, dispatch_id: str, owner: MultipartOwner
+    ) -> int:
+        keys = [
+            reclaim_multipart_key(scope),
+            reclaim_multipart_dispatch_key(scope, dispatch_id),
+        ]
+        return int(
+            await self._rds.asyncio.eval(
+                _TRANSFER, len(keys), *keys, dispatch_id, owner.encode()
+            )
+        )
+
     def release(self, scope: str, dispatch_id: str) -> None:
         """Drop a dispatch's index once its life as an owner has ended: the dispatch
         ended owing no upload, or the upload its success left owed settled.
@@ -271,6 +286,11 @@ class MultipartStore:
         The records it owned stay until the store no longer holds their uploads open.
         """
         self._rds.sync.delete(reclaim_multipart_dispatch_key(scope, dispatch_id))
+
+    async def release_async(self, scope: str, dispatch_id: str) -> None:
+        await self._rds.asyncio.delete(
+            reclaim_multipart_dispatch_key(scope, dispatch_id)
+        )
 
     def prune(self, scope: str, open_ids: Set[str], registered_before: float) -> int:
         """Remove each record registered before ``registered_before`` whose UploadId
@@ -343,7 +363,7 @@ class MultipartRegistrations:
         self,
         store: MultipartStore,
         owner_of: OwnerResolver,
-        worker_registry: WorkerRegistry,
+        worker_registry: "WorkerRegistry",
         logger: logging.Logger,
     ) -> None:
         self._store = store

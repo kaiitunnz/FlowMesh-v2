@@ -187,8 +187,8 @@ type Retiring = Callable[[list[ContentReference]], list[str]]
 def probe_upload(
     results: ResultReader,
     artifacts: Iterable[ArtifactBinding],
-    stored: set[ContentReference] | None = None,
-    retiring: Retiring | None = None,
+    stored: set[ContentReference] | None,
+    retiring: Retiring,
 ) -> dict[str, ArtifactLoss]:
     """Return the accepted artifacts missing from the store, each with why; raises
     ``StoreUncertain`` when the store could not say, and ``ObjectsRetiring`` when
@@ -205,7 +205,7 @@ def probe_upload(
             continue
         try:
             objects = list(_objects(results, binding))
-            if retiring is not None and (removing := retiring(objects)):
+            if removing := retiring(objects):
                 raise ObjectsRetiring(
                     f"{len(removing)} object(s) of {binding.name} are being "
                     f"removed from the store: {', '.join(removing[:5])}"
@@ -256,6 +256,7 @@ class UploadReconciler:
         results: ResultReader,
         take: Callable[[str], UploadCheck | None],
         settle: Callable[[UploadCheck, dict[str, ArtifactLoss]], None],
+        retiring: Retiring,
         logger: logging.Logger,
         retry_sec: float = RECONCILE_RETRY_SEC,
         clock: Callable[[], float] = time.monotonic,
@@ -274,9 +275,7 @@ class UploadReconciler:
         self._stopped = False
         self._run_thread = run_thread
         self._thread: threading.Thread | None = None
-        self.retiring: Retiring | None = None
-        """Finds the objects being removed from the store, which keep an upload
-        owed."""
+        self._retiring = retiring
 
     def _ensure_thread(self) -> None:
         if not self._run_thread or self._thread is not None:
@@ -325,7 +324,7 @@ class UploadReconciler:
                 self._stored.pop(task_id, None)
                 return
             stored = self._stored.setdefault(task_id, set())
-            lost = probe_upload(self._results, check.artifacts, stored, self.retiring)
+            lost = probe_upload(self._results, check.artifacts, stored, self._retiring)
             self._settle(check, lost)
             self._stored.pop(task_id, None)
         except ObjectsRetiring as exc:
@@ -347,7 +346,8 @@ def manual_reconciler(
     results: ResultReader,
     take: Callable[[str], UploadCheck | None],
     settle: Callable[[UploadCheck, dict[str, ArtifactLoss]], None],
+    retiring: Retiring,
     logger: logging.Logger,
 ) -> UploadReconciler:
     """A reconciler its owner drives itself, which starts no thread."""
-    return UploadReconciler(results, take, settle, logger, run_thread=False)
+    return UploadReconciler(results, take, settle, retiring, logger, run_thread=False)

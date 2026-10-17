@@ -26,6 +26,7 @@ from server.orchestration.outcomes import (
     is_replayable,
     next_on_uncertain,
 )
+from server.reclamation.pins import Retirement
 from server.registries.history import HistoryCensus
 from server.registries.workflow import (
     PersistedTask,
@@ -131,6 +132,15 @@ class FakeRegistry(StoredTaskStates, StoredLedgers):
 
     async def claim_root_epoch_async(self) -> int:
         return self.claim_root_epoch()
+
+    def retirement(self, scope: str, digests: Sequence[str]) -> dict[str, Retirement]:
+        return dict.fromkeys(digests, Retirement.NONE)
+
+    def transfer_multipart(self, scope: str, dispatch_id: str) -> None:
+        pass
+
+    def release_multipart(self, scope: str, dispatch_id: str) -> None:
+        pass
 
     async def open_workflow_ids_async(self) -> set[str]:
         return set(self.workflow_task_ids)

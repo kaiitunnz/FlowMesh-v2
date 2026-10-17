@@ -110,7 +110,7 @@ from ...orchestration.tool_dispatch import (
     ToolOutcome,
     ToolOutcomeStatus,
 )
-from ...reclamation.multipart import MultipartOwner, MultipartStore
+from ...reclamation.multipart import MultipartOwner
 from ...reclamation.pins import Nonces
 from ...reclamation.retirement import StagedRetirement, StagedStanding, StagedVerdict
 from ...registries.history import HistoryPublication, StoredTask
@@ -226,6 +226,7 @@ from .after_commit import (
     PublicationJoint,
     Purge,
     Reap,
+    ReleaseMultipart,
     Revoke,
     Settled,
     SettlePublication,
@@ -235,6 +236,7 @@ from .after_commit import (
 from .agent_inputs import AgentInputs
 from .artifact_uploads import (
     ArtifactUploads,
+    Retiring,
     UploadCheck,
     UploadReconciler,
     manual_reconciler,
@@ -524,6 +526,7 @@ class TaskRuntime:
                 ResultReader,
                 Callable[[str], UploadCheck | None],
                 Callable[[UploadCheck, dict[str, ArtifactLoss]], None],
+                Retiring,
                 logging.Logger,
             ],
             UploadReconciler,
@@ -632,10 +635,15 @@ class TaskRuntime:
         )
 
         self._uploads = ArtifactUploads()
-        self._multipart: MultipartStore | None = None
-        self._retirement: StagedRetirement | None = None
+        # Each staged upload settles durable only once no object it names is being
+        # retired and each retired before is stored again.
+        self._retirement = StagedRetirement(workflow_registry, results.backed)
         self._reconciler = reconciler(
-            results, self._upload_check, self._settle_upload_from_store, logger
+            results,
+            self._upload_check,
+            self._settle_upload_from_store,
+            self._retirement.retiring,
+            logger,
         )
 
         self._lock = threading.RLock()
@@ -2165,10 +2173,9 @@ class TaskRuntime:
             case UploadAck(worker_id=worker_id, settled=settled):
                 self.send_upload_settled(worker_id, settled)
             case TransferMultipart(scope=scope, dispatch_id=dispatch_id):
-                if self._multipart is not None:
-                    self._multipart.transfer(
-                        scope, dispatch_id, MultipartOwner.upload(dispatch_id)
-                    )
+                self._workflow_registry.transfer_multipart(scope, dispatch_id)
+            case ReleaseMultipart(scope=scope, dispatch_id=dispatch_id):
+                self._workflow_registry.release_multipart(scope, dispatch_id)
             case SettlePublication(joint=joint, part=part):
                 if joint.arrive(part):
                     if joint.assertion is not None:
@@ -3934,13 +3941,12 @@ class TaskRuntime:
         artifacts, when it reported them staged rather than stored; the first record is
         the task the dispatch ran.
 
-        A report the dispatch sent ahead of its success applies at once: a receipt
-        settles the upload durable, and an upload that cannot finish is settled from
-        the store.
+        A report the dispatch sent ahead of its success applies at once: an upload that
+        cannot finish is settled from the store, and a receipt waits for the report its
+        worker repeats on hearing the upload owed.
         """
         if not payload.get(ARTIFACTS_PENDING) or not worker_id or not dispatch_id:
             return
-        now = time.time()
         # A success replayed after its registration ended owes what only the store
         # can settle.
         departed = self._uploads.departed_locked(worker_id)
@@ -3962,22 +3968,18 @@ class TaskRuntime:
                 owner_id=worker_id,
             )
             if receipt is not None and receipt.dispatch_id == dispatch_id:
-                match receipt.report:
-                    case UploadReport.UPLOADED if self._retirement is None:
-                        upload = upload.settle({}, now)
-                    case UploadReport.UPLOADED:
-                        # Settled by the report its worker repeats on hearing the
-                        # upload is pending, once its objects' retirement is checked.
-                        pass
-                    case UploadReport.UNUPLOADABLE:
-                        self._unuploadable_locked(record.task_id, worker_id, receipt)
+                # An early UPLOADED settles by the report its worker repeats on
+                # hearing the upload is pending, once its objects' retirement is
+                # checked.
+                if receipt.report is UploadReport.UNUPLOADABLE:
+                    self._unuploadable_locked(record.task_id, worker_id, receipt)
             record_internal.artifact_upload = upload
             self._uploads.track_locked(record)
             owed = True
             if departed and upload.pending:
                 self._uploads.fence_locked(record.task_id)
                 self._reconciler.request(record.task_id)
-        if owed and self._multipart is not None:
+        if owed:
             self._file_locked(
                 records[0].task_id,
                 TransferMultipart(records[0].org_id, dispatch_id),
@@ -4123,10 +4125,8 @@ class TaskRuntime:
         self, task_id: str, worker_id: str, dispatch_id: str
     ) -> tuple[StagedVerdict, frozenset[ContentReference]] | None:
         """Check the objects an owed upload names against their retirement, off the
-        lock, with the retired tree members the check covered; None when no check
-        applies."""
-        if (retirement := self._retirement) is None:
-            return None
+        lock, with the retired tree members the check covered; None when the upload is
+        not owed by that dispatch."""
         with self._lock:
             record = self._tasks.get(task_id)
             upload = record.internal.artifact_upload if record is not None else None
@@ -4147,7 +4147,7 @@ class TaskRuntime:
             retired = frozenset(self._retired_members.get(task_id, ()))
             references.extend(retired)
         try:
-            return retirement.check(references), retired
+            return self._retirement.check(references), retired
         except Exception as exc:
             self._logger.warning(
                 "Could not check the retirement of %s's upload: %s", task_id, exc
@@ -4330,6 +4330,10 @@ class TaskRuntime:
         self._uploads.track_locked(record)
         self._committer.commit_locked(record.task_id, sched=False)
         self._ack_upload_locked(record, upload.owner_id)
+        if not self._uploads.owed_for_dispatch_locked(upload.dispatch_id):
+            self._file_locked(
+                record.task_id, ReleaseMultipart(record.org_id, upload.dispatch_id)
+            )
         if settled.lost:
             self._logger.error("%s", settled.failure(record.task_id))
         self._inputs.wake_uploaded_locked(record.task_id)
@@ -4606,18 +4610,6 @@ class TaskRuntime:
         with self._lock:
             record = self._tasks.get(task_id)
         return record.org_id if record is not None else ""
-
-    def set_staged_retirement(self, retirement: StagedRetirement) -> None:
-        """Settle a staged upload durable only once no object it names is being
-        retired, and each retired before is stored again; an upload settled from the
-        store waits while one is being retired."""
-        self._retirement = retirement
-        self._reconciler.retiring = retirement.retiring
-
-    def set_multipart_store(self, store: MultipartStore) -> None:
-        """Move a dispatch's registered multipart uploads to the upload obligation its
-        success leaves owed, once that obligation is durable."""
-        self._multipart = store
 
     def multipart_owner(
         self, task_id: str, worker_id: str, dispatch_id: str | None

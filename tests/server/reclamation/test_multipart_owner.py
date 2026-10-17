@@ -5,7 +5,7 @@ from typing import Any, cast
 
 import fakeredis
 
-from server.clients.redis import reclaim_multipart_key
+from server.clients.redis import reclaim_multipart_dispatch_key, reclaim_multipart_key
 from server.reclamation.multipart import MultipartOwner, MultipartStore
 from shared.tasks.artifact_upload import UploadReport
 from tests.server.redis_helpers import fake_redis_client
@@ -15,7 +15,6 @@ from tests.server.task.test_artifact_uploads import _dispatched, _Setup
 def _wired() -> tuple[_Setup, MultipartStore, fakeredis.FakeRedis]:
     setup = _dispatched()
     store = MultipartStore(fake_redis_client(setup.server))
-    setup.runtime.set_multipart_store(store)
     return setup, store, fakeredis.FakeRedis(server=setup.server, decode_responses=True)
 
 
@@ -58,12 +57,21 @@ def test_a_staged_success_moves_its_dispatchs_uploads_to_the_owed_upload() -> No
 
 
 def test_a_settled_upload_owns_nothing_more() -> None:
-    setup, _, _ = _wired()
-    setup.succeed([setup.tree(stored=False)])
+    setup, store, raw = _wired()
+    scope, owner = cast(
+        tuple[str, MultipartOwner],
+        setup.runtime.multipart_owner(setup.train, "wkr-1", "dsp-1"),
+    )
+    store.register(scope, "up-1", "org/sha256/a", owner, "wkr-1")
+    setup.succeed([setup.file(b"weights", "weights.bin", stored=True)])
+    assert raw.exists(reclaim_multipart_dispatch_key("org", "dsp-1"))
 
     setup.report(UploadReport.UPLOADED)
 
     assert setup.runtime.multipart_owner(setup.train, "wkr-1", "dsp-1") is None
+    assert not raw.exists(reclaim_multipart_dispatch_key("org", "dsp-1"))
+    # Its record stays until the store no longer holds the upload open.
+    assert _owner(raw, "up-1")["owner"]["kind"] == "upload"
 
 
 def test_a_success_owing_no_upload_moves_nothing() -> None:

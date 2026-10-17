@@ -91,6 +91,12 @@ return out
 """
 
 
+# The reasons a bucket is not collected that still let its open uploads be listed.
+_UPLOADS_LISTABLE = frozenset(
+    {Ineligibility.UNVERSIONED, Ineligibility.VERSIONING_UNKNOWN}
+)
+
+
 @dataclass
 class ScopeAudit:
     """What one sweep found in one scope."""
@@ -247,6 +253,11 @@ class AuditCollector:
         self._eligible.set(1 if eligibility.eligible else 0)
         if not eligibility.eligible:
             self._report_ineligible(eligibility, sweep_id)
+            # Open uploads list without versioning, so their records stay bounded on
+            # any bucket the root can list.
+            if eligibility.reason in _UPLOADS_LISTABLE and not stop.is_set():
+                self._audit_uploads(result, sweep_id)
+                self._publish(result)
             return result
         self._last_ineligible = None
         assert self._admin is not None
@@ -260,9 +271,7 @@ class AuditCollector:
             if self._audit is not None:
                 self._audit.record("scope", sweep=sweep_id, **asdict(audit))
         if not stop.is_set():
-            result.uploads = self._uploads()
-            if self._audit is not None:
-                self._audit.record("uploads", sweep=sweep_id, **asdict(result.uploads))
+            self._audit_uploads(result, sweep_id)
         result.seconds = time.monotonic() - started
         self._publish(result)
         return result
@@ -366,6 +375,11 @@ class AuditCollector:
             else:
                 audit.kept += len(versions)
         return ""
+
+    def _audit_uploads(self, result: SweepAudit, sweep_id: str) -> None:
+        result.uploads = self._uploads()
+        if self._audit is not None:
+            self._audit.record("uploads", sweep=sweep_id, **asdict(result.uploads))
 
     def _uploads(self) -> UploadAudit:
         assert self._admin is not None

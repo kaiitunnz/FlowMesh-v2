@@ -22,8 +22,6 @@ from server.clients.redis import (
     workflow_v2_key,
 )
 from server.config import OrchestrationConfig
-from server.reclamation.pins import PinStore
-from server.reclamation.retirement import StagedRetirement
 from server.registries.task_states import load_task_state
 from server.registries.workflow import WorkflowRegistry, WorkflowStatus
 from server.task.models import TaskRecord, TaskStatus
@@ -289,16 +287,19 @@ def test_a_report_from_another_registration_or_dispatch_settles_nothing() -> Non
     assert setup.workers.answers(setup.train)[-1] is UploadDisposition.REJECTED
 
 
-def test_a_receipt_ahead_of_its_success_settles_it_at_acceptance() -> None:
+def test_a_receipt_ahead_of_its_success_settles_when_its_worker_reports_again() -> None:
     setup = _dispatched()
+    staged = setup.file(b"weights", "weights.bin", stored=True)
 
     setup.report(UploadReport.UPLOADED)
     assert setup.record(setup.train).status == TaskStatus.DISPATCHED
-    setup.succeed([setup.tree(stored=False)])
+    setup.succeed([staged])
+    assert setup.workers.answers(setup.train) == [UploadDisposition.PENDING]
 
+    setup.report(UploadReport.UPLOADED)
     upload = setup.record(setup.train).internal.artifact_upload
     assert upload is not None and upload.state is ArtifactDurability.DURABLE
-    assert setup.workers.answers(setup.train) == [UploadDisposition.DURABLE]
+    assert _last(setup).disposition is UploadDisposition.DURABLE
 
 
 def test_a_success_reported_again_hears_the_upload_owed_again() -> None:
@@ -876,9 +877,6 @@ def test_a_staged_tree_that_is_not_one_is_lost_and_its_task_stays_done() -> None
 
 
 def _retirement(setup: _Setup) -> fakeredis.FakeRedis:
-    setup.runtime.set_staged_retirement(
-        StagedRetirement(PinStore(fake_redis_client(setup.server)), setup.reader.backed)
-    )
     return fakeredis.FakeRedis(server=setup.server, decode_responses=True)
 
 

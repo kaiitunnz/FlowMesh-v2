@@ -181,6 +181,19 @@ def _keys(scope: str) -> list[str]:
     ]
 
 
+def _retirement(
+    digests: Sequence[str], deleting: list[Any], history: list[Any]
+) -> dict[str, Retirement]:
+    return {
+        digest: (
+            Retirement.RETIRING
+            if retiring is not None
+            else Retirement.RETIRED if retired is not None else Retirement.NONE
+        )
+        for digest, retiring, retired in zip(digests, deleting, history, strict=True)
+    }
+
+
 class PinStore:
     """Acquires and releases assertion holds in the control store."""
 
@@ -261,13 +274,18 @@ class PinStore:
             with self._rds.sync.control_pipeline(transaction=False) as pipe:
                 pipe.hmget(reclaim_deleting_key(scope), list(chunk))
                 pipe.hmget(reclaim_history_key(scope), list(chunk))
-                deleting, history = pipe.execute()
-            for digest, retiring, retired in zip(chunk, deleting, history, strict=True):
-                standing[digest] = (
-                    Retirement.RETIRING
-                    if retiring is not None
-                    else Retirement.RETIRED if retired is not None else Retirement.NONE
-                )
+                standing.update(_retirement(chunk, *pipe.execute()))
+        return standing
+
+    async def retirement_async(
+        self, scope: str, digests: Sequence[str]
+    ) -> dict[str, Retirement]:
+        standing: dict[str, Retirement] = {}
+        for chunk in batched(digests, CHUNK):
+            async with self._rds.asyncio.control_pipeline(transaction=False) as pipe:
+                pipe.hmget(reclaim_deleting_key(scope), list(chunk))
+                pipe.hmget(reclaim_history_key(scope), list(chunk))
+                standing.update(_retirement(chunk, *await pipe.execute()))
         return standing
 
     def release_older(self, epoch: int, page: int = CHUNK) -> int:

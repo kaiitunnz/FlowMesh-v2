@@ -69,7 +69,6 @@ from .orchestration.telemetry import build_workflow_span_emitter
 from .reclamation.multipart import MultipartRegistrations, MultipartStore
 from .reclamation.pins import PinStore
 from .reclamation.publications import PublicationHolds
-from .reclamation.retirement import StagedRetirement
 from .reclamation.service import start_reclamation
 from .reclamation.trees import TreeExpander
 from .registries import WorkerRegistry, WorkflowRegistry
@@ -479,12 +478,10 @@ if IS_ROOT_NODE:
 
     WORKFLOW_SPAN_EMITTER = build_workflow_span_emitter(SERVER_TRACER, config.telemetry)
     MULTIPART_STORE = MultipartStore(REDIS_CLIENT)
-    RUNTIME.set_multipart_store(MULTIPART_STORE)
     TREE_EXPANDER = TreeExpander(
         REDIS_CLIENT, RESULT_READER.open, RESULT_READER.stored_size, logger
     )
     pins = PinStore(REDIS_CLIENT)
-    RUNTIME.set_staged_retirement(StagedRetirement(pins, RESULT_READER.backed))
     PUBLICATION_HOLDS = PublicationHolds(
         pins,
         lambda: RUNTIME.nonces if RUNTIME else None,

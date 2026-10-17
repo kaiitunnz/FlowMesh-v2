@@ -10,6 +10,7 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 
 from server.clients.redis import workflow_credential_key
 from server.config import OrchestrationConfig
+from server.reclamation.pins import Retirement
 from server.registries.workflow import (
     PersistedTask,
     WorkflowRecord,
@@ -109,6 +110,15 @@ class FakeWorkflowRegistry(StoredTaskStates, StoredLedgers):
 
     async def claim_root_epoch_async(self) -> int:
         return self.claim_root_epoch()
+
+    def retirement(self, scope: str, digests: Sequence[str]) -> dict[str, Retirement]:
+        return dict.fromkeys(digests, Retirement.NONE)
+
+    def transfer_multipart(self, scope: str, dispatch_id: str) -> None:
+        pass
+
+    def release_multipart(self, scope: str, dispatch_id: str) -> None:
+        pass
 
     async def open_workflow_ids_async(self) -> set[str]:
         return self.get_workflow_ids()

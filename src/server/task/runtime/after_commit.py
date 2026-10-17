@@ -141,6 +141,15 @@ class TransferMultipart:
     dispatch_id: str
 
 
+@dataclass(frozen=True)
+class ReleaseMultipart:
+    """End a dispatch's ownership of the multipart uploads it registered in a scope:
+    it ended owing no upload, or the upload its success left owed settled."""
+
+    scope: str
+    dispatch_id: str
+
+
 type AfterCommit = (
     CreditRelease
     | Reap
@@ -152,6 +161,7 @@ type AfterCommit = (
     | AuthorizeTurn
     | UploadAck
     | TransferMultipart
+    | ReleaseMultipart
     | SettlePublication
 )
 

@@ -364,6 +364,30 @@ def test_an_unversioned_bucket_is_ineligible_and_keeps_everything(status) -> Non
     assert fx.audit("ineligible")[0]["reason"] == Ineligibility.UNVERSIONED.value
 
 
+@pytest.mark.parametrize("status", [None, "Suspended"])
+def test_an_unversioned_bucket_still_drops_the_registrations_of_closed_uploads(
+    status,
+) -> None:
+    fx = _Fixture(StubS3(versioning=status))
+    owner = MultipartOwner.dispatch("dsp-1", "tsk-1")
+    for upload_id in ("u-open", "u-closed"):
+        MultipartStore(fx.rds).register(_A, upload_id, "k", owner, "wkr-1", _NOW - 10)
+    fx.s3.uploads = [
+        {
+            "Key": f"{_PREFIX}/{_A}/sha256/x",
+            "UploadId": "u-open",
+            "Initiated": _when(_OLD),
+        }
+    ]
+
+    result = fx.collector.sweep()
+
+    assert result.eligibility.reason is Ineligibility.UNVERSIONED
+    assert result.uploads is not None and result.uploads.uploads == 1
+    assert set(cast(list[str], fx.raw.hkeys(reclaim_multipart_key(_A)))) == {"u-open"}
+    assert "list_object_versions" not in fx.s3.calls
+
+
 def test_a_filesystem_store_is_ineligible_and_keeps_everything() -> None:
     server = fakeredis.FakeServer()
     rds = fake_redis_client(server)

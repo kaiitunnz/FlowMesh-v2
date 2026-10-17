@@ -52,6 +52,8 @@ from ..clients.redis import (
 )
 from ..orchestration.ledger_layout import LedgerChanges, StoredLedger, decode_ledger
 from ..reclamation.epoch import CommitGuard, EpochFenced, GuardInterrupted
+from ..reclamation.multipart import MultipartOwner, MultipartStore
+from ..reclamation.pins import PinStore, Retirement
 from ..reclamation.protection import queue_protection
 from ..reclamation.references import references_of
 from ..task.models import TaskRecord, TaskStatus
@@ -578,6 +580,8 @@ async def _guard_async(pipe: AsyncPipeline, guard: CommitGuard | None) -> None:
 class WorkflowRegistry(WorkflowHistoryStore, ArtifactCatalogStore):
     def __init__(self, rds: RedisClient) -> None:
         self._rds = rds
+        self._pins = PinStore(rds)
+        self._multipart = MultipartStore(rds)
 
     def claim_root_epoch(self) -> int:
         """Take a new root epoch, fencing every guarded commit an earlier root made
@@ -586,6 +590,32 @@ class WorkflowRegistry(WorkflowHistoryStore, ArtifactCatalogStore):
 
     async def claim_root_epoch_async(self) -> int:
         return await self._rds.asyncio.incr(RECLAIM_ROOT_EPOCH_KEY)
+
+    def retirement(self, scope: str, digests: Sequence[str]) -> dict[str, Retirement]:
+        """Return where each of ``digests`` stands in its retirement now."""
+        return self._pins.retirement(scope, digests)
+
+    def transfer_multipart(self, scope: str, dispatch_id: str) -> None:
+        """Move the multipart uploads a dispatch registered to the upload its success
+        left owed."""
+        self._multipart.transfer(scope, dispatch_id, MultipartOwner.upload(dispatch_id))
+
+    def release_multipart(self, scope: str, dispatch_id: str) -> None:
+        """End a dispatch's ownership of the multipart uploads it registered."""
+        self._multipart.release(scope, dispatch_id)
+
+    async def retirement_async(
+        self, scope: str, digests: Sequence[str]
+    ) -> dict[str, Retirement]:
+        return await self._pins.retirement_async(scope, digests)
+
+    async def transfer_multipart_async(self, scope: str, dispatch_id: str) -> None:
+        await self._multipart.transfer_async(
+            scope, dispatch_id, MultipartOwner.upload(dispatch_id)
+        )
+
+    async def release_multipart_async(self, scope: str, dispatch_id: str) -> None:
+        await self._multipart.release_async(scope, dispatch_id)
 
     def mark_uncovered(self, scope: str, workflow_id: str) -> None:
         """Record that a write of the workflow faulted partway, so the scope's

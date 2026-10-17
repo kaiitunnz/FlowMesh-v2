@@ -9,15 +9,22 @@ from what it kept.
 """
 
 from collections import defaultdict
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Protocol
 
 from shared.content import ContentReference
 
-from .pins import PinStore, Retirement
+from .pins import Retirement
 
 type Backed = Callable[[ContentReference], bool | None]
+
+
+class RetirementIndex(Protocol):
+    def retirement(
+        self, scope: str, digests: Sequence[str]
+    ) -> dict[str, Retirement]: ...
 
 
 class StagedStanding(StrEnum):
@@ -40,8 +47,8 @@ class StagedVerdict:
 class StagedRetirement:
     """Checks a staged upload's objects against their retirement."""
 
-    def __init__(self, pins: PinStore, backed: Backed) -> None:
-        self._pins = pins
+    def __init__(self, index: RetirementIndex, backed: Backed) -> None:
+        self._index = index
         self._backed = backed
 
     def check(self, references: Iterable[ContentReference]) -> StagedVerdict:
@@ -49,7 +56,7 @@ class StagedRetirement:
         retiring: list[str] = []
         retired: list[ContentReference] = []
         for scope, by_digest in _by_scope(references).items():
-            standing = self._pins.retirement(scope, list(by_digest))
+            standing = self._index.retirement(scope, list(by_digest))
             for digest, state in standing.items():
                 if state is Retirement.RETIRING:
                     retiring.append(digest)
@@ -76,7 +83,7 @@ class StagedRetirement:
         return sorted(
             digest
             for scope, by_digest in _by_scope(references).items()
-            for digest, state in self._pins.retirement(scope, list(by_digest)).items()
+            for digest, state in self._index.retirement(scope, list(by_digest)).items()
             if state is Retirement.RETIRING
         )
 
@@ -90,4 +97,10 @@ def _by_scope(
     return grouped
 
 
-__all__ = ["Backed", "StagedRetirement", "StagedStanding", "StagedVerdict"]
+__all__ = [
+    "Backed",
+    "RetirementIndex",
+    "StagedRetirement",
+    "StagedStanding",
+    "StagedVerdict",
+]
