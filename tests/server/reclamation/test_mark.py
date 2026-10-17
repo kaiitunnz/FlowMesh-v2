@@ -6,8 +6,8 @@ import hashlib
 from server.reclamation.mark import (
     FALSE_POSITIVE_RATE,
     MIN_CAPACITY,
+    DigestSet,
     Mark,
-    MarkSize,
     ScopeMark,
     digest_words,
 )
@@ -84,9 +84,7 @@ def test_counts_and_size_cover_every_scope() -> None:
     mark.add_all("org-b", [digest_words(d) for d in _digests("b", 2)])
 
     assert mark.counts() == {"org-a": 3, "org-b": 2}
-    size = mark.size()
-    assert size == MarkSize(2, 5, size.bytes)
-    assert size.bytes == mark.scope("org-a").nbytes + mark.scope("org-b").nbytes
+    assert mark.nbytes == mark.scope("org-a").nbytes + mark.scope("org-b").nbytes
     assert mark.scope("org-a").nbytes > mark.scope("org-b").nbytes
 
 
@@ -100,3 +98,21 @@ def test_a_reserved_batch_lands_in_one_layer_sized_for_it() -> None:
 
     assert all(pair in mark for pair in words)
     assert mark.nbytes * 8 / len(words) < 14
+
+
+def test_a_digest_set_holds_exactly_what_was_added_across_compactions() -> None:
+    digests = _digests("d", 2000)
+    absent = _digests("x", 2000)
+    held = DigestSet()
+    for digest in digests[:1000]:
+        held.add(digest)
+    held.compact()
+    for digest in digests[1000:]:
+        held.add(digest)
+    held.add(digests[0])
+
+    assert all(digest in held for digest in digests)
+    assert not any(digest in held for digest in absent)
+    held.compact()
+    assert all(digest in held for digest in digests)
+    assert len(held) == 2000 and held.nbytes == 2000 * 32

@@ -14,7 +14,6 @@ the target.
 import hashlib
 import math
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
 
 # The target false-positive rate, and the least capacity a scope's first layer holds.
 FALSE_POSITIVE_RATE = 0.01
@@ -108,13 +107,6 @@ class ScopeMark:
         return sum(len(layer.bits) for layer in self._layers)
 
 
-@dataclass(frozen=True)
-class MarkSize:
-    scopes: int
-    digests: int
-    bytes: int
-
-
 class Mark:
     """The digests each scope binds; a scope absent from it binds nothing."""
 
@@ -151,19 +143,79 @@ class Mark:
     def counts(self) -> dict[str, int]:
         return {scope: mark.count for scope, mark in self._scopes.items()}
 
-    def size(self) -> MarkSize:
-        return MarkSize(
-            len(self._scopes),
-            sum(mark.count for mark in self._scopes.values()),
-            sum(mark.nbytes for mark in self._scopes.values()),
-        )
+    @property
+    def nbytes(self) -> int:
+        return sum(mark.nbytes for mark in self._scopes.values())
+
+
+_DIGEST_BYTES = 32
+
+
+def _digest_bytes(digest: str) -> bytes:
+    try:
+        raw = bytes.fromhex(digest)
+    except ValueError:
+        raw = b""
+    return (
+        raw if len(raw) == _DIGEST_BYTES else hashlib.sha256(digest.encode()).digest()
+    )
+
+
+class DigestSet:
+    """An exact set of content digests, packed 32 bytes each.
+
+    Digests added since the last ``compact`` wait in a small set; ``compact`` merges
+    them into one sorted run that lookups search.
+    """
+
+    def __init__(self) -> None:
+        self._sorted = b""
+        self._pending: set[bytes] = set()
+
+    def add(self, digest: str) -> None:
+        if (raw := _digest_bytes(digest)) not in self:
+            self._pending.add(raw)
+
+    def __contains__(self, item: str | bytes) -> bool:
+        raw = item if isinstance(item, bytes) else _digest_bytes(item)
+        if raw in self._pending:
+            return True
+        low, high = 0, len(self._sorted) // _DIGEST_BYTES
+        while low < high:
+            middle = (low + high) // 2
+            at = middle * _DIGEST_BYTES
+            found = self._sorted[at : at + _DIGEST_BYTES]
+            if found == raw:
+                return True
+            if found < raw:
+                low = middle + 1
+            else:
+                high = middle
+        return False
+
+    def compact(self) -> None:
+        if not self._pending:
+            return
+        records = [
+            self._sorted[at : at + _DIGEST_BYTES]
+            for at in range(0, len(self._sorted), _DIGEST_BYTES)
+        ]
+        self._sorted = b"".join(sorted([*records, *self._pending]))
+        self._pending.clear()
+
+    def __len__(self) -> int:
+        return len(self._sorted) // _DIGEST_BYTES + len(self._pending)
+
+    @property
+    def nbytes(self) -> int:
+        return len(self._sorted) + len(self._pending) * _DIGEST_BYTES
 
 
 __all__ = [
     "FALSE_POSITIVE_RATE",
     "MIN_CAPACITY",
+    "DigestSet",
     "Mark",
-    "MarkSize",
     "ScopeMark",
     "digest_words",
 ]

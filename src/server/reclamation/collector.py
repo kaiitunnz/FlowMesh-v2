@@ -239,7 +239,7 @@ class AuditCollector:
         started = time.monotonic()
         sweep_id = f"{int(marked.started)}"
         result = SweepAudit(sweep_id, eligibility, marked_at=marked.started)
-        result.mark_bytes = marked.mark.size().bytes + closures.mark.size().bytes
+        result.mark_bytes = marked.mark.nbytes + closures.mark.nbytes
         if self._audit is not None and not eligibility.eligible:
             assert eligibility.reason is not None
             self._audit.record(
