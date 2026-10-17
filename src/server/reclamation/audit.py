@@ -1,5 +1,5 @@
-"""The capped stream of reclamation facts an operator reads: backfill coverage, scope
-certification, eligibility and what each sweep found."""
+"""The capped stream of content-audit facts an operator reads: the store's eligibility
+and what each audit found."""
 
 import json
 import time
@@ -12,7 +12,7 @@ AUDIT_MAXLEN = 10_000
 
 
 class AuditTrail:
-    """Appends reclamation facts to the control store's audit stream."""
+    """Appends content-audit facts to the control store's audit stream."""
 
     def __init__(self, rds: RedisClient) -> None:
         self._rds = rds
