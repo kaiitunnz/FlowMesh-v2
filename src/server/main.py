@@ -599,6 +599,8 @@ def _expand_bound_trees(stop: threading.Event) -> None:
     trees, holds = TREE_EXPANDER, PUBLICATION_HOLDS
     if trees is None or holds is None:
         return
+    if owed := holds.repay():
+        logger.info("%d tree hold release(s) wait for the store", owed)
     waiting = trees.reconcile(
         trees.scopes(),
         lambda manifest: holds.expand(manifest, {"kind": "expansion"}),

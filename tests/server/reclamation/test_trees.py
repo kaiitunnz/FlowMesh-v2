@@ -36,6 +36,8 @@ class _Store:
         self.objects: dict[str, bytes] = {}
         self.reads = 0
         self.down = False
+        self.fail_after: list[int] = []
+        """For each coming read in turn, fail it after this many windows."""
         self.corrupt: set[str] = set()
 
     def put(self, data: bytes, media_type: str = TREE_MEDIA_TYPE) -> ContentReference:
@@ -57,7 +59,10 @@ class _Store:
             # check at the end of the stream catches it.
             first = TreeManifest.decode(data).members[0].digest.encode()
             data = data.replace(first, b"f" * 64, 1)
-        for start in range(0, len(data), 7):
+        fail_after = self.fail_after.pop(0) if self.fail_after else None
+        for index, start in enumerate(range(0, len(data), 7)):
+            if fail_after is not None and index >= fail_after:
+                raise ResultUnavailable("store went away")
             yield data[start : start + 7]
         if hashlib.sha256(data).hexdigest() != reference.content_digest:
             raise ResultUnreadable("digest mismatch")
@@ -216,9 +221,38 @@ def test_a_corrupt_read_never_protects_a_member(rig) -> None:
     rig.store.corrupt.add(manifest.content_digest)
     outcome = rig.holds.expand(manifest, _LOCATOR)
     assert outcome.status is TreeStatus.MALFORMED
-    assert rig.store.reads == 1
+    # One read held the members, a second released them.
+    assert rig.store.reads == 2
     assert rig.protected() == set()
     assert rig.pinned() == set()
+
+
+def test_write_through_tree_members_are_not_kept_in_memory(rig) -> None:
+    members = _members(2500)
+    manifest = _tree(rig.store, members)
+    preparation = rig.holds.acquire(_success(manifest), _LOCATOR)
+    assert preparation.holds is not None
+    assert preparation.holds.held == {_SCOPE: (manifest.content_digest,)}
+    rig.holds.release(preparation.holds)
+    assert rig.pinned() == set()
+
+
+def test_a_release_the_store_blocks_is_repaid_once_it_reads_again(rig) -> None:
+    members = _members(2500)
+    manifest = _tree(rig.store, members)
+    rig.raw.sadd(reclaim_protected_key(_SCOPE), manifest.content_digest)
+    # The outage lands after more than a page of members was held, and lasts
+    # through the release that follows.
+    rig.store.fail_after = [len(TreeManifest.of(members).encode()) // 7 - 10, 0, 0]
+    outcome = rig.holds.expand(manifest, _LOCATOR)
+    assert outcome.status is TreeStatus.UNAVAILABLE
+    assert rig.pinned()
+    assert rig.protected() == {manifest.content_digest}
+    assert rig.holds.repay() == 1
+
+    assert rig.holds.repay() == 0
+    assert rig.pinned() == set()
+    assert rig.protected() == {manifest.content_digest}
 
 
 def test_reconciling_expands_bound_trees_and_drops_unbound_ones(rig) -> None:

@@ -28,8 +28,9 @@ from ..clients.redis import (
     reclaim_unexpanded_key,
 )
 
-# How many identities one acquisition script decides at a time.
-CHUNK = 1000
+# How many identities one script decides at a time, which bounds how long it holds
+# Redis: about 1 ms at this size.
+CHUNK = 256
 
 # KEYS: protected, pins, deleting, history, condemned, unexpanded.
 # ARGV: nonce, locator, mode, n, d1..dn, e1..en, m, manifest1..manifestm.

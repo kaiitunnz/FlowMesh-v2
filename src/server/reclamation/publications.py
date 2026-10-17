@@ -9,6 +9,7 @@ protection that commit adds keeps them instead.
 """
 
 import logging
+import threading
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -143,7 +144,8 @@ class Holds:
     nonce: str
     held: dict[str, tuple[str, ...]]
     trees: list[ContentReference] = field(default_factory=list)
-    """Write-through trees whose members this acquisition holds."""
+    """Write-through trees whose members this acquisition holds; their holds are
+    found again by reading the manifest, so they are not kept in ``held``."""
     staged: list[ContentReference] = field(default_factory=list)
     """Trees whose members are protected once their binding is durable."""
 
@@ -181,6 +183,9 @@ class PublicationHolds:
         self._backed = backed
         self._logger = logger or logging.getLogger("publication-holds")
         self._trees = trees
+        self._owed: list[tuple[ContentReference, str]] = []
+        """Tree holds whose release waits for their manifest to be readable again."""
+        self._owed_lock = threading.Lock()
 
     def acquire(self, assertion: Assertion, locator: dict[str, Any]) -> Preparation:
         """Hold every object ``assertion`` names, write-through trees' members
@@ -233,6 +238,7 @@ class PublicationHolds:
                 [],
                 locator,
                 holds,
+                record=False,
             )
             if refused is None:
                 return None
@@ -298,6 +304,7 @@ class PublicationHolds:
         manifests: list[str],
         locator: dict[str, Any],
         holds: Holds,
+        record: bool = True,
     ) -> Preparation | None:
         verified: dict[str, str] = {}
         for _ in range(VERIFY_ROUNDS):
@@ -306,7 +313,8 @@ class PublicationHolds:
             )
             match acquisition.verdict:
                 case Verdict.ACQUIRED:
-                    holds.held[scope] = holds.held.get(scope, ()) + acquisition.held
+                    if record:
+                        holds.held[scope] = holds.held.get(scope, ()) + acquisition.held
                     return None
                 case Verdict.RETIRING:
                     return Preparation(
@@ -342,15 +350,37 @@ class PublicationHolds:
         )
 
     def release(self, holds: Holds) -> None:
-        """Release exactly ``holds``; raises while either store is unreachable."""
+        """Release exactly ``holds``; raises while the control store is unreachable.
+
+        A tree whose manifest cannot be read now has its release owed, and repaid by
+        a later ``repay``.
+        """
         for manifest in holds.trees:
-            assert self._trees is not None
-            outcome = self._trees.release(manifest, holds.nonce, self._pins.release)
-            if outcome.status is TreeStatus.UNAVAILABLE:
-                raise ConnectionError(outcome.reason)
+            self._release_tree(manifest, holds.nonce)
         for scope, digests in holds.held.items():
             if digests:
                 self._pins.release(scope, digests, holds.nonce)
+
+    def repay(self) -> int:
+        """Release the tree holds a store outage left owed; returns how many are
+        still owed."""
+        with self._owed_lock:
+            owed, self._owed = self._owed, []
+        for manifest, nonce in owed:
+            try:
+                self._release_tree(manifest, nonce)
+            except OSError:
+                with self._owed_lock:
+                    self._owed.append((manifest, nonce))
+        with self._owed_lock:
+            return len(self._owed)
+
+    def _release_tree(self, manifest: ContentReference, nonce: str) -> None:
+        assert self._trees is not None
+        outcome = self._trees.release(manifest, nonce, self._pins.release)
+        if outcome.status is TreeStatus.UNAVAILABLE:
+            with self._owed_lock:
+                self._owed.append((manifest, nonce))
 
     def _release_quietly(self, holds: Holds) -> None:
         try:
@@ -372,6 +402,8 @@ class PublicationHolds:
         """
         unfinished: list[tuple[ContentReference, TreeOutcome]] = []
         assert self._trees is not None or not (holds.trees or holds.staged)
+        if self._trees is not None:
+            self.repay()
         for manifest in holds.trees:
             assert self._trees is not None
             outcome = (
@@ -401,27 +433,29 @@ class PublicationHolds:
         nonces = self._nonces()
         if nonces is None:
             return TreeOutcome(TreeStatus.UNAVAILABLE, "this root holds no epoch yet")
+        self.repay()
         nonce = nonces.next()
-        scope_holds = Holds(nonce, {})
 
         def hold_page(scope: str, members: list[TreeMember]) -> TreeOutcome | None:
-            acquisition = self._pins.acquire(
+            self._pins.acquire(
                 scope, [m.digest for m in members], nonce, locator, AcquireMode.PENDING
             )
-            scope_holds.held[scope] = scope_holds.held.get(scope, ()) + acquisition.held
             return None
 
         try:
             outcome = self._trees.hold(manifest, hold_page)
             if outcome.status is TreeStatus.DONE:
-                return self._trees.promote(manifest, nonce)
+                promoted = self._trees.promote(manifest, nonce)
+                if promoted.status is TreeStatus.DONE:
+                    return promoted
+                outcome = promoted
         except OSError as exc:
             outcome = TreeOutcome(TreeStatus.UNAVAILABLE, str(exc))
-        for scope, digests in scope_holds.held.items():
-            try:
-                self._pins.release(scope, digests, nonce)
-            except OSError:
-                break
+        try:
+            self._release_tree(manifest, nonce)
+        except OSError:
+            with self._owed_lock:
+                self._owed.append((manifest, nonce))
         return outcome
 
 
