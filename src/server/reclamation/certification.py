@@ -27,6 +27,7 @@ from ..clients.redis import (
     reclaim_uncertified_key,
     reclaim_unexpanded_key,
 )
+from .lua import KINDS
 
 # The fault field naming every scope, for a key whose scope could not be read.
 ALL_SCOPES = "*"
@@ -67,17 +68,8 @@ return 1
 
 # KEYS: hooks-on, backfill, faults, unexpanded, uncertified, cert.
 # ARGV: scope, family1..familyn.
-_CERTIFY = """
-local function kind(key, ...)
-  local found = redis.call('TYPE', key).ok
-  if found == 'none' then return true end
-  for _, allowed in ipairs({...}) do
-    if found == allowed then return true end
-  end
-  return false
-end
-if not kind(KEYS[2], 'hash') or not kind(KEYS[3], 'hash')
-  or not kind(KEYS[4], 'set') then
+_CERTIFY = KINDS + """
+if wrong_kind({[2] = 'hash', [3] = 'hash', [4] = 'set'}) then
   redis.call('DEL', KEYS[6])
   return {'wrongtype'}
 end

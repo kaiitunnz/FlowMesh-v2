@@ -56,6 +56,7 @@ def test_a_new_upload_is_registered_under_its_owner(store) -> None:
         "owner": {"kind": "dispatch", "dispatch_id": "dsp-1", "task_id": "tsk-1"},
         "registration": "wkr-1",
         "initiated_at": 12500,
+        "content_protocol": 0,
     }
     assert raw.hkeys(reclaim_multipart_dispatch_key(_SCOPE, "dsp-1")) == ["up-1"]
 
@@ -160,6 +161,7 @@ def test_a_transfer_moves_only_the_dispatchs_live_uploads(store) -> None:
         "owner": {"kind": "upload", "dispatch_id": "dsp-1"},
         "registration": "wkr-1",
         "initiated_at": 1000,
+        "content_protocol": 0,
     }
     assert _record(raw, "up-2")["owner"]["kind"] == "dispatch"
     assert _record(raw, "up-3")["owner"]["dispatch_id"] == "dsp-2"
@@ -245,14 +247,24 @@ def test_a_released_dispatch_leaves_no_index_and_keeps_its_records(store) -> Non
     assert _record(raw, "up-1")["owner"] == {"kind": "upload", "dispatch_id": "dsp-1"}
 
 
-def test_the_content_protocol_a_worker_registered_with_is_read_back(store) -> None:
+def test_a_record_carries_the_content_protocol_its_worker_registered_with(
+    store,
+) -> None:
     multipart, raw = store
     raw.hset(worker_key("wkr-1"), mapping={"id": "wkr-1", "content_protocol": "1"})
     raw.hset(worker_key("wkr-0"), mapping={"id": "wkr-0"})
+    raw.hset(worker_key("wkr-x"), mapping={"id": "wkr-x", "content_protocol": "x"})
 
-    assert multipart.content_protocol("wkr-1") == 1
-    assert multipart.content_protocol("wkr-0") == 0
-    assert multipart.content_protocol("wkr-missing") == 0
+    for upload_id, worker in (("up-1", "wkr-1"), ("up-0", "wkr-0"), ("up-x", "wkr-x")):
+        multipart.register(_SCOPE, upload_id, _KEY, _DISPATCH, worker)
+    multipart.register(_SCOPE, "up-m", _KEY, _DISPATCH, "wkr-missing")
+
+    assert _record(raw, "up-1")["content_protocol"] == 1
+    assert _record(raw, "up-0")["content_protocol"] == 0
+    assert _record(raw, "up-x")["content_protocol"] == 0
+    assert _record(raw, "up-m")["content_protocol"] == 0
+    multipart.transfer(_SCOPE, "dsp-1", MultipartOwner.upload("dsp-1"))
+    assert _record(raw, "up-1")["content_protocol"] == 1
 
 
 class _Workers:
@@ -315,6 +327,18 @@ def test_control_acknowledges_an_upload_its_runtime_owner_holds(store) -> None:
         (MULTIPART_ACK_FRAME_KIND, {"upload_id": "up-1", "verdict": "ack"})
     ]
     assert _record(raw, "up-1")["owner"]["kind"] == OwnerKind.DISPATCH.value
+
+
+def test_a_registration_records_the_reporting_workers_content_protocol(
+    store,
+) -> None:
+    multipart, raw = store
+    raw.hset(worker_key("wkr-1"), mapping={"id": "wkr-1", "content_protocol": "1"})
+    service, _, _ = _registrations(multipart, (_SCOPE, _DISPATCH))
+
+    service.on_registration("wkr-1", _payload())
+
+    assert _record(raw, "up-1")["content_protocol"] == 1
 
 
 @pytest.mark.parametrize(

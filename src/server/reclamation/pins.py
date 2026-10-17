@@ -30,6 +30,7 @@ from ..clients.redis import (
     reclaim_protected_key,
     reclaim_unexpanded_key,
 )
+from .lua import HOLDERS, KINDS
 
 # How many identities one script decides at a time, which bounds how long it holds
 # Redis: about 1 ms at this size.
@@ -37,12 +38,10 @@ CHUNK = 256
 
 # KEYS: protected, pins, deleting, history, condemned, unexpanded.
 # ARGV: nonce, locator, mode, probe, n, d1..dn, e1..en, m, manifest1..manifestm.
-_ACQUIRE = """
-for _, key in ipairs(KEYS) do
-  local kind = redis.call('TYPE', key).ok
-  if kind ~= 'none' and kind ~= 'set' and kind ~= 'hash' then
-    return redis.error_reply('WRONGTYPE ' .. key)
-  end
+_ACQUIRE = KINDS + HOLDERS + """
+local wrong = wrong_kind(span(1, 6, 'set hash'))
+if wrong then
+  return redis.error_reply('WRONGTYPE ' .. wrong)
 end
 local nonce, locator, mode = ARGV[1], ARGV[2], ARGV[3]
 local probe, n = ARGV[4] == '1', tonumber(ARGV[5])
@@ -69,10 +68,7 @@ for i = 1, n do
   if out[i] ~= 'P' then
     local d = ARGV[5 + i]
     redis.call('HDEL', KEYS[5], d)
-    local current = redis.call('HGET', KEYS[2], d)
-    local holders = current and cjson.decode(current) or {}
-    table.insert(holders, {n = nonce, l = locator})
-    redis.call('HSET', KEYS[2], d, cjson.encode(holders))
+    add_holder(KEYS[2], d, nonce, locator)
   end
 end
 local m = tonumber(ARGV[6 + 2 * n])
@@ -83,28 +79,13 @@ return out
 """
 
 # KEYS: pins. ARGV: nonce, d1..dn.
-_RELEASE = """
+_RELEASE = HOLDERS + """
 if redis.call('TYPE', KEYS[1]).ok == 'none' then
   return 0
 end
 local released = 0
 for i = 2, #ARGV do
-  local current = redis.call('HGET', KEYS[1], ARGV[i])
-  if current then
-    local kept = {}
-    for _, holder in ipairs(cjson.decode(current)) do
-      if holder.n == ARGV[1] then
-        released = released + 1
-      else
-        table.insert(kept, holder)
-      end
-    end
-    if #kept == 0 then
-      redis.call('HDEL', KEYS[1], ARGV[i])
-    else
-      redis.call('HSET', KEYS[1], ARGV[i], cjson.encode(kept))
-    end
-  end
+  released = released + drop_holder(KEYS[1], ARGV[i], ARGV[1])
 end
 return released
 """
@@ -168,6 +149,20 @@ class Nonces:
     def next(self) -> str:
         with self._lock:
             return f"{self.epoch}:{next(self._counter)}"
+
+
+class VerifyRounds:
+    """Bounds how many rounds a verification of retired backings may take, since
+    a revision that keeps moving while it is verified never settles."""
+
+    def __init__(self, limit: int) -> None:
+        self._limit = limit
+        self._taken = 0
+
+    def take(self) -> bool:
+        """Take one more round; returns whether it is within the bound."""
+        self._taken += 1
+        return self._taken <= self._limit
 
 
 def _keys(scope: str) -> list[str]:
@@ -338,5 +333,6 @@ __all__ = [
     "PinStore",
     "Retirement",
     "Verdict",
+    "VerifyRounds",
     "CHUNK",
 ]

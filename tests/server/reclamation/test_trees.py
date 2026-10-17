@@ -10,9 +10,12 @@ import pytest
 import redis.exceptions
 
 from server.clients.redis import (
+    RECLAIM_HOOKS_ON_KEY,
     RECLAIM_ROOT_EPOCH_KEY,
     RECLAIM_SCOPES_KEY,
+    reclaim_cert_key,
     reclaim_deleting_key,
+    reclaim_expanded_key,
     reclaim_history_key,
     reclaim_pins_key,
     reclaim_protected_key,
@@ -21,7 +24,7 @@ from server.clients.redis import (
 )
 from server.reclamation.pins import Nonces, PinStore
 from server.reclamation.publications import PublicationHolds, assertion_of
-from server.reclamation.trees import TreeExpander, TreeStatus
+from server.reclamation.trees import _EXPANDED, TreeExpander, TreeStatus
 from server.task.results import ResultUnavailable, ResultUnreadable
 from shared.content import ContentReference, StoreRefusal, reference_for
 from shared.content.tree import TREE_MEDIA_TYPE, TreeManifest, TreeMember
@@ -193,6 +196,7 @@ def test_a_store_outage_asks_for_a_retry(rig) -> None:
 def test_a_tree_already_expanded_is_not_read_again(rig) -> None:
     manifest = _tree(rig.store, _members(3))
     rig.raw.sadd(reclaim_protected_key(_SCOPE), manifest.content_digest)
+    rig.raw.sadd(reclaim_expanded_key(_SCOPE), manifest.content_digest)
     preparation = rig.holds.acquire(_success(manifest), _LOCATOR)
     assert preparation.holds is not None and preparation.holds.trees == []
     assert rig.store.reads == 0
@@ -556,3 +560,99 @@ def test_settling_an_unbound_tree_never_drops_one_a_publication_holds(
     assert raced
     assert digest in rig.pinned()
     assert rig.unexpanded() == {digest}
+
+
+def _file_success(reference: ContentReference) -> Any:
+    binding = ArtifactBinding(
+        name="weights.bin",
+        kind=ArtifactKind.FILE,
+        reference=reference,
+        size_bytes=reference.size_bytes,
+        files=1,
+    )
+    return assertion_of("TASK_SUCCEEDED", {"artifacts": [binding.model_dump()]})
+
+
+def test_a_file_with_a_manifests_bytes_never_marks_its_tree_expanded(rig) -> None:
+    members = _members(3)
+    manifest = _tree(rig.store, members)
+    as_file = manifest.model_copy(update={"media_type": "application/octet-stream"})
+    rig.raw.set(RECLAIM_HOOKS_ON_KEY, "9")
+    rig.raw.set(reclaim_cert_key(_SCOPE), "9")
+    published = rig.holds.acquire(_file_success(as_file), _LOCATOR)
+    assert published.holds is not None
+    rig.raw.sadd(reclaim_protected_key(_SCOPE), as_file.content_digest)
+    assert rig.holds.finish(published.holds, frozenset(), _LOCATOR) == []
+    assert rig.protected() == {manifest.content_digest}
+    assert rig.unexpanded() == set()
+
+    preparation = rig.holds.acquire(_success(manifest), _LOCATOR)
+
+    assert preparation.holds is not None
+    assert preparation.holds.trees == [manifest]
+    assert {m.digest for m in members} <= rig.pinned()
+    assert rig.trees.expanded([manifest]) == set()
+    assert (
+        rig.holds.finish(
+            preparation.holds, frozenset({manifest.content_digest}), _LOCATOR
+        )
+        == []
+    )
+    assert {m.digest for m in members} <= rig.protected()
+    assert rig.trees.expanded([manifest]) == {manifest.content_digest}
+
+
+@pytest.mark.parametrize("staged", [False, True], ids=["write-through", "staged"])
+def test_a_fully_promoted_tree_is_expanded(rig, staged: bool) -> None:
+    manifest = _tree(rig.store, _members(600))
+    preparation = rig.holds.acquire(_success(manifest, staged), _LOCATOR)
+    assert preparation.holds is not None
+    assert rig.trees.expanded([manifest]) == set()
+    rig.raw.sadd(reclaim_protected_key(_SCOPE), manifest.content_digest)
+    bound = frozenset({manifest.content_digest})
+
+    assert rig.holds.finish(preparation.holds, bound, _LOCATOR) == []
+
+    assert rig.trees.expanded([manifest]) == {manifest.content_digest}
+    reads = rig.store.reads
+    again = rig.holds.acquire(_success(manifest), _LOCATOR)
+    assert again.holds is not None and again.holds.trees == []
+    assert rig.store.reads == reads
+
+
+def test_an_incomplete_promotion_leaves_the_tree_unexpanded(rig) -> None:
+    members = _members(3)
+    manifest = _tree(rig.store, members)
+    preparation = rig.holds.acquire(_success(manifest), _LOCATOR)
+    assert preparation.holds is not None
+    rig.raw.sadd(reclaim_protected_key(_SCOPE), manifest.content_digest)
+    rig.raw.hdel(reclaim_pins_key(_SCOPE), members[1].digest)
+
+    outcome = rig.trees.promote(manifest, preparation.holds.nonce)
+
+    assert outcome.status is TreeStatus.INCOMPLETE
+    assert rig.trees.expanded([manifest]) == set()
+    assert not rig.raw.exists(reclaim_expanded_key(_SCOPE))
+
+
+def test_a_fenced_promotion_leaves_the_tree_unexpanded(rig, monkeypatch) -> None:
+    manifest = _tree(rig.store, _members(3))
+    preparation = rig.holds.acquire(_success(manifest), _LOCATOR)
+    assert preparation.holds is not None
+    rig.raw.sadd(reclaim_protected_key(_SCOPE), manifest.content_digest)
+    real_eval = rig.client.sync.eval
+
+    def fence_before_expanded(script: str, *args: Any) -> Any:
+        # The members promote under this root; a later root takes the epoch just
+        # before the manifest is marked expanded.
+        if script == _EXPANDED:
+            rig.raw.set(RECLAIM_ROOT_EPOCH_KEY, "10")
+        return real_eval(script, *args)
+
+    monkeypatch.setattr(rig.client.sync, "eval", fence_before_expanded)
+
+    outcome = rig.trees.promote(manifest, preparation.holds.nonce)
+
+    assert outcome.status is TreeStatus.FENCED
+    assert rig.trees.expanded([manifest]) == set()
+    assert rig.unexpanded() == {manifest.content_digest}

@@ -37,6 +37,7 @@ from ..clients.redis import (
 )
 from .audit import AuditTrail
 from .certification import CoverageStore
+from .lua import KINDS
 from .multipart import MultipartStore
 from .store_admin import Eligibility, Ineligibility, StoreAdmin, StoredVersion
 
@@ -50,13 +51,11 @@ MAX_SIZED_UPLOADS = 1000
 
 # KEYS: hooks-on, cert, protected, pins, unexpanded, uncertified, deleting, condemned.
 # ARGV: sweep, seen_at, n, d1, v1, ..., dn, vn.
-_CONDEMN = """
-local types = {[3] = 'set', [4] = 'hash', [5] = 'set', [7] = 'hash', [8] = 'hash'}
-for i, expected in pairs(types) do
-  local found = redis.call('TYPE', KEYS[i]).ok
-  if found ~= 'none' and found ~= expected then
-    return redis.error_reply('WRONGTYPE ' .. KEYS[i])
-  end
+_CONDEMN = KINDS + """
+local wrong = wrong_kind({[3] = 'set', [4] = 'hash', [5] = 'set', [7] = 'hash',
+  [8] = 'hash'})
+if wrong then
+  return redis.error_reply('WRONGTYPE ' .. wrong)
 end
 local generation = redis.call('GET', KEYS[1])
 if not generation or redis.call('GET', KEYS[2]) ~= generation

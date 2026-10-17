@@ -29,16 +29,15 @@ from ..clients.redis import (
     reclaim_pins_key,
     reclaim_protected_key,
 )
-from ..reclamation.pins import Nonces
+from ..reclamation.lua import HOLDERS, KINDS
+from ..reclamation.pins import Nonces, VerifyRounds
 
 # KEYS: finalization, epoch, protected, pins, deleting, history, condemned, scopes.
 # ARGV: epoch, manifest, digest, nonce, locator, verified revision, ttl, scope.
-_RECORD = """
-for i = 3, 8 do
-  local kind = redis.call('TYPE', KEYS[i]).ok
-  if kind ~= 'none' and kind ~= 'set' and kind ~= 'hash' then
-    return redis.error_reply('WRONGTYPE ' .. KEYS[i])
-  end
+_RECORD = KINDS + HOLDERS + """
+local wrong = wrong_kind(span(3, 8, 'set hash'))
+if wrong then
+  return redis.error_reply('WRONGTYPE ' .. wrong)
 end
 if redis.call('GET', KEYS[2]) ~= ARGV[1] then
   return {'fenced'}
@@ -57,10 +56,7 @@ if redis.call('SISMEMBER', KEYS[3], digest) == 0 then
     return {'verify', revision}
   end
 end
-local current = redis.call('HGET', KEYS[4], digest)
-local holders = current and cjson.decode(current) or {}
-table.insert(holders, {n = ARGV[4], l = ARGV[5]})
-redis.call('HSET', KEYS[4], digest, cjson.encode(holders))
+add_holder(KEYS[4], digest, ARGV[4], ARGV[5])
 redis.call('HDEL', KEYS[7], digest)
 redis.call('SET', KEYS[1], ARGV[2])
 if tonumber(ARGV[7]) > 0 then
@@ -68,17 +64,7 @@ if tonumber(ARGV[7]) > 0 then
 end
 redis.call('SADD', KEYS[3], digest)
 redis.call('SADD', KEYS[8], ARGV[8])
-local kept = {}
-for _, holder in ipairs(holders) do
-  if holder.n ~= ARGV[4] then
-    table.insert(kept, holder)
-  end
-end
-if #kept == 0 then
-  redis.call('HDEL', KEYS[4], digest)
-else
-  redis.call('HSET', KEYS[4], digest, cjson.encode(kept))
-end
+drop_holder(KEYS[4], digest, ARGV[4])
 return {'committed', ARGV[2]}
 """
 
@@ -182,7 +168,8 @@ class FinalizationIndex:
             RECLAIM_SCOPES_KEY,
         ]
         verified = ""
-        for _ in range(_VERIFY_ROUNDS):
+        rounds = VerifyRounds(_VERIFY_ROUNDS)
+        while rounds.take():
             reply = list(
                 self._rds.sync.eval(
                     _RECORD,

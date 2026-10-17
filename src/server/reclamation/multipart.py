@@ -36,19 +36,18 @@ from ..clients.redis import (
     reclaim_multipart_key,
     worker_key,
 )
+from .lua import KINDS
 
 if TYPE_CHECKING:
     from ..registries.worker import WorkerRegistry
 
-# KEYS: records, dispatch index, scopes[, finalization scope, finalization].
-# ARGV: upload id, object key, owner, registration, initiated at (ms), scope.
-_REGISTER = """
-local kinds = {'hash', 'hash', 'set', 'string', 'string'}
-for i, key in ipairs(KEYS) do
-  local kind = redis.call('TYPE', key).ok
-  if kind ~= 'none' and kind ~= kinds[i] then
-    return redis.error_reply('WRONGTYPE ' .. key)
-  end
+# KEYS: records, dispatch index, scopes, registering worker[, finalization scope,
+# finalization]. ARGV: upload id, object key, owner, registration, initiated at (ms),
+# scope.
+_REGISTER = KINDS + """
+local wrong = wrong_kind({'hash', 'hash', 'set', 'hash', 'string', 'string'})
+if wrong then
+  return redis.error_reply('WRONGTYPE ' .. wrong)
 end
 local current = redis.call('HGET', KEYS[1], ARGV[1])
 if current then
@@ -64,7 +63,7 @@ end
 local owner = cjson.decode(ARGV[3])
 local indexed = false
 if owner.kind == 'finalization' then
-  if redis.call('GET', KEYS[4]) ~= ARGV[6] or redis.call('EXISTS', KEYS[5]) == 1 then
+  if redis.call('GET', KEYS[5]) ~= ARGV[6] or redis.call('EXISTS', KEYS[6]) == 1 then
     return {'unowned'}
   end
 elseif owner.kind == 'dispatch' then
@@ -81,6 +80,7 @@ local record = cjson.encode({
   owner = owner,
   registration = ARGV[4],
   initiated_at = tonumber(ARGV[5]),
+  content_protocol = tonumber(redis.call('HGET', KEYS[4], 'content_protocol')) or 0,
 })
 if indexed then
   redis.call('HSET', KEYS[2], ARGV[1], '1')
@@ -91,12 +91,10 @@ return {'ack', record}
 """
 
 # KEYS: records, dispatch index. ARGV: dispatch id, owner.
-_TRANSFER = """
-for _, key in ipairs(KEYS) do
-  local kind = redis.call('TYPE', key).ok
-  if kind ~= 'none' and kind ~= 'hash' then
-    return redis.error_reply('WRONGTYPE ' .. key)
-  end
+_TRANSFER = KINDS + """
+local wrong = wrong_kind(span(1, 2, 'hash'))
+if wrong then
+  return redis.error_reply('WRONGTYPE ' .. wrong)
 end
 if redis.call('HEXISTS', KEYS[2], '~moved') == 1 then
   return 0
@@ -217,14 +215,18 @@ class MultipartStore:
     ) -> Registration:
         """Register an upload under ``owner``, or answer why it may not proceed.
 
-        A second registration of the same upload by the same registration is answered
-        with the record already there. A finalization owns an upload only while control
-        assigned it this scope and its winner is not yet recorded.
+        ``registration`` is the registering worker's id; the record carries the
+        content protocol that worker reported when it registered, or 0 when it
+        reported none. A second registration of the same upload by the same
+        registration is answered with the record already there. A finalization owns an
+        upload only while control assigned it this scope and its winner is not yet
+        recorded.
         """
         keys = [
             reclaim_multipart_key(scope),
             reclaim_multipart_dispatch_key(scope, owner.dispatch_id),
             RECLAIM_SCOPES_KEY,
+            worker_key(registration),
         ]
         if owner.kind is OwnerKind.FINALIZATION:
             keys += [
@@ -333,15 +335,6 @@ class MultipartStore:
                 pruned += int(self._rds.sync.eval(_PRUNE, len(keys), *keys, *args))
             if cursor == 0:
                 return pruned
-
-    def content_protocol(self, worker_id: str) -> int:
-        """The content protocol a worker registration reported; 0 when it reported
-        none."""
-        (raw,) = self._rds.sync.hash_mget(worker_key(worker_id), ["content_protocol"])
-        try:
-            return int(raw) if raw else 0
-        except ValueError:
-            return 0
 
 
 class OwnerResolver(Protocol):

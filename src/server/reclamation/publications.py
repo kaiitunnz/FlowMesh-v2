@@ -28,7 +28,7 @@ from shared.tasks.publication import (
 )
 
 from ..clients.redis import REDIS_CONN_ERRORS
-from .pins import AcquireMode, Nonces, PinStore, Verdict
+from .pins import AcquireMode, Nonces, PinStore, Verdict, VerifyRounds
 from .retirement import Backed
 from .trees import TreeExpander, TreeOutcome, TreeStatus
 
@@ -303,7 +303,7 @@ class PublicationHolds:
         record: bool = True,
     ) -> Preparation | None:
         verified: dict[str, str] = {}
-        moved = 0
+        rounds = VerifyRounds(VERIFY_ROUNDS)
         while True:
             try:
                 acquisition = self._pins.acquire(
@@ -325,14 +325,12 @@ class PublicationHolds:
                         "a named object is being removed from the store",
                         acquisition.retiring,
                     )
-            if any(d in verified for d in acquisition.unverified):
-                moved += 1
-                if moved > VERIFY_ROUNDS:
-                    return Preparation(
-                        None,
-                        StoreRefusal.RETRY,
-                        "a named object's removal kept moving while it was verified",
-                    )
+            if any(d in verified for d in acquisition.unverified) and not rounds.take():
+                return Preparation(
+                    None,
+                    StoreRefusal.RETRY,
+                    "a named object's removal kept moving while it was verified",
+                )
             missing: list[str] = []
             for digest, revision in acquisition.unverified.items():
                 match self._backed(reference_of(digest)):

@@ -6,7 +6,9 @@ holding one window and one member at a time, and a manifest's digest verifies on
 once its stream ends, so its members are first held under the expansion's own nonce
 and only those held are then protected, by a second read; a corrupt read can hold
 digests for a while but never protect one. Until a manifest's members are protected it
-stays in its scope's unexpanded set, which keeps the scope out of collection.
+stays in its scope's unexpanded set, which keeps the scope out of collection; the
+promotion that protects the last of them moves it to the scope's expanded set, which
+names only manifests whose members are protected and binds nothing itself.
 
 A member being retired stops a staged tree's expansion until its retirement ends. A
 tree bound with its bytes already stored can have no member being retired, since a
@@ -19,7 +21,6 @@ from collections.abc import Callable, Iterator, Set
 from dataclasses import dataclass
 from enum import StrEnum
 from itertools import batched
-from typing import Any
 
 from shared.content import ContentReference
 from shared.content.tree import (
@@ -34,23 +35,23 @@ from ..clients.redis import (
     RECLAIM_SCOPES_KEY,
     REDIS_CONN_ERRORS,
     RedisClient,
+    reclaim_expanded_key,
     reclaim_pins_key,
     reclaim_protected_key,
     reclaim_uncertified_key,
     reclaim_unexpanded_key,
 )
 from ..task.results import ResultUnavailable, ResultUnreadable
+from .lua import HOLDERS, KINDS
 from .pins import CHUNK
 
 # KEYS: protected, pins, scopes, root epoch. ARGV: nonce, scope, epoch, d1..dn.
 # Returns -1 when a later root holds the epoch, else how many members are neither
 # promoted nor already protected.
-_PROMOTE = """
-for i = 1, 3 do
-  local kind = redis.call('TYPE', KEYS[i]).ok
-  if kind ~= 'none' and kind ~= 'set' and kind ~= 'hash' then
-    return redis.error_reply('WRONGTYPE ' .. KEYS[i])
-  end
+_PROMOTE = KINDS + HOLDERS + """
+local wrong = wrong_kind(span(1, 3, 'set hash'))
+if wrong then
+  return redis.error_reply('WRONGTYPE ' .. wrong)
 end
 if redis.call('GET', KEYS[4]) ~= ARGV[3] then
   return -1
@@ -58,40 +59,25 @@ end
 redis.call('SADD', KEYS[3], ARGV[2])
 local missing = 0
 for i = 4, #ARGV do
-  local current = redis.call('HGET', KEYS[2], ARGV[i])
-  local held = false
-  if current then
-    local kept = {}
-    for _, holder in ipairs(cjson.decode(current)) do
-      if holder.n == ARGV[1] then
-        held = true
-      else
-        table.insert(kept, holder)
-      end
-    end
-    if held then
-      redis.call('SADD', KEYS[1], ARGV[i])
-      if #kept == 0 then
-        redis.call('HDEL', KEYS[2], ARGV[i])
-      else
-        redis.call('HSET', KEYS[2], ARGV[i], cjson.encode(kept))
-      end
-    end
-  end
-  if not held and redis.call('SISMEMBER', KEYS[1], ARGV[i]) == 0 then
+  local held = drop_holder(KEYS[2], ARGV[i], ARGV[1]) > 0
+  if held then
+    redis.call('SADD', KEYS[1], ARGV[i])
+  elseif redis.call('SISMEMBER', KEYS[1], ARGV[i]) == 0 then
     missing = missing + 1
   end
 end
 return missing
 """
 
-# KEYS: unexpanded, uncertified, root epoch. ARGV: epoch, manifest, broken-tree marker.
+# KEYS: unexpanded, uncertified, root epoch, expanded.
+# ARGV: epoch, manifest, broken-tree marker.
 _EXPANDED = """
 if redis.call('GET', KEYS[3]) ~= ARGV[1] then
   return 0
 end
 redis.call('SREM', KEYS[1], ARGV[2])
 redis.call('SREM', KEYS[2], ARGV[3])
+redis.call('SADD', KEYS[4], ARGV[2])
 return 1
 """
 
@@ -130,7 +116,6 @@ class TreeStatus(StrEnum):
 class TreeOutcome:
     status: TreeStatus
     reason: str | None = None
-    refusal: Any = None
     retiring: tuple[str, ...] = ()
     """The members being retired."""
     retired: tuple[ContentReference, ...] = ()
@@ -219,10 +204,11 @@ class TreeExpander:
                 )
             if not self._rds.sync.eval(
                 _EXPANDED,
-                3,
+                4,
                 reclaim_unexpanded_key(scope),
                 reclaim_uncertified_key(scope),
                 RECLAIM_ROOT_EPOCH_KEY,
+                reclaim_expanded_key(scope),
                 epoch,
                 manifest.content_digest,
                 _broken_tree_marker(manifest.content_digest),
@@ -281,19 +267,22 @@ class TreeExpander:
 
     def expanded(self, manifests: list[ContentReference]) -> set[str]:
         """Return the digests of the manifests whose members are already protected:
-        bound, and no longer waiting to be expanded."""
+        those a complete promotion under the root epoch marked expanded.
+
+        Being protected says nothing of a digest's members, since a file whose bytes
+        equal a tree manifest is protected as a file and never expanded.
+        """
         with self._rds.sync.control_pipeline(transaction=False) as pipe:
             for manifest in manifests:
-                scope, digest = manifest.authorization_scope, manifest.content_digest
-                pipe.sismember(reclaim_protected_key(scope), digest)
-                pipe.sismember(reclaim_unexpanded_key(scope), digest)
+                pipe.sismember(
+                    reclaim_expanded_key(manifest.authorization_scope),
+                    manifest.content_digest,
+                )
             flags = pipe.execute()
         return {
             manifest.content_digest
-            for manifest, bound, waiting in zip(
-                manifests, flags[::2], flags[1::2], strict=True
-            )
-            if bound and not waiting
+            for manifest, expanded in zip(manifests, flags, strict=True)
+            if expanded
         }
 
     def unexpanded(self, scope: str) -> list[str]:

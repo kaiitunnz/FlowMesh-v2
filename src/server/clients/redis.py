@@ -352,6 +352,10 @@ def reclaim_unexpanded_key(scope: str) -> str:
     return f"rc:{{{scope}}}:unexpanded"
 
 
+def reclaim_expanded_key(scope: str) -> str:
+    return f"rc:{{{scope}}}:expanded"
+
+
 def reclaim_uncertified_key(scope: str) -> str:
     return f"rc:{{{scope}}}:uncertified"
 
