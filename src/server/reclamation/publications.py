@@ -20,7 +20,7 @@ from pydantic import ValidationError
 
 from shared.content import ContentReference
 from shared.content.tree import TreeMember
-from shared.tasks.artifact_binding import ArtifactBinding, ArtifactKind
+from shared.tasks.artifact_binding import FINAL_REVISION, ArtifactBinding, ArtifactKind
 from shared.tasks.artifact_upload import ARTIFACTS_PENDING
 from shared.tasks.publication import (
     CHECKPOINT_FIELD,
@@ -28,14 +28,14 @@ from shared.tasks.publication import (
     PublicationDisposition,
 )
 
+from ..clients.redis import REDIS_CONN_ERRORS
 from .pins import AcquireMode, Nonces, PinStore, Verdict
+from .retirement import Backed
 from .trees import TreeExpander, TreeOutcome, TreeStatus
 
 # How many times one publication re-verifies objects whose retirement revision moved
 # while it verified them.
 VERIFY_ROUNDS = 3
-
-type Backed = Callable[[ContentReference], bool | None]
 
 
 @dataclass
@@ -133,7 +133,7 @@ def assertion_of(event_type: str, payload: dict[str, Any]) -> Assertion:
     for raw in child_artifacts.values() if isinstance(child_artifacts, dict) else ():
         bindings.extend(_bindings(raw))
     for binding in bindings:
-        assertion.add_binding(binding, staged)
+        assertion.add_binding(binding, staged and binding.revision == FINAL_REVISION)
     return assertion
 
 
@@ -175,16 +175,16 @@ class PublicationHolds:
         pins: PinStore,
         nonces: Callable[[], Nonces | None],
         backed: Backed,
+        trees: TreeExpander,
         logger: logging.Logger | None = None,
-        trees: TreeExpander | None = None,
     ) -> None:
         self._pins = pins
         self._nonces = nonces
         self._backed = backed
         self._logger = logger or logging.getLogger("publication-holds")
         self._trees = trees
-        self._owed: list[tuple[ContentReference, str]] = []
-        """Tree holds whose release waits for their manifest to be readable again."""
+        self._owed: list[Holds] = []
+        """Holds whose release waits for the store or the control store."""
         self._owed_lock = threading.Lock()
 
     def acquire(self, assertion: Assertion, locator: dict[str, Any]) -> Preparation:
@@ -216,7 +216,7 @@ class PublicationHolds:
 
     def _unexpanded(self, manifests: list[ContentReference]) -> list[ContentReference]:
         """Return the manifests whose members are not already protected."""
-        if not manifests or self._trees is None:
+        if not manifests:
             return []
         expanded = self._trees.expanded(manifests)
         return [m for m in manifests if m.content_digest not in expanded]
@@ -224,7 +224,6 @@ class PublicationHolds:
     def _hold_tree(
         self, manifest: ContentReference, locator: dict[str, Any], holds: Holds
     ) -> Preparation | None:
-        assert self._trees is not None
         holds.trees.append(manifest)
         refusal: list[Preparation] = []
 
@@ -307,10 +306,16 @@ class PublicationHolds:
         record: bool = True,
     ) -> Preparation | None:
         verified: dict[str, str] = {}
-        for _ in range(VERIFY_ROUNDS):
-            acquisition = self._pins.acquire(
-                scope, digests, holds.nonce, locator, mode, verified, manifests
-            )
+        moved = 0
+        while True:
+            try:
+                acquisition = self._pins.acquire(
+                    scope, digests, holds.nonce, locator, mode, verified, manifests
+                )
+            except Exception:
+                if record:
+                    holds.held[scope] = holds.held.get(scope, ()) + tuple(digests)
+                raise
             match acquisition.verdict:
                 case Verdict.ACQUIRED:
                     if record:
@@ -322,6 +327,14 @@ class PublicationHolds:
                         PublicationDisposition.RETRY_RETIREMENT,
                         "a named object is being removed from the store",
                         acquisition.retiring,
+                    )
+            if any(d in verified for d in acquisition.unverified):
+                moved += 1
+                if moved > VERIFY_ROUNDS:
+                    return Preparation(
+                        None,
+                        PublicationDisposition.RETRY,
+                        "a named object's removal kept moving while it was verified",
                     )
             missing: list[str] = []
             for digest, revision in acquisition.unverified.items():
@@ -343,11 +356,6 @@ class PublicationHolds:
                     "a named object is not in the store",
                     tuple(missing),
                 )
-        return Preparation(
-            None,
-            PublicationDisposition.RETRY,
-            "a named object's removal kept moving while it was verified",
-        )
 
     def release(self, holds: Holds) -> None:
         """Release exactly ``holds``; raises while the control store is unreachable.
@@ -355,40 +363,57 @@ class PublicationHolds:
         A tree whose manifest cannot be read now has its release owed, and repaid by
         a later ``repay``.
         """
-        for manifest in holds.trees:
-            self._release_tree(manifest, holds.nonce)
-        for scope, digests in holds.held.items():
-            if digests:
-                self._pins.release(scope, digests, holds.nonce)
+        if (rest := self._settle(holds)) is not None:
+            self._owe(rest)
 
     def repay(self) -> int:
-        """Release the tree holds a store outage left owed; returns how many are
-        still owed."""
+        """Release the holds an outage left owed; returns how many are still owed."""
         with self._owed_lock:
             owed, self._owed = self._owed, []
-        for manifest, nonce in owed:
-            try:
-                self._release_tree(manifest, nonce)
-            except OSError:
-                with self._owed_lock:
-                    self._owed.append((manifest, nonce))
+        still: list[Holds] = []
+        done = 0
+        try:
+            for holds in owed:
+                try:
+                    if (rest := self._settle(holds)) is not None:
+                        still.append(rest)
+                except REDIS_CONN_ERRORS:
+                    still.append(holds)
+                done += 1
+        finally:
+            with self._owed_lock:
+                self._owed.extend(still + owed[done:])
         with self._owed_lock:
             return len(self._owed)
 
-    def _release_tree(self, manifest: ContentReference, nonce: str) -> None:
-        assert self._trees is not None
-        outcome = self._trees.release(manifest, nonce, self._pins.release)
-        if outcome.status is TreeStatus.UNAVAILABLE:
-            with self._owed_lock:
-                self._owed.append((manifest, nonce))
+    def _settle(self, holds: Holds) -> Holds | None:
+        """Release ``holds`` as far as the store reads; returns the tree holds whose
+        manifest could not be read."""
+        unread = [
+            manifest
+            for manifest in holds.trees
+            if self._trees.release(manifest, holds.nonce, self._pins.release).status
+            is TreeStatus.UNAVAILABLE
+        ]
+        for scope, digests in holds.held.items():
+            if digests:
+                self._pins.release(scope, digests, holds.nonce)
+        return Holds(holds.nonce, {}, unread) if unread else None
+
+    def _owe(self, holds: Holds) -> None:
+        with self._owed_lock:
+            self._owed.append(holds)
 
     def _release_quietly(self, holds: Holds) -> None:
         try:
             self.release(holds)
+        except REDIS_CONN_ERRORS as exc:
+            self._logger.warning("Releasing holds waits for the control store: %s", exc)
+            self._owe(holds)
         except Exception as exc:
             # An earlier root's holds are released by the next one; this root's
             # stay until it is replaced.
-            self._logger.warning("Could not release a refused publication: %s", exc)
+            self._logger.warning("Could not release holds: %s", exc)
 
     def finish(
         self, holds: Holds, bound: frozenset[str], locator: dict[str, Any]
@@ -402,11 +427,8 @@ class PublicationHolds:
         released instead.
         """
         unfinished: list[tuple[ContentReference, TreeOutcome]] = []
-        assert self._trees is not None or not (holds.trees or holds.staged)
-        if self._trees is not None:
-            self.repay()
+        self.repay()
         for manifest in holds.trees:
-            assert self._trees is not None
             outcome = (
                 self._trees.promote(manifest, holds.nonce)
                 if manifest.content_digest in bound
@@ -435,7 +457,6 @@ class PublicationHolds:
         still be uploading, waits for the retirement to end; any other tree's bytes
         were stored when it was bound, so its scope is un-certified.
         """
-        assert self._trees is not None
         nonces = self._nonces()
         if nonces is None:
             return TreeOutcome(TreeStatus.UNAVAILABLE, "this root holds no epoch yet")
@@ -460,6 +481,7 @@ class PublicationHolds:
                 )
             return None
 
+        outcome = TreeOutcome(TreeStatus.UNAVAILABLE, "the expansion did not finish")
         try:
             outcome = self._trees.hold(manifest, hold_page)
             if outcome.status is TreeStatus.DONE:
@@ -469,13 +491,11 @@ class PublicationHolds:
                 outcome = promoted
             elif outcome.status is TreeStatus.RETIRING and not staged:
                 self._trees.uncertify(manifest, outcome.retiring)
-        except OSError as exc:
+        except REDIS_CONN_ERRORS as exc:
             outcome = TreeOutcome(TreeStatus.UNAVAILABLE, str(exc))
-        try:
-            self._release_tree(manifest, nonce)
-        except OSError:
-            with self._owed_lock:
-                self._owed.append((manifest, nonce))
+        finally:
+            if outcome.status is not TreeStatus.DONE:
+                self._release_quietly(Holds(nonce, {}, [manifest]))
         return outcome
 
 

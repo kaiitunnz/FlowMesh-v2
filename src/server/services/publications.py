@@ -17,7 +17,7 @@ import logging
 import threading
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -123,19 +123,20 @@ class PublicationIntake:
             return
         staged = [m.content_digest for m in holds.staged]
 
-        def finish(bound: frozenset[str]) -> None:
+        def finish(bound: Mapping[str, frozenset[str]]) -> None:
             self._finisher.submit(event.task_id, holds, bound, locator)
 
         answered = False
+        asserted: int | None = None
         try:
             with (
                 self._runtime.event_tail(event.task_id),
                 self._runtime.acknowledging(),
             ):
-                self._runtime.assert_publication(event.task_id)
+                asserted = self._runtime.assert_publication(event.task_id)
                 self._apply(event)
                 self._runtime.answer_publication(
-                    event.task_id, publication, finish, staged
+                    event.task_id, publication, finish, staged, asserted
                 )
                 answered = True
         except TransitionNotDurable as exc:
@@ -154,7 +155,9 @@ class PublicationIntake:
                 "Applying publication %s of %s failed", publication.kind, event.task_id
             )
         if not answered:
-            self._runtime.answer_publication(event.task_id, publication, finish, staged)
+            self._runtime.answer_publication(
+                event.task_id, publication, finish, staged, asserted
+            )
 
     def _refuse_success(self, event: TaskEvent, reason: str | None) -> None:
         """Fail a success naming a tree that is not one, as a success whose
@@ -237,7 +240,7 @@ class TreeFinisher:
         self,
         task_id: str,
         holds: Holds,
-        bound: frozenset[str],
+        bound: Mapping[str, frozenset[str]],
         locator: dict[str, Any],
     ) -> None:
         with self._cv:
@@ -258,7 +261,7 @@ class TreeFinisher:
             self.submit(
                 task_id,
                 holds,
-                frozenset(m.content_digest for m in manifests),
+                {task_id: frozenset(m.content_digest for m in manifests)},
                 {"task": task_id, "kind": "expansion"},
             )
 
@@ -283,7 +286,9 @@ class TreeFinisher:
 
     def _finish(self, job: "_Finish") -> None:
         try:
-            unfinished = self._holds.finish(job.holds, job.bound, job.locator)
+            unfinished = self._holds.finish(
+                job.holds, frozenset().union(*job.bound.values()), job.locator
+            )
         except Exception as exc:
             self._retry(job, str(exc))
             return
@@ -309,10 +314,11 @@ class TreeFinisher:
         if retry is not None:
             self._retry(job, retry)
             return
-        for digest in staged & job.bound:
-            self._runtime.tree_expanded(
-                job.task_id, digest, failed.get(digest), retired.get(digest, ())
-            )
+        for task_id, bound in job.bound.items():
+            for digest in staged & bound:
+                self._runtime.tree_expanded(
+                    task_id, digest, failed.get(digest), retired.get(digest, ())
+                )
 
     def _retry(self, job: "_Finish", reason: str) -> None:
         self._logger.warning(
@@ -332,7 +338,7 @@ class TreeFinisher:
 class _Finish:
     task_id: str
     holds: Holds
-    bound: frozenset[str]
+    bound: Mapping[str, frozenset[str]]
     locator: dict[str, Any]
     at: float = 0.0
     backoff: float = 1.0

@@ -334,3 +334,40 @@ def test_a_staged_tree_with_a_member_being_retired_is_expanded_once_it_ends(
         threading.Event().wait(0.02)
     assert r.raw.sismember(protected, member.digest)
     assert record is not None and not r.runtime._expanding.get(r.task_id)
+
+
+def test_restored_staged_trees_are_registered_before_any_event_is_consumed() -> None:
+    order: list[str] = []
+    store = _Store()
+    runtime: TaskRuntime = _runtime(store)
+    monitor, _, _ = _monitor(runtime)
+
+    class _Intake:
+        def start(self) -> None:
+            started = any(t.ident is not None for t in monitor._threads or ())
+            order.append("intake after a consumer" if started else "intake")
+
+        def stop(self, timeout: float = 5.0) -> None:
+            pass
+
+    def consumes() -> None:
+        order.append("consumer")
+
+    for loop in (
+        "_tasks_events_loop",
+        "_workers_events_loop",
+        "_node_events_loop",
+        "_finalizer_loop",
+    ):
+        setattr(
+            monitor, loop, consumes if loop == "_tasks_events_loop" else lambda: None
+        )
+    monitor._publications = cast(Any, _Intake())
+
+    async def start() -> None:
+        monitor.start()
+
+    asyncio.run(start())
+    for thread in monitor._threads or ():
+        thread.join(1)
+    assert order == ["intake", "consumer"]

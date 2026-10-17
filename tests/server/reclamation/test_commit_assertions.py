@@ -1,7 +1,7 @@
-"""Commits carrying asserted state: the epoch guard follows that state through held
-writes until a write carrying it lands, a later root stops this one, a faulted write
-keeps its scope out of collection, and the publication check reads without recording
-a dispatch."""
+"""Commits carrying asserted state: the epoch guard covers every write of the
+workflow until the publication's answer is delivered, a later root stops this one, a
+faulted write keeps its scope out of collection, and the publication check reads
+without recording a dispatch."""
 
 import asyncio
 from types import SimpleNamespace
@@ -31,6 +31,12 @@ class _Guarded(FakeRegistry):
         super().__init__()
         self.guards: list[CommitGuard | None] = []
         self.failure: BaseException | None = None
+        self.uncover_failure: BaseException | None = None
+
+    def mark_uncovered(self, scope: str, workflow_id: str) -> None:
+        if self.uncover_failure is not None:
+            raise self.uncover_failure
+        super().mark_uncovered(scope, workflow_id)
 
     def commit_transition(self, workflow_id: str, **kwargs: Any) -> None:
         self.guards.append(kwargs.get("guard"))
@@ -67,17 +73,26 @@ class _Rig:
             self.runtime._results, self.task_id, {"value": 1}, record.org_id
         )
 
-    def succeed(self, payload: dict[str, Any]) -> None:
+    def succeed(self, payload: dict[str, Any], asserted: int | None = None) -> None:
         with self.runtime.transition():
-            self.runtime.assert_publication(self.task_id)
+            if asserted is None:
+                asserted = self.runtime.assert_publication(self.task_id)
             self.runtime.mark_succeeded(
                 self.task_id, "wkr-1", payload, "2026-10-17T00:00:00Z", "dsp-1"
             )
-            publication = Publication.of(
-                "wkr-1", "dsp-1", self.task_id, "TASK_SUCCEEDED", payload
-            )
-            assert publication is not None
-            self.runtime.answer_publication(self.task_id, publication)
+            self.answer(payload, asserted)
+
+    def answer(self, payload: dict[str, Any], asserted: int | None) -> None:
+        publication = Publication.of(
+            "wkr-1", "dsp-1", self.task_id, "TASK_SUCCEEDED", payload
+        )
+        assert publication is not None
+        self.runtime.answer_publication(self.task_id, publication, assertion=asserted)
+
+    def write(self) -> None:
+        """Make a write of the task's workflow that carries no binding."""
+        with self.runtime.transition(), self.runtime._lock:
+            self.runtime._committer.commit_locked(self.task_id, sched=False)
 
 
 @pytest.fixture
@@ -166,3 +181,48 @@ def test_the_publication_check_reads_an_early_dispatch_without_recording_it(
     assert record is not None and record.status == TaskStatus.PENDING
     assert len(rig.store.guards) == commits
     assert rig.runtime.binding_workflow(rig.task_id, "wkr-2", "dsp-1") is None
+
+
+def test_the_guard_outlasts_a_write_that_does_not_carry_the_binding(rig) -> None:
+    rig.dispatch()
+    asserted = rig.runtime.assert_publication(rig.task_id)
+    # A write landing first, as the dispatch release before a prepared request's
+    # ledger binding, or an early dispatch's catch-up commit, does.
+    rig.write()
+    assert rig.store.guards[-1] == CommitGuard(rig.epoch)
+    rig.succeed(rig.payload(), asserted)
+    assert rig.store.guards[-1] == CommitGuard(rig.epoch)
+    assert [a.disposition.value for a in rig.answers] == ["committed"]
+
+    rig.write()
+    assert rig.store.guards[-1] is None
+
+
+def test_each_publication_of_a_workflow_keeps_it_guarded_until_answered(rig) -> None:
+    rig.dispatch()
+    first = rig.runtime.assert_publication(rig.task_id)
+    second = rig.runtime.assert_publication(rig.task_id)
+    rig.succeed(rig.payload(), first)
+    rig.write()
+    assert rig.store.guards[-1] == CommitGuard(rig.epoch)
+
+    rig.answer(rig.payload(), second)
+    rig.write()
+    assert rig.store.guards[-1] is None
+
+
+def test_a_scope_mark_the_store_refuses_is_stored_by_the_retry(rig) -> None:
+    rig.dispatch()
+    record = rig.runtime.get_record(rig.task_id)
+    assert record is not None
+    rig.store.failure = ResponseError("WRONGTYPE Operation against a key")
+    rig.store.uncover_failure = ConnectionError("store down")
+    with pytest.raises(ResponseError):
+        rig.succeed(rig.payload())
+    assert getattr(rig.store, "uncovered", set()) == set()
+
+    # The write still faults, so the retry raises, having stored the mark first.
+    rig.store.uncover_failure = None
+    with pytest.raises(ResponseError):
+        rig.runtime._retry_durability(rig.workflow_id)
+    assert rig.store.uncovered == {(record.org_id, rig.workflow_id)}

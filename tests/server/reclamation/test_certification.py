@@ -6,6 +6,7 @@ import pytest
 from server.clients.redis import (
     RECLAIM_BACKFILL_FAULTS_KEY,
     RECLAIM_HOOKS_ON_KEY,
+    RECLAIM_ROOT_EPOCH_KEY,
     reclaim_cert_key,
     reclaim_uncertified_key,
     reclaim_unexpanded_key,
@@ -35,12 +36,51 @@ def _complete(coverage: CoverageStore, generation: int) -> None:
         assert coverage.complete(generation, family)
 
 
-def test_the_marker_only_rises(setup) -> None:
+def test_the_marker_keeps_its_generation_across_roots(setup) -> None:
     coverage, raw = setup
     assert coverage.mark_hooks_on(3) == 3
     assert coverage.mark_hooks_on(2) == 3
+    assert coverage.mark_hooks_on(5) == 3
     assert raw.get(RECLAIM_HOOKS_ON_KEY) == "3"
+
+
+def test_an_undecodable_key_has_the_next_root_start_a_new_generation(setup) -> None:
+    coverage, raw = setup
+    coverage.mark_hooks_on(3)
+    coverage.record_fault(3, "org-b")
+
+    assert coverage.mark_hooks_on(2) == 3
     assert coverage.mark_hooks_on(5) == 5
+    assert coverage.mark_hooks_on(6) == 5
+    assert raw.get(RECLAIM_HOOKS_ON_KEY) == "5"
+
+
+def test_a_lost_marker_starts_a_new_generation(setup) -> None:
+    coverage, raw = setup
+    _complete(coverage, coverage.mark_hooks_on(1))
+    raw.delete(RECLAIM_HOOKS_ON_KEY)
+
+    assert coverage.mark_hooks_on(4) == 4
+    assert coverage.certify(_SCOPE).status is CertificationStatus.INCOMPLETE
+
+
+def test_a_certification_stands_across_roots(setup) -> None:
+    coverage, raw = setup
+    _complete(coverage, coverage.mark_hooks_on(1))
+    assert coverage.certify(_SCOPE).certified
+
+    assert coverage.mark_hooks_on(2) == 1
+    assert coverage.certify(_SCOPE).certified
+    assert raw.get(reclaim_cert_key(_SCOPE)) == "1"
+
+
+def test_a_root_is_superseded_only_by_a_later_one(setup) -> None:
+    coverage, raw = setup
+    assert not coverage.superseded(3)
+    raw.set(RECLAIM_ROOT_EPOCH_KEY, "3")
+    assert not coverage.superseded(3)
+    raw.set(RECLAIM_ROOT_EPOCH_KEY, "4")
+    assert coverage.superseded(3)
 
 
 def test_a_scope_is_certified_once_every_family_completed_in_its_generation(
@@ -77,6 +117,7 @@ def test_completion_in_an_earlier_generation_does_not_count(setup) -> None:
     coverage, raw = setup
     _complete(coverage, coverage.mark_hooks_on(1))
     assert coverage.certify(_SCOPE).certified
+    coverage.record_fault(1, "org-b")
     coverage.mark_hooks_on(2)
 
     assert coverage.certify(_SCOPE).status is CertificationStatus.INCOMPLETE
@@ -86,6 +127,7 @@ def test_completion_in_an_earlier_generation_does_not_count(setup) -> None:
 def test_a_later_root_takes_completion_from_an_earlier_one(setup) -> None:
     coverage, _ = setup
     coverage.mark_hooks_on(1)
+    coverage.record_fault(1, None)
     coverage.mark_hooks_on(2)
     assert not coverage.complete(1, FAMILIES[0])
 

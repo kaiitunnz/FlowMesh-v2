@@ -622,6 +622,22 @@ class WorkflowRegistry(WorkflowHistoryStore, ArtifactCatalogStore):
             return EpochFenced(f"the root epoch moved past {guard.epoch}")
         return GuardInterrupted(f"a guarded commit lost its watch: {exc}")
 
+    def _begin(self, pipe: Pipeline, guard: CommitGuard | None) -> None:
+        try:
+            _guard_sync(pipe, guard)
+        except WatchError as exc:
+            assert guard is not None
+            raise self._watch_lost(guard, exc) from exc
+
+    async def _begin_async(
+        self, pipe: AsyncPipeline, guard: CommitGuard | None
+    ) -> None:
+        try:
+            await _guard_async(pipe, guard)
+        except WatchError as exc:
+            assert guard is not None
+            raise await self._watch_lost_async(guard, exc) from exc
+
     def _execute(self, pipe: Pipeline, guard: CommitGuard | None) -> list[Any]:
         try:
             return pipe.execute()
@@ -654,7 +670,7 @@ class WorkflowRegistry(WorkflowHistoryStore, ArtifactCatalogStore):
         """Register a workflow with its task states, schedule, plan, ledger and task
         blueprints as one atomic transaction."""
         with self._rds.sync.control_pipeline() as pipe:
-            _guard_sync(pipe, guard)
+            self._begin(pipe, guard)
             _queue_registration(
                 pipe, workflow_id, tasks, sched, v2, ledger, submitted_at, blueprints
             )
@@ -673,7 +689,7 @@ class WorkflowRegistry(WorkflowHistoryStore, ArtifactCatalogStore):
     ) -> None:
         """Register a workflow as ``register_workflow`` does."""
         async with self._rds.asyncio.control_pipeline() as pipe:
-            await _guard_async(pipe, guard)
+            await self._begin_async(pipe, guard)
             _queue_registration(
                 pipe, workflow_id, tasks, sched, v2, ledger, submitted_at, blueprints
             )
@@ -957,7 +973,7 @@ class WorkflowRegistry(WorkflowHistoryStore, ArtifactCatalogStore):
         never leave durable state half-applied.
         """
         with self._rds.sync.control_pipeline() as pipe:
-            _guard_sync(pipe, guard)
+            self._begin(pipe, guard)
             _queue_transition(
                 pipe,
                 workflow_id,
@@ -988,7 +1004,7 @@ class WorkflowRegistry(WorkflowHistoryStore, ArtifactCatalogStore):
     ) -> None:
         """Apply a workflow state delta as ``commit_transition`` does."""
         async with self._rds.asyncio.control_pipeline() as pipe:
-            await _guard_async(pipe, guard)
+            await self._begin_async(pipe, guard)
             _queue_transition(
                 pipe,
                 workflow_id,
@@ -1036,7 +1052,7 @@ class WorkflowRegistry(WorkflowHistoryStore, ArtifactCatalogStore):
         if not records and not retire:
             return
         with self._rds.sync.control_pipeline() as pipe:
-            _guard_sync(pipe, guard)
+            self._begin(pipe, guard)
             _queue_dynamic_tasks(
                 pipe,
                 workflow_id,
@@ -1071,7 +1087,7 @@ class WorkflowRegistry(WorkflowHistoryStore, ArtifactCatalogStore):
         if not records and not retire:
             return
         async with self._rds.asyncio.control_pipeline() as pipe:
-            await _guard_async(pipe, guard)
+            await self._begin_async(pipe, guard)
             _queue_dynamic_tasks(
                 pipe,
                 workflow_id,
@@ -1207,7 +1223,7 @@ class WorkflowRegistry(WorkflowHistoryStore, ArtifactCatalogStore):
     ) -> None:
         """Store a workflow's ledger changes with what it holds beyond its tasks."""
         with self._rds.sync.control_pipeline() as pipe:
-            _guard_sync(pipe, guard)
+            self._begin(pipe, guard)
             _queue_revision(pipe, workflow_id)
             _queue_ledger(pipe, workflow_id, ledger, control)
             self._execute(pipe, guard)
@@ -1220,7 +1236,7 @@ class WorkflowRegistry(WorkflowHistoryStore, ArtifactCatalogStore):
         guard: CommitGuard | None = None,
     ) -> None:
         async with self._rds.asyncio.control_pipeline() as pipe:
-            await _guard_async(pipe, guard)
+            await self._begin_async(pipe, guard)
             _queue_revision(pipe, workflow_id)
             _queue_ledger(pipe, workflow_id, ledger, control)
             await self._execute_async(pipe, guard)

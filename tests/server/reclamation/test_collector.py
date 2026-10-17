@@ -14,6 +14,8 @@ from server.clients.redis import (
     RECLAIM_SCOPES_KEY,
     reclaim_condemned_key,
     reclaim_deleting_key,
+    reclaim_multipart_dispatch_key,
+    reclaim_multipart_key,
     reclaim_pins_key,
     reclaim_protected_key,
     reclaim_uncertified_key,
@@ -23,6 +25,7 @@ from server.reclamation.audit import AuditTrail
 from server.reclamation.backfill import FAMILIES
 from server.reclamation.certification import CoverageStore
 from server.reclamation.collector import AuditCollector
+from server.reclamation.multipart import MultipartOwner, MultipartStore
 from server.reclamation.store_admin import Ineligibility, StoreAdmin
 from shared.content import BACKEND_FILESYSTEM, ObjectStoreConfig, content_digest
 from tests.server.redis_helpers import fake_redis_client
@@ -139,6 +142,7 @@ class _Fixture:
             StoreAdmin(self.s3, "bucket", _PREFIX),
             _LOGGER,
             AuditTrail(self.rds),
+            multipart=MultipartStore(self.rds),
             min_age_sec=3600,
             page_pause_sec=0,
             clock=lambda: _NOW,
@@ -318,6 +322,32 @@ def test_open_uploads_are_reported_and_left_open(fx) -> None:
     )
     assert result.uploads.by_scope == {_A: 1}
     _assert_nothing_destroyed(fx.s3, fx.raw)
+
+
+def test_a_sweep_drops_the_registrations_of_uploads_the_store_no_longer_holds(
+    fx,
+) -> None:
+    fx.certify_all()
+    store = MultipartStore(fx.rds)
+    owner = MultipartOwner.dispatch("dsp-1", "tsk-1")
+    for upload_id in ("u-open", "u-closed"):
+        store.register(_A, upload_id, "k", owner, "wkr-1", now=_NOW - 10)
+    store.register(_A, "u-late", "k", owner, "wkr-1", now=_NOW + 1)
+    fx.s3.uploads = [
+        {
+            "Key": f"{_PREFIX}/{_A}/sha256/x",
+            "UploadId": "u-open",
+            "Initiated": _when(_OLD),
+        }
+    ]
+
+    fx.collector.sweep()
+
+    assert set(fx.raw.hkeys(reclaim_multipart_key(_A))) == {"u-open", "u-late"}
+    assert set(fx.raw.hkeys(reclaim_multipart_dispatch_key(_A, "dsp-1"))) == {
+        "u-open",
+        "u-late",
+    }
 
 
 @pytest.mark.parametrize("status", [None, "Suspended"])

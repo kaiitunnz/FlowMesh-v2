@@ -1,5 +1,6 @@
 """Durable commits of task transitions and workflow ledgers."""
 
+import itertools
 import logging
 import threading
 from collections import defaultdict
@@ -251,11 +252,13 @@ class TransitionCommitter:
         self.faulted: set[str] = set()
         self.on_faulted: Callable[[str], None] | None = None
         self.on_fault_cleared: Callable[[str], None] | None = None
-        # The root epoch this runtime commits asserted state under, and the workflows
-        # whose in-memory state holds an asserted publication no landed write carries,
-        # which every write of theirs is made under until one lands.
+        # The root epoch this runtime commits asserted state under, and the
+        # publications asserted into each workflow's state whose answers are not yet
+        # delivered; every write of such a workflow is made under the epoch.
         self.epoch: int | None = None
-        self._asserted: set[str] = set()
+        self._asserted: dict[str, set[int]] = {}
+        self._assertions: dict[int, tuple[str, ...]] = {}
+        self._assertion_ids = itertools.count(1)
         # Set once a later root took the epoch: this runtime commits nothing more.
         self.fenced = False
         self.on_fenced: Callable[[EpochFenced], None] | None = None
@@ -361,13 +364,26 @@ class TransitionCommitter:
         if (engine := self._engines.get(workflow_id)) is not None:
             engine.owe_ledger_rewrite()
 
-    def assert_locked(self, workflow_id: str) -> None:
-        """Make the workflow's writes under the root epoch until one carrying its state
-        as it now stands lands."""
-        self._asserted.add(workflow_id)
+    def assert_locked(self, workflow_ids: Collection[str]) -> int:
+        """Make the workflows' writes under the root epoch until the returned
+        assertion is released."""
+        token = next(self._assertion_ids)
+        self._assertions[token] = tuple(dict.fromkeys(workflow_ids))
+        for workflow_id in self._assertions[token]:
+            self._asserted.setdefault(workflow_id, set()).add(token)
+        return token
+
+    def release_assertion_locked(self, token: int) -> None:
+        """End an assertion; releasing one already ended does nothing."""
+        for workflow_id in self._assertions.pop(token, ()):
+            tokens = self._asserted.get(workflow_id)
+            if tokens is not None:
+                tokens.discard(token)
+                if not tokens:
+                    del self._asserted[workflow_id]
 
     def _guard(self, workflow_id: str) -> CommitGuard | None:
-        if workflow_id not in self._asserted:
+        if not self._asserted.get(workflow_id):
             return None
         if self.epoch is None:
             raise EpochFenced("no root epoch is held to commit asserted state under")
@@ -434,7 +450,6 @@ class TransitionCommitter:
         finally:
             self._making.discard(workflow_id)
         del self.debt[workflow_id]
-        self._asserted.discard(workflow_id)
         if workflow_id in self.faulted:
             self.faulted.discard(workflow_id)
             if self.on_fault_cleared is not None:

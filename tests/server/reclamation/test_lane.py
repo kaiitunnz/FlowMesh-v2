@@ -46,11 +46,8 @@ class _Gate:
 
 
 def _settle(lane: PublicationLane) -> None:
-    for _ in range(200):
-        held, _, _ = lane.depth()
-        if held == 0:
-            return
-        threading.Event().wait(0.01)
+    with lane._cv:
+        assert lane._cv.wait_for(lambda: not lane._held, timeout=5)
 
 
 def test_a_held_publication_coalesces_and_a_full_lane_turns_one_away() -> None:
@@ -156,5 +153,29 @@ def test_a_failing_publication_frees_its_slot() -> None:
         _settle(lane)
         assert lane.offer("b", "wfl-1", ran.set) is Admission.ADMITTED
         assert ran.wait(5)
+    finally:
+        lane.stop(1.0)
+
+
+def test_a_waiting_publication_its_source_stops_offering_lapses() -> None:
+    clock = _Clock()
+    gate = _Gate()
+    lane = PublicationLane(threads=1, capacity=1, waiting_sec=60.0, clock=clock)
+    lane.start()
+    try:
+        lane.offer("first", "wfl-1", gate.job("first"))
+        gate.wait_running("first")
+        for key in ("gone-a", "gone-b"):
+            assert lane.offer(key, "wfl-2", gate.job(key)) is Admission.BUSY
+        clock.now = 30.0
+        assert lane.offer("live", "wfl-3", gate.job("live")) is Admission.BUSY
+        assert lane.depth()[1] == 3
+
+        clock.now = 61.0
+        assert lane.offer("live", "wfl-3", gate.job("live")) is Admission.BUSY
+        assert lane.depth() == (1, 1, 0)
+        gate.finish("first")
+        _settle(lane)
+        assert lane.offer("live", "wfl-3", gate.job("live")) is Admission.ADMITTED
     finally:
         lane.stop(1.0)

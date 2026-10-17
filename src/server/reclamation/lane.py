@@ -7,7 +7,8 @@ each finished publication frees is reserved, in turn across workflows, for the o
 publication waiting in that workflow, which its next offer takes. A waiting publication
 keeps its place across offers, so a continuously offered one is never overtaken
 indefinitely; a reservation its source does not take up within ``reservation_sec``
-lapses, and that publication stops waiting.
+lapses, and that publication stops waiting, as does one its source stops offering
+for ``waiting_sec``.
 """
 
 import logging
@@ -23,6 +24,8 @@ THREADS = 4
 CAPACITY = 256
 # How long a slot stays reserved for a waiting publication's next offer.
 RESERVATION_SEC = 15.0
+# How long a publication keeps its place without being offered again.
+WAITING_SEC = 60.0
 
 
 class Admission(StrEnum):
@@ -41,6 +44,7 @@ class PublicationLane:
         threads: int = THREADS,
         capacity: int = CAPACITY,
         reservation_sec: float = RESERVATION_SEC,
+        waiting_sec: float = WAITING_SEC,
         logger: logging.Logger | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -49,14 +53,15 @@ class PublicationLane:
         self._threads_wanted = threads
         self._capacity = capacity
         self._reservation_sec = reservation_sec
+        self._waiting_sec = waiting_sec
         self._logger = logger or logging.getLogger("publication-lane")
         self._clock = clock
         self._cv = threading.Condition()
         self._held: dict[Hashable, Callable[[], None] | None] = {}
         self._queue: deque[Hashable] = deque()
-        # The publications waiting for a slot, oldest first within each workflow, and
-        # the workflows in the order their turns come.
-        self._waiting: dict[str, OrderedDict[Hashable, None]] = {}
+        # The publications waiting for a slot, oldest first within each workflow, with
+        # when each was last offered, and the workflows in the order their turns come.
+        self._waiting: dict[str, OrderedDict[Hashable, float]] = {}
         self._turns: deque[str] = deque()
         self._reserved: dict[Hashable, tuple[str, float]] = {}
         self._stopping = False
@@ -116,7 +121,7 @@ class PublicationLane:
         if (keys := self._waiting.get(workflow_id)) is None:
             keys = self._waiting[workflow_id] = OrderedDict()
             self._turns.append(workflow_id)
-        keys.setdefault(key, None)
+        keys[key] = self._clock()
 
     def _unwait(self, workflow_id: str, key: Hashable) -> None:
         if (keys := self._waiting.get(workflow_id)) is None:
@@ -151,6 +156,14 @@ class PublicationLane:
         ]
         for key, workflow_id in lapsed:
             del self._reserved[key]
+            self._unwait(workflow_id, key)
+        lapsed += [
+            (key, workflow_id)
+            for workflow_id, keys in list(self._waiting.items())
+            for key, offered in list(keys.items())
+            if key not in self._reserved and offered + self._waiting_sec <= now
+        ]
+        for key, workflow_id in lapsed:
             self._unwait(workflow_id, key)
         if lapsed:
             self._grant()

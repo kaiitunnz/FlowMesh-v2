@@ -92,19 +92,44 @@ class UploadAck:
     settled: UploadSettled
 
 
+class PublicationJoint:
+    """One publication's settlement: its answer, the end of its holds and of its
+    epoch assertion, made once every workflow its commit touched is durable."""
+
+    def __init__(
+        self,
+        answer: PublicationAnswer,
+        parts: int,
+        finish: Callable[[], None] | None = None,
+        assertion: int | None = None,
+    ) -> None:
+        self.answer = answer
+        self.assertion = assertion
+        self._finish = finish
+        self._parts = parts
+        self._arrived: set[int] = set()
+        self._lock = threading.Lock()
+
+    def arrive(self, part: int) -> bool:
+        """Record one workflow's part as durable; returns whether every part is."""
+        with self._lock:
+            self._arrived.add(part)
+            return len(self._arrived) == self._parts
+
+    def finish_once(self) -> None:
+        """End the publication's holds; a second call does nothing."""
+        with self._lock:
+            finish, self._finish = self._finish, None
+        if finish is not None:
+            finish()
+
+
 @dataclass(frozen=True)
-class AnswerPublication:
-    """Tell the worker where one of its publications stands."""
+class SettlePublication:
+    """One workflow's part of a publication's settlement."""
 
-    worker_id: str
-    answer: PublicationAnswer
-
-
-@dataclass(frozen=True)
-class ReleaseHolds:
-    """Release the holds a publication took on the objects its commit binds."""
-
-    release: Callable[[], None]
+    joint: PublicationJoint
+    part: int
 
 
 @dataclass(frozen=True)
@@ -127,8 +152,7 @@ type AfterCommit = (
     | AuthorizeTurn
     | UploadAck
     | TransferMultipart
-    | AnswerPublication
-    | ReleaseHolds
+    | SettlePublication
 )
 
 

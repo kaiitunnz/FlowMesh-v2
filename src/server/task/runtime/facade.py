@@ -219,16 +219,16 @@ from . import (
 from .after_commit import (
     AfterCommit,
     AfterCommitActions,
-    AnswerPublication,
     AuthorizeTurn,
     CreditRelease,
     Interrupt,
     Issue,
+    PublicationJoint,
     Purge,
     Reap,
-    ReleaseHolds,
     Revoke,
     Settled,
+    SettlePublication,
     TransferMultipart,
     UploadAck,
 )
@@ -671,6 +671,9 @@ class TaskRuntime:
         # Members of a task's staged trees retired before, whose backing its upload's
         # durability check verifies.
         self._retired_members: dict[str, set[ContentReference]] = {}
+        # The scope a faulted workflow's write left uncovered whose mark is still to
+        # be stored, retried with the workflow's held writes.
+        self._uncover_owed: dict[str, str] = {}
         self._occurrences = OccurrenceMaterializer(
             self._tasks, self._original_deps, self._committer
         )
@@ -1984,16 +1987,28 @@ class TaskRuntime:
         landed a binding without its protection."""
         if (scope := self._scope_locked(workflow_id)) is None:
             return
+        self._uncover_owed[workflow_id] = scope
+        self._repay_uncover_locked(workflow_id)
+
+    def _repay_uncover_locked(self, workflow_id: str) -> None:
+        if (scope := self._uncover_owed.get(workflow_id)) is None:
+            return
         try:
             self._workflow_registry.mark_uncovered(scope, workflow_id)
         except Exception:
-            self._logger.exception(
-                "Could not keep scope %s out of collection after workflow %s faulted",
+            self._logger.warning(
+                "Could not keep scope %s out of collection after workflow %s faulted; "
+                "retrying",
                 scope,
                 workflow_id,
+                exc_info=True,
             )
+            self._durability.schedule(workflow_id)
+            return
+        del self._uncover_owed[workflow_id]
 
     def _fault_cleared_locked(self, workflow_id: str) -> None:
+        self._uncover_owed.pop(workflow_id, None)
         if (scope := self._scope_locked(workflow_id)) is not None:
             try:
                 self._workflow_registry.clear_uncovered(scope, workflow_id)
@@ -2154,10 +2169,13 @@ class TaskRuntime:
                     self._multipart.transfer(
                         scope, dispatch_id, MultipartOwner.upload(dispatch_id)
                     )
-            case AnswerPublication(answer=answer):
-                self.send_publication_answer(answer)
-            case ReleaseHolds(release=release):
-                release()
+            case SettlePublication(joint=joint, part=part):
+                if joint.arrive(part):
+                    if joint.assertion is not None:
+                        with self._lock:
+                            self._committer.release_assertion_locked(joint.assertion)
+                    joint.finish_once()
+                    self.send_publication_answer(joint.answer)
         return True
 
     def send_upload_settled(self, worker_id: str, settled: UploadSettled) -> None:
@@ -2192,12 +2210,15 @@ class TaskRuntime:
         """Make a workflow's held writes durable and deliver what failed to deliver,
         keeping the workflow scheduled while either remains."""
         with self._transition():
+            self._repay_uncover_locked(workflow_id)
             self._committer.close_locked(workflow_id)
             self._actions.retry_failed_locked(workflow_id)
         with self._lock:
-            pending = not self._committer.durable(
-                workflow_id
-            ) or self._actions.has_failed(workflow_id)
+            pending = (
+                not self._committer.durable(workflow_id)
+                or self._actions.has_failed(workflow_id)
+                or workflow_id in self._uncover_owed
+            )
         if pending:
             self._durability.schedule(workflow_id)
 
@@ -4078,12 +4099,18 @@ class TaskRuntime:
                 upload = record.internal.artifact_upload if record is not None else None
             if upload is not None and upload.pending:
                 owner_gone = self._worker_registry.get_worker(upload.owner_id) is None
-        verdict = (
+        checked = (
             self._staged_verdict(task_id, worker_id, dispatch_id)
             if report is UploadReport.UPLOADED
             else None
         )
         with self._transition():
+            verdict = None
+            if checked is not None:
+                verdict, retired = checked
+                if retired != self._retired_members.get(task_id, frozenset()):
+                    # A tree expanded meanwhile; the owner's next report is checked.
+                    verdict = StagedVerdict(StagedStanding.UNKNOWN)
             record = self._reported_record_locked(task_id)
             if record is not None:
                 self._apply_upload_report_locked(
@@ -4094,9 +4121,10 @@ class TaskRuntime:
 
     def _staged_verdict(
         self, task_id: str, worker_id: str, dispatch_id: str
-    ) -> StagedVerdict | None:
+    ) -> tuple[StagedVerdict, frozenset[ContentReference]] | None:
         """Check the objects an owed upload names against their retirement, off the
-        lock; None when no check applies."""
+        lock, with the retired tree members the check covered; None when no check
+        applies."""
         if (retirement := self._retirement) is None:
             return None
         with self._lock:
@@ -4116,14 +4144,15 @@ class TaskRuntime:
                 if binding.kind is ArtifactKind.FILE
                 and binding.revision == FINAL_REVISION
             ]
-            references.extend(self._retired_members.get(task_id, ()))
+            retired = frozenset(self._retired_members.get(task_id, ()))
+            references.extend(retired)
         try:
-            return retirement.check(references)
+            return retirement.check(references), retired
         except Exception as exc:
             self._logger.warning(
                 "Could not check the retirement of %s's upload: %s", task_id, exc
             )
-            return StagedVerdict(StagedStanding.UNKNOWN)
+            return StagedVerdict(StagedStanding.UNKNOWN), retired
 
     def _answer_unheld_upload(
         self, task_id: str, worker_id: str, dispatch_id: str
@@ -5551,50 +5580,65 @@ class TaskRuntime:
                 return None
             return record.workflow_id
 
-    def assert_publication(self, task_id: str) -> None:
-        """Commit the task's workflow under the root epoch until a write carrying what
-        the publication about to apply binds lands."""
+    def assert_publication(self, task_id: str) -> int | None:
+        """Commit every workflow the task's publication binds into, its own and each
+        merged child's, under the root epoch until the publication's answer is
+        delivered; returns the assertion, or None for a task this runtime does not
+        hold."""
         with self._lock:
-            if (record := self._tasks.get(task_id)) is not None:
-                self._committer.assert_locked(record.workflow_id)
+            if (record := self._tasks.get(task_id)) is None:
+                return None
+            return self._committer.assert_locked(
+                [each.workflow_id for each in self._merged_records_locked(record)]
+            )
 
     def answer_publication(
         self,
         task_id: str,
         publication: Publication,
-        finish: Callable[[frozenset[str]], None] | None = None,
+        finish: Callable[[Mapping[str, frozenset[str]]], None] | None = None,
         staged_trees: Collection[str] = (),
+        assertion: int | None = None,
     ) -> None:
-        """Answer a publication from what its task's state now binds, and finish its
-        holds, once that state is durable.
+        """Answer a publication from what its task's state now binds, finish its holds
+        and end its ``assertion``, once every workflow it binds into is durable.
 
-        ``finish`` hears the tree manifests the task's catalog binds when the
-        publication is committed, and none otherwise. Of the ``staged_trees`` it binds,
-        each holds the task's upload short of durable until its members are protected.
+        ``finish`` hears the tree manifests each task of the publication, its own and
+        each merged child, binds when the publication is committed, and none
+        otherwise. Of the ``staged_trees`` a task binds, each holds that task's upload
+        short of durable until its members are protected.
         """
         with self._transition():
             record = self._tasks.get(task_id)
             disposition, reason = self._publication_standing_locked(record, publication)
-            bound: frozenset[str] = frozenset()
-            if record is not None and disposition is PublicationDisposition.COMMITTED:
-                bound = frozenset(
-                    binding.reference.content_digest
-                    for binding in record.internal.runtime.artifacts.values()
-                    if binding.kind is not ArtifactKind.FILE
-                )
-                if expanding := bound.intersection(staged_trees):
-                    self._expanding.setdefault(task_id, set()).update(expanding)
-            answer = AnswerPublication(
-                publication.registration,
+            records = self._merged_records_locked(record) if record is not None else []
+            bound: dict[str, frozenset[str]] = {}
+            if disposition is PublicationDisposition.COMMITTED:
+                for each in records:
+                    trees = frozenset(
+                        binding.reference.content_digest
+                        for binding in each.internal.runtime.artifacts.values()
+                        if binding.kind is not ArtifactKind.FILE
+                    )
+                    if trees:
+                        bound[each.task_id] = trees
+                    if expanding := trees.intersection(staged_trees):
+                        self._expanding.setdefault(each.task_id, set()).update(
+                            expanding
+                        )
+            workflows = list(dict.fromkeys(each.workflow_id for each in records))
+            joint = PublicationJoint(
                 PublicationAnswer(
                     publication=publication, disposition=disposition, reason=reason
                 ),
+                max(1, len(workflows)),
+                (lambda: finish(bound)) if finish is not None else None,
+                assertion,
             )
-            self._file_locked(
-                task_id,
-                answer,
-                (ReleaseHolds(lambda: finish(bound)) if finish is not None else None),
-            )
+            if not workflows:
+                self._actions.queue_locked(SettlePublication(joint, 0))
+            for part, workflow_id in enumerate(workflows):
+                self._actions.file_locked(workflow_id, SettlePublication(joint, part))
 
     def expanding_trees(self, task_id: str, manifests: Collection[str]) -> None:
         """Hold the task's upload short of durable until each of ``manifests`` is
@@ -5606,15 +5650,16 @@ class TaskRuntime:
     def staged_trees(self) -> list[tuple[str, ContentReference]]:
         """Return each tree of a task whose upload is still owed, by task."""
         with self._lock:
-            return [
-                (record.task_id, binding.reference)
-                for record in self._tasks.values()
-                if (upload := record.internal.artifact_upload) is not None
-                and upload.pending
-                for binding in record.internal.runtime.artifacts.values()
-                if binding.kind is ArtifactKind.TREE
-                and binding.revision == FINAL_REVISION
-            ]
+            return self._staged_trees_locked()
+
+    def _staged_trees_locked(self) -> list[tuple[str, ContentReference]]:
+        return [
+            (record.task_id, binding.reference)
+            for task_id in self._uploads.pending_tasks_locked()
+            if (record := self._tasks.get(task_id)) is not None
+            for binding in record.internal.runtime.artifacts.values()
+            if binding.kind is ArtifactKind.TREE and binding.revision == FINAL_REVISION
+        ]
 
     def tree_expanded(
         self,
@@ -5704,11 +5749,6 @@ class TaskRuntime:
                 payload=answer.model_dump(mode="json"),
             ),
         )
-
-    def file_hold_release(self, task_id: str, release: Callable[[], None]) -> None:
-        """Release a publication's holds once its task's workflow is durable."""
-        with self._transition():
-            self._file_locked(task_id, ReleaseHolds(release))
 
     def begin_publish(
         self,

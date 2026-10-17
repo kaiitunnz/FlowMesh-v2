@@ -5,6 +5,7 @@ import asyncio
 
 import fakeredis
 import pytest
+from redis.exceptions import WatchError
 
 from server.clients.redis import (
     RECLAIM_ROOT_EPOCH_KEY,
@@ -129,3 +130,41 @@ def test_a_fenced_reset_leaves_the_stored_ledger_whole(
     # Neither the delete nor the rewrite of the reset landed.
     assert raw.hgetall(workflow_ds_key(_WF)) == {"f": "1:{}"}
     assert raw.smembers(reclaim_protected_key("org-a")) == {_REF.content_digest}
+
+
+def test_a_disconnect_while_the_guard_reads_the_epoch_is_retriable(
+    setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry, raw = setup
+    epoch = registry.claim_root_epoch()
+
+    def disconnects(pipe, guard):
+        raise WatchError("A ConnectionError occurred while watching one or more keys")
+
+    monkeypatch.setattr("server.registries.workflow._guard_sync", disconnects)
+    with pytest.raises(GuardInterrupted) as caught:
+        registry.save_ledger(_WF, _changes(), guard=CommitGuard(epoch))
+    assert store_unavailable(caught.value)
+
+    raw.incr(RECLAIM_ROOT_EPOCH_KEY)
+    with pytest.raises(EpochFenced):
+        registry.save_ledger(_WF, _changes(), guard=CommitGuard(epoch))
+    assert not raw.exists(workflow_ds_key(_WF))
+
+
+def test_an_async_disconnect_while_the_guard_reads_the_epoch_is_retriable(
+    setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry, _ = setup
+
+    async def disconnects(pipe, guard):
+        raise WatchError("A ConnectionError occurred while watching one or more keys")
+
+    monkeypatch.setattr("server.registries.workflow._guard_async", disconnects)
+
+    async def run() -> None:
+        epoch = await registry.claim_root_epoch_async()
+        with pytest.raises(GuardInterrupted):
+            await registry.save_ledger_async(_WF, _changes(), guard=CommitGuard(epoch))
+
+    asyncio.run(run())

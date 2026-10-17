@@ -10,12 +10,16 @@ it. A record being aborted dooms the UploadId: its writer starts another.
 A scope's records live in one hash. Uploads owned by a dispatch are indexed by it, so
 moving them to the obligation the dispatch's success leaves costs one call per
 dispatch, proportional to its own uploads; once moved, a dispatch's later
-registrations take the obligation directly.
+registrations take the obligation directly, until the obligation settles and its index
+is released. A record leaves once a listing of the store's open uploads that started
+after its registration no longer names its UploadId: the upload was completed or
+aborted, and an UploadId never opens again.
 """
 
 import json
 import logging
 import time
+from collections.abc import Set
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Protocol
@@ -24,6 +28,7 @@ from shared.content.multipart import MULTIPART_ACK_FRAME_KIND, MultipartVerdict
 from shared.schemas.command import MediatedOpMessage
 
 from ..clients.redis import (
+    RECLAIM_SCOPES_KEY,
     RedisClient,
     content_finalization_key,
     content_finalization_scope_key,
@@ -33,10 +38,10 @@ from ..clients.redis import (
 )
 from ..registries.worker import WorkerRegistry
 
-# KEYS: records, dispatch index[, finalization scope, finalization].
+# KEYS: records, dispatch index, scopes[, finalization scope, finalization].
 # ARGV: upload id, object key, owner, registration, initiated at (ms), scope.
 _REGISTER = """
-local kinds = {'hash', 'hash', 'string', 'string'}
+local kinds = {'hash', 'hash', 'set', 'string', 'string'}
 for i, key in ipairs(KEYS) do
   local kind = redis.call('TYPE', key).ok
   if kind ~= 'none' and kind ~= kinds[i] then
@@ -57,7 +62,7 @@ end
 local owner = cjson.decode(ARGV[3])
 local indexed = false
 if owner.kind == 'finalization' then
-  if redis.call('GET', KEYS[3]) ~= ARGV[6] or redis.call('EXISTS', KEYS[4]) == 1 then
+  if redis.call('GET', KEYS[4]) ~= ARGV[6] or redis.call('EXISTS', KEYS[5]) == 1 then
     return {'unowned'}
   end
 elseif owner.kind == 'dispatch' then
@@ -79,6 +84,7 @@ if indexed then
   redis.call('HSET', KEYS[2], ARGV[1], '1')
 end
 redis.call('HSET', KEYS[1], ARGV[1], record)
+redis.call('SADD', KEYS[3], ARGV[6])
 return {'ack', record}
 """
 
@@ -118,6 +124,30 @@ end
 redis.call('HSET', KEYS[2], '~moved', ARGV[2])
 return moved
 """
+
+
+# KEYS: records, then each candidate's dispatch index.
+# ARGV: id1, record1, ..., idn, recordn.
+_PRUNE = """
+if redis.call('TYPE', KEYS[1]).ok ~= 'hash' then
+  return 0
+end
+local pruned = 0
+for i = 1, #ARGV / 2 do
+  local id = ARGV[2 * i - 1]
+  if redis.call('HGET', KEYS[1], id) == ARGV[2 * i] then
+    redis.call('HDEL', KEYS[1], id)
+    if redis.call('TYPE', KEYS[i + 1]).ok == 'hash' then
+      redis.call('HDEL', KEYS[i + 1], id)
+    end
+    pruned = pruned + 1
+  end
+end
+return pruned
+"""
+
+# Records one prune reads and removes at a time.
+PRUNE_PAGE = 256
 
 
 class OwnerKind(StrEnum):
@@ -192,6 +222,7 @@ class MultipartStore:
         keys = [
             reclaim_multipart_key(scope),
             reclaim_multipart_dispatch_key(scope, owner.dispatch_id),
+            RECLAIM_SCOPES_KEY,
         ]
         if owner.kind is OwnerKind.FINALIZATION:
             keys += [
@@ -232,6 +263,56 @@ class MultipartStore:
                 _TRANSFER, len(keys), *keys, dispatch_id, owner.encode()
             )
         )
+
+    def release(self, scope: str, dispatch_id: str) -> None:
+        """Drop a dispatch's index once its life as an owner has ended: the dispatch
+        ended owing no upload, or the upload its success left owed settled.
+
+        The records it owned stay until the store no longer holds their uploads open.
+        """
+        self._rds.sync.delete(reclaim_multipart_dispatch_key(scope, dispatch_id))
+
+    def prune(self, scope: str, open_ids: Set[str], registered_before: float) -> int:
+        """Remove each record registered before ``registered_before`` whose UploadId
+        ``open_ids`` does not name; returns how many were removed.
+
+        ``open_ids`` is every upload the store held open in a listing that started at
+        ``registered_before`` or later, so an upload it does not name was completed or
+        aborted. A record that changed since it was read is left for the next prune.
+        """
+        cutoff_ms = registered_before * 1000
+        records = reclaim_multipart_key(scope)
+        pruned = 0
+        cursor = 0
+        while True:
+            with self._rds.sync.control_pipeline(transaction=False) as pipe:
+                pipe.hscan(records, cursor, count=PRUNE_PAGE)
+                next_cursor, page = pipe.execute()[0]
+            cursor = int(next_cursor)
+            closed: list[tuple[str, str, str]] = []
+            for upload_id, raw in page.items():
+                if upload_id in open_ids:
+                    continue
+                try:
+                    record = json.loads(raw)
+                    initiated_at = float(record["initiated_at"])
+                    dispatch_id = str(record["owner"].get("dispatch_id") or "")
+                except (ValueError, TypeError, KeyError, AttributeError):
+                    continue
+                if initiated_at < cutoff_ms:
+                    closed.append((upload_id, raw, dispatch_id))
+            if closed:
+                keys = [records]
+                keys += [
+                    reclaim_multipart_dispatch_key(scope, dispatch_id)
+                    for _, _, dispatch_id in closed
+                ]
+                args = [
+                    value for upload_id, raw, _ in closed for value in (upload_id, raw)
+                ]
+                pruned += int(self._rds.sync.eval(_PRUNE, len(keys), *keys, *args))
+            if cursor == 0:
+                return pruned
 
     def content_protocol(self, worker_id: str) -> int:
         """The content protocol a worker registration reported; 0 when it reported

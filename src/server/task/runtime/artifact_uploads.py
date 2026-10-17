@@ -96,6 +96,10 @@ class ArtifactUploads:
         lost."""
         return set(self._lost_by_dispatch.get(dispatch_id or "", ()))
 
+    def pending_tasks_locked(self) -> list[str]:
+        """Return every task whose upload is still owed."""
+        return list(self._owners)
+
     def pending_locked(self, workflow_id: str) -> int:
         """Return how many of a workflow's tasks still owe their upload."""
         return len(self._pending.get(workflow_id, ()))

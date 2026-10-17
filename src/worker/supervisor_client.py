@@ -391,6 +391,26 @@ class SupervisorClient:
             )
         )
 
+    def fail_dispatch(self, task_id: str, dispatch_id: str, error: str) -> None:
+        """Report a dispatch failed after its task has left this worker, once what its
+        success or checkpoint published can no longer be repaired.
+
+        The failure may come after the task's external effect, so control decides
+        whether it runs again. It is dropped while the stream is down; the outbox
+        reports it again while control keeps asking for what cannot be repaired.
+        """
+        self._offer_event(
+            TaskEvent(
+                type="TASK_FAILED",
+                worker_id=self.worker_id,
+                task_id=task_id,
+                dispatch_id=dispatch_id,
+                error=error,
+                retryable=True,
+                ambiguous=True,
+            )
+        )
+
     def report_artifact_upload(
         self,
         task_id: str,

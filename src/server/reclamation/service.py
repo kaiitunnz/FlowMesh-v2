@@ -3,8 +3,9 @@
 It runs on its own thread, reading and writing only the control store's reclamation
 keys and the bindings it backfills, and listing the shared store; it takes no runtime
 lock and has no part in the event path. It starts once the root holds its epoch, marks
-the protection hooks live from that epoch, backfills what was bound before, and then
-sweeps on an interval. A later root moving the generation on ends it.
+the protection hooks live, backfills whatever the marker's generation has not yet
+read, and then sweeps on an interval. A later root starting, or moving the generation
+on, ends it.
 """
 
 import logging
@@ -20,6 +21,7 @@ from .audit import AuditTrail
 from .backfill import FAMILIES, Backfill
 from .certification import CoverageStore
 from .collector import SWEEP_INTERVAL_SEC, AuditCollector
+from .multipart import MultipartStore
 from .store_admin import StoreAdmin
 
 
@@ -61,7 +63,13 @@ class ReclamationService:
             epoch,
             Backfill(rds, coverage, logger, audit),
             AuditCollector(
-                rds, coverage, StoreAdmin.from_config(store), logger, audit, meter
+                rds,
+                coverage,
+                StoreAdmin.from_config(store),
+                logger,
+                audit,
+                meter,
+                MultipartStore(rds),
             ),
             coverage,
             logger,
@@ -77,25 +85,27 @@ class ReclamationService:
             )
             return
         try:
+            if self._coverage.superseded(epoch):
+                self._logger.info(
+                    "Content reclamation not started: a root later than %d started",
+                    epoch,
+                )
+                return
             generation = self._coverage.mark_hooks_on(epoch)
         except Exception:
             self._logger.exception("Content reclamation could not mark its hooks live")
             return
-        if generation != epoch:
-            self._logger.info(
-                "Content reclamation not started: a later root holds generation %d",
-                generation,
-            )
-            return
         if self._backfill.run(generation, stop) is None:
             return
         while not stop.is_set():
-            if self._coverage.generation() != generation:
-                self._logger.info(
-                    "Content reclamation stopped: a later root took the generation"
-                )
-                return
             try:
+                if self._coverage.superseded(epoch) or (
+                    self._coverage.generation() != generation
+                ):
+                    self._logger.info(
+                        "Content reclamation stopped: a later root took over"
+                    )
+                    return
                 if self._expand_trees is not None:
                     self._expand_trees(stop)
                 self._collector.sweep(stop)

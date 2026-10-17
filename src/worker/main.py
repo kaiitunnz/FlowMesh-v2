@@ -439,6 +439,7 @@ def _build_publications(
         registration=lambda: client.worker_id,
         send=client.resend_task_event,
         upload=plane.upload_file,
+        fail=client.fail_dispatch,
         logger=logger,
     )
 

@@ -1,13 +1,16 @@
 """Whether the protection index of a scope is known to cover every binding naming it.
 
-Protection is written at every commit seam from the moment a root holding the hooks
-starts, so the index misses only bindings committed before then. The hooks-on marker
-records the root epoch from which every bind path was instrumented, and a backfill
-started after it protects every binding committed before. A scope is certified for a
-generation, the marker's epoch, once every key family's scan completed in that
-generation, no key naming the scope failed to decode, no bound tree awaits expansion,
-and no commit owes the scope a protection it could not confirm. Anything less leaves
-the scope uncertified, and an uncertified scope is never collected.
+Protection is written at every commit seam by every root holding the hooks, so the
+index misses only bindings committed before the first such root started. The hooks-on
+marker holds the generation of the backfill that protects those: the epoch of a root
+that started after the hooks went live, so every binding the backfill does not read was
+committed under the hooks. Every later root keeps the hooks live, so the marker and the
+backfill completed under it stand across restarts; a store that lost the marker, or a
+backfill that found an undecodable key, starts a new generation that backfills again.
+A scope is certified for the marker's generation once every key family's scan
+completed in it, no key naming the scope failed to decode in it, no bound tree awaits
+expansion, and no commit owes the scope a protection it could not confirm. Anything
+less leaves the scope uncertified, and an uncertified scope is never collected.
 """
 
 from collections.abc import Sequence
@@ -18,6 +21,7 @@ from ..clients.redis import (
     RECLAIM_BACKFILL_FAULTS_KEY,
     RECLAIM_BACKFILL_KEY,
     RECLAIM_HOOKS_ON_KEY,
+    RECLAIM_ROOT_EPOCH_KEY,
     RedisClient,
     reclaim_cert_key,
     reclaim_uncertified_key,
@@ -27,11 +31,26 @@ from ..clients.redis import (
 # The fault field naming every scope, for a key whose scope could not be read.
 ALL_SCOPES = "*"
 
-# KEYS: hooks-on. ARGV: epoch. Raises the marker to ``epoch``, never lowers it.
+# KEYS: hooks-on, faults. ARGV: epoch. Keeps the marker's generation unless its
+# backfill found an undecodable key, and then raises it to ``epoch``; never lowers it.
 _MARK = """
 local current = redis.call('GET', KEYS[1])
-if current and tonumber(current) >= tonumber(ARGV[1]) then
-  return current
+if current then
+  if tonumber(current) >= tonumber(ARGV[1]) then
+    return current
+  end
+  local faulted = false
+  if redis.call('TYPE', KEYS[2]).ok == 'hash' then
+    for _, generation in ipairs(redis.call('HVALS', KEYS[2])) do
+      if generation == current then
+        faulted = true
+        break
+      end
+    end
+  end
+  if not faulted then
+    return current
+  end
 end
 redis.call('SET', KEYS[1], ARGV[1])
 return ARGV[1]
@@ -128,10 +147,28 @@ class CoverageStore:
         self._families = tuple(families)
 
     def mark_hooks_on(self, epoch: int) -> int:
-        """Record that the protection hooks are live from ``epoch``; returns the
-        generation the marker holds, which is later than ``epoch`` when a later root
-        has started."""
-        return int(self._rds.sync.eval(_MARK, 1, RECLAIM_HOOKS_ON_KEY, str(epoch)))
+        """Record that the protection hooks are live as of root ``epoch``; returns the
+        backfill generation the marker then holds.
+
+        A marker already standing keeps its generation, and with it the backfill
+        completed under it, unless that backfill found an undecodable key: then
+        ``epoch`` starts a new generation, so the store is read again. With no marker,
+        ``epoch`` starts the first.
+        """
+        return int(
+            self._rds.sync.eval(
+                _MARK,
+                2,
+                RECLAIM_HOOKS_ON_KEY,
+                RECLAIM_BACKFILL_FAULTS_KEY,
+                str(epoch),
+            )
+        )
+
+    def superseded(self, epoch: int) -> bool:
+        """Whether a root later than ``epoch`` has started."""
+        current = self._rds.sync.get(RECLAIM_ROOT_EPOCH_KEY)
+        return current is not None and int(current) > epoch
 
     def generation(self) -> int | None:
         """The generation the marker holds, or None before any root marked it."""

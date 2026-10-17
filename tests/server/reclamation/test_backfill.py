@@ -1,5 +1,5 @@
-"""The backfill: every reference a stored binding names is protected, an undecodable
-key withholds certification, and every run scans from the start."""
+"""The backfill: every reference a stored binding names is protected in one scan of the
+keyspace, an undecodable key withholds certification, and a generation is read once."""
 
 import json
 import logging
@@ -12,6 +12,7 @@ import pytest
 from server.clients.redis import (
     RECLAIM_BACKFILL_FAULTS_KEY,
     RECLAIM_BACKFILL_KEY,
+    RECLAIM_HOOKS_ON_KEY,
     content_finalization_key,
     reclaim_coverage_key,
     reclaim_protected_key,
@@ -269,11 +270,11 @@ def test_a_large_hash_is_protected_a_page_of_fields_at_a_time(fx) -> None:
     )
     generation = fx.start(1)
 
-    report = fx.backfill.scan(Family.LEDGER, generation, threading.Event())
+    reports = fx.backfill.scan([Family.LEDGER], generation, threading.Event())
 
-    assert report is not None
+    assert reports is not None
     assert fx.protected(_A) == {ref.content_digest for ref in refs}
-    assert report.values == 1500
+    assert reports[Family.LEDGER].values == 1500
 
 
 def test_an_undecodable_ledger_field_withholds_every_scope(fx) -> None:
@@ -319,39 +320,103 @@ def test_a_key_of_the_wrong_type_withholds_every_scope(fx) -> None:
     assert fx.raw.hget(RECLAIM_BACKFILL_FAULTS_KEY, ALL_SCOPES) == "2"
 
 
-def test_a_restarted_root_scans_every_family_again_from_the_start(
+def test_one_scan_of_the_keyspace_reads_every_family(
+    fx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    expected = _seed_everything(fx)
+    fx.forget_protection()
+    pages: list[int] = []
+    original = fx.backfill._scan_page
+
+    def counting(cursor: int) -> tuple[int, list[str]]:
+        pages.append(cursor)
+        return original(cursor)
+
+    monkeypatch.setattr(fx.backfill, "_scan_page", counting)
+    assert fx.backfill.run(fx.start(1), threading.Event()) is not None
+
+    assert pages == [0]
+    protected = {(scope, d) for scope in (_A, _B) for d in fx.protected(scope)}
+    assert protected == expected
+
+
+def test_a_later_root_reads_nothing_its_generation_completed(
     fx, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _seed_everything(fx)
     fx.forget_protection()
     first = fx.start(1)
-    stop = threading.Event()
-    calls: list[Family] = []
-    original = fx.backfill.scan
-
-    def scan_then_stop(family: Family, generation: int, stop_: threading.Event) -> Any:
-        calls.append(family)
-        report = original(family, generation, stop_)
-        stop.set()
-        return None if len(calls) > 1 else report
-
-    monkeypatch.setattr(fx.backfill, "scan", scan_then_stop)
-    assert fx.backfill.run(first, stop) is None
-    assert fx.coverage.completed(first) == {Family.LEDGER.value}
-    assert not [key for key in fx.raw.scan_iter("rc:*") if "cursor" in key]
+    assert fx.backfill.run(first, threading.Event()) is not None
+    certified = fx.coverage.certify(_B)
+    assert certified.certified
 
     second = fx.start(2)
-    scanned: list[Family] = []
+    scanned: list[Any] = []
 
-    def counting(family: Family, generation: int, stop_: threading.Event) -> Any:
-        scanned.append(family)
-        return original(family, generation, stop_)
+    def scan(*args: Any) -> dict[str, Any]:
+        scanned.append(args)
+        return {}
 
-    monkeypatch.setattr(fx.backfill, "scan", counting)
-    assert fx.backfill.run(second, threading.Event()) is not None
-    assert scanned == list(Family)
-    assert fx.coverage.completed(second) == set(FAMILIES)
-    assert fx.coverage.completed(first) == frozenset()
+    monkeypatch.setattr(fx.backfill, "scan", scan)
+
+    assert second == first
+    assert fx.backfill.run(second, threading.Event()) == {}
+    assert scanned == []
+    assert fx.coverage.certify(_B) == certified
+
+
+def test_an_interrupted_scan_reads_every_family_again_from_the_start(
+    fx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_everything(fx)
+    fx.forget_protection()
+    generation = fx.start(1)
+    stop = threading.Event()
+    original = fx.backfill._flush
+
+    def flush_then_stop(*args: Any) -> None:
+        original(*args)
+        stop.set()
+
+    monkeypatch.setattr(fx.backfill, "_flush", flush_then_stop)
+    monkeypatch.setattr("server.reclamation.backfill.SCAN_COUNT", 1)
+    assert fx.backfill.run(generation, stop) is None
+    assert fx.coverage.completed(generation) == frozenset()
+    assert not [key for key in fx.raw.scan_iter("rc:*") if "cursor" in key]
+
+    monkeypatch.setattr(fx.backfill, "_flush", original)
+    assert fx.start(2) == generation
+    assert fx.backfill.run(generation, threading.Event()) is not None
+    assert fx.coverage.completed(generation) == set(FAMILIES)
+
+
+def test_an_undecodable_key_has_a_later_root_read_everything_again(fx) -> None:
+    _ledger(fx, "wfl-1", [_ref(b"a"), _ref(b"b")])
+    fx.raw.hset(workflow_ds_key("wfl-1"), "records:[1]", '{"value_ref": 3}')
+    first = fx.start(1)
+    fx.backfill.run(first, threading.Event())
+    assert fx.coverage.certify(_A).status is CertificationStatus.UNDECODABLE
+
+    fx.raw.hdel(workflow_ds_key("wfl-1"), "records:[1]")
+    second = fx.start(2)
+    reports = fx.backfill.run(second, threading.Event())
+
+    assert second == 2
+    assert reports is not None and set(reports) == set(FAMILIES)
+    assert fx.coverage.certify(_A).certified
+
+
+def test_a_store_that_lost_its_marker_is_read_again(fx) -> None:
+    _ledger(fx, "wfl-1", [_ref(b"a"), _ref(b"b")])
+    fx.backfill.run(fx.start(1), threading.Event())
+    fx.raw.delete(RECLAIM_HOOKS_ON_KEY, reclaim_protected_key(_A))
+
+    generation = fx.start(4)
+    reports = fx.backfill.run(generation, threading.Event())
+
+    assert generation == 4
+    assert reports is not None and set(reports) == set(FAMILIES)
+    assert fx.protected(_A) == {_ref(b"a").content_digest, _ref(b"b").content_digest}
 
 
 def test_a_scan_that_fails_is_retried_from_its_start(
@@ -360,22 +425,25 @@ def test_a_scan_that_fails_is_retried_from_its_start(
     _ledger(fx, "wfl-1", [_ref(b"a"), _ref(b"b")])
     generation = fx.start(1)
     original = fx.backfill.scan
-    attempts: list[Family] = []
+    attempts: list[int] = []
 
-    def flaky(family: Family, generation_: int, stop: threading.Event) -> Any:
-        attempts.append(family)
-        if attempts.count(family) == 1 and family is Family.LEDGER:
+    def flaky(families: Any, generation_: int, stop: threading.Event) -> Any:
+        attempts.append(1)
+        if len(attempts) == 1:
             raise ConnectionError("lost the store")
-        return original(family, generation_, stop)
+        return original(families, generation_, stop)
 
     monkeypatch.setattr(fx.backfill, "scan", flaky)
     assert fx.backfill.run(generation, threading.Event()) is not None
-    assert attempts.count(Family.LEDGER) == 2
+    assert len(attempts) == 2
     assert fx.protected(_A) == {_ref(b"a").content_digest, _ref(b"b").content_digest}
 
 
-def test_a_backfill_superseded_by_a_later_root_records_no_completion(fx) -> None:
+def test_a_backfill_superseded_by_a_later_generation_records_no_completion(
+    fx,
+) -> None:
     generation = fx.start(1)
+    fx.coverage.record_fault(generation, None)
     fx.start(2)
 
     assert fx.backfill.run(generation, threading.Event()) is None

@@ -127,3 +127,48 @@ def test_a_new_root_releases_only_the_holds_earlier_roots_took(store) -> None:
     assert _holders(raw, "a") == []
     assert _holders(raw, "b") == []
     assert _holders(raw, "c") == ["5:2"]
+
+
+def test_a_refusal_reports_the_unverified_identities_of_every_chunk(store) -> None:
+    pins, raw = store
+    digests = [f"d{i:04d}" for i in range(3 * CHUNK + 1)]
+    marked = digests[::CHUNK]
+    for digest in marked:
+        raw.hset(reclaim_history_key(_SCOPE), digest, "1")
+    refused = pins.acquire(_SCOPE, digests, "1:1", _LOCATOR, manifests=["m"])
+    assert refused.verdict is Verdict.NEEDS_VERIFY
+    assert refused.unverified == {digest: "1" for digest in marked}
+    assert raw.hlen(reclaim_pins_key(_SCOPE)) == 0
+    assert not raw.sismember(reclaim_unexpanded_key(_SCOPE), "m")
+    acquired = pins.acquire(
+        _SCOPE, digests, "1:2", _LOCATOR, verified=refused.unverified, manifests=["m"]
+    )
+    assert acquired.verdict is Verdict.ACQUIRED
+    assert len(acquired.held) == len(digests)
+    assert raw.sismember(reclaim_unexpanded_key(_SCOPE), "m")
+
+
+def test_a_protected_identity_retired_before_is_verified_or_reported(store) -> None:
+    pins, raw = store
+    raw.sadd(reclaim_protected_key(_SCOPE), "x")
+    raw.hset(reclaim_history_key(_SCOPE), "x", "3")
+    bind = pins.acquire(_SCOPE, ["x"], "1:1", _LOCATOR)
+    assert bind.verdict is Verdict.NEEDS_VERIFY
+    assert bind.unverified == {"x": "3"}
+    member = pins.acquire(_SCOPE, ["x"], "1:2", _LOCATOR, AcquireMode.MEMBER)
+    assert member.verdict is Verdict.ACQUIRED
+    assert member.held == ("x",)
+    assert member.retired == ("x",)
+    verified = pins.acquire(_SCOPE, ["x"], "1:3", _LOCATOR, verified={"x": "3"})
+    assert verified.verdict is Verdict.ACQUIRED
+    assert verified.held == ()
+
+
+@pytest.mark.parametrize("mode", list(AcquireMode))
+def test_a_protected_identity_never_retired_is_not_held(store, mode) -> None:
+    pins, raw = store
+    raw.sadd(reclaim_protected_key(_SCOPE), "x")
+    result = pins.acquire(_SCOPE, ["x"], "1:1", _LOCATOR, mode)
+    assert result.verdict is Verdict.ACQUIRED
+    assert result.held == ()
+    assert result.retired == ()

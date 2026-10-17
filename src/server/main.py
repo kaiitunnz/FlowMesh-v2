@@ -482,8 +482,8 @@ if IS_ROOT_NODE:
         pins,
         lambda: RUNTIME.nonces if RUNTIME else None,
         RESULT_READER.backed,
-        logger,
         TREE_EXPANDER,
+        logger,
     )
     EVENT_MONITOR = EventMonitor(
         redis_client=REDIS_CLIENT.sync,

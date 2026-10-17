@@ -12,8 +12,8 @@ from eviction by every process sharing the content directory, and the custody fi
 outlives any removal of the cache's name.
 
 A dispatch's directory also holds its journal: what the worker staged, under which
-registration, and the success it reported, so the success and its uploads can be
-reported again until control answers. The journal is written before any staged file,
+registration, and the task whose success reported it, so its uploads can be reported
+again until control answers. The journal is written before any staged file,
 so a directory without one holds nothing staged. Custody ends only when control settles
 every task it covers; nothing here ages it out.
 """
@@ -24,7 +24,7 @@ import os
 import shutil
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import BinaryIO
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -105,8 +105,6 @@ class StagedTask(BaseModel):
 
     task_id: str
     members: list[ContentReference] = Field(default_factory=list)
-    # Control recorded the success that announced these artifacts.
-    accepted: bool = False
     # Every member is in the shared store and the receipt saying so was sent.
     uploaded: bool = False
     # Why the upload cannot finish, once a member is found unuploadable.
@@ -127,9 +125,8 @@ class UploadJournal(BaseModel):
     alias: str
     worker_id: str
     incarnation: int
-    # The task the dispatch ran and the success it reported.
+    # The task the dispatch ran, once its success is reported.
     task_id: str
-    success: dict[str, Any] = Field(default_factory=dict)
     tasks: dict[str, StagedTask] = Field(default_factory=dict)
 
     def owes(self) -> list[StagedTask]:

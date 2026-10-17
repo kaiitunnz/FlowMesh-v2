@@ -1,5 +1,5 @@
-"""The reclamation service: it marks the hooks live under its own epoch, backfills,
-then sweeps, and starts nothing when switched off."""
+"""The reclamation service: it marks the hooks live, backfills what its generation has
+not read, then sweeps, and starts nothing when switched off."""
 
 import logging
 import threading
@@ -8,6 +8,7 @@ from typing import Any
 import fakeredis
 import pytest
 
+from server.clients.redis import RECLAIM_ROOT_EPOCH_KEY
 from server.config import ContentStoreConfig
 from server.reclamation.backfill import FAMILIES, Backfill
 from server.reclamation.certification import CoverageStore
@@ -77,10 +78,36 @@ def test_the_service_backfills_then_sweeps_under_its_own_generation(
     assert len(sweeps) == 1 and sweeps[0].orphans == 1
 
 
+def test_a_restarted_root_keeps_the_generation_and_reads_nothing_again(
+    fx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fx.s3.put("org-a", "orphan", at=0)
+    stop = threading.Event()
+    monkeypatch.setattr(fx.collector, "sweep", lambda stop_=None: stop.set())
+    fx.service(7).run(stop)
+    assert fx.coverage.certify("org-a").certified
+
+    fx.raw.set(RECLAIM_ROOT_EPOCH_KEY, "8")
+    pages: list[int] = []
+    original = fx.backfill._scan_page
+
+    def counted(cursor: int) -> Any:
+        pages.append(cursor)
+        return original(cursor)
+
+    monkeypatch.setattr(fx.backfill, "_scan_page", counted)
+    stop.clear()
+    fx.service(8).run(stop)
+
+    assert pages == []
+    assert fx.coverage.generation() == 7
+    assert fx.coverage.certify("org-a").certified
+
+
 def test_the_service_does_not_start_under_a_later_root(
     fx, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    fx.coverage.mark_hooks_on(9)
+    fx.raw.set(RECLAIM_ROOT_EPOCH_KEY, "9")
     backfilled: list[int] = []
     monkeypatch.setattr(
         fx.backfill, "run", lambda generation, stop: backfilled.append(generation)
@@ -89,17 +116,22 @@ def test_the_service_does_not_start_under_a_later_root(
     fx.service(7).run(threading.Event())
 
     assert backfilled == []
-    assert fx.coverage.generation() == 9
+    assert fx.coverage.generation() is None
 
 
-def test_the_service_stops_sweeping_once_a_later_root_takes_the_generation(
-    fx, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("later", ["root", "generation"])
+def test_the_service_stops_sweeping_once_a_later_root_takes_over(
+    fx, monkeypatch: pytest.MonkeyPatch, later: str
 ) -> None:
     swept: list[int] = []
 
     def sweep(stop: threading.Event | None = None) -> None:
         swept.append(1)
-        fx.coverage.mark_hooks_on(8)
+        if later == "root":
+            fx.raw.set(RECLAIM_ROOT_EPOCH_KEY, "8")
+        else:
+            fx.coverage.record_fault(7, None)
+            fx.coverage.mark_hooks_on(8)
 
     monkeypatch.setattr(fx.collector, "sweep", sweep)
     fx.service(7).run(threading.Event())

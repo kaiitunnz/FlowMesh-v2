@@ -221,8 +221,8 @@ class _Staging:
     def staged(self) -> bool:
         return bool(self._journal.tasks)
 
-    def submit(self, task_id: str, success: dict[str, Any]) -> None:
-        self._uploads.submit(self._journal, task_id, success)
+    def submit(self, task_id: str) -> None:
+        self._uploads.submit(self._journal, task_id)
 
     def abandon(self) -> None:
         self._uploads.abandon(self._journal)
@@ -1074,7 +1074,7 @@ class Runner:
         if staging is not None:
             if staging.staged():
                 metadata[ARTIFACTS_PENDING] = True
-                staging.submit(msg.task_id, metadata)
+                staging.submit(msg.task_id)
             else:
                 staging.abandon()
         self.lifecycle.set_succeeded(msg.task_id, metadata=metadata)

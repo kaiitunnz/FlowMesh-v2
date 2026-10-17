@@ -202,6 +202,49 @@ def test_a_key_of_the_wrong_type_refuses_before_writing(store) -> None:
     assert not raw.exists(reclaim_multipart_key(_SCOPE))
 
 
+def test_a_prune_drops_only_closed_uploads_registered_before_the_listing(
+    store,
+) -> None:
+    multipart, raw = store
+    multipart.register(_SCOPE, "up-open", _KEY, _DISPATCH, "wkr-1", now=1.0)
+    multipart.register(_SCOPE, "up-closed", _KEY, _DISPATCH, "wkr-1", now=2.0)
+    multipart.register(_SCOPE, "up-late", _KEY, _DISPATCH, "wkr-1", now=9.0)
+    raw.hset(reclaim_multipart_key(_SCOPE), "up-corrupt", "not json")
+
+    assert multipart.prune(_SCOPE, {"up-open"}, registered_before=5.0) == 1
+
+    assert set(raw.hkeys(reclaim_multipart_key(_SCOPE))) == {
+        "up-open",
+        "up-late",
+        "up-corrupt",
+    }
+    assert set(raw.hkeys(reclaim_multipart_dispatch_key(_SCOPE, "dsp-1"))) == {
+        "up-open",
+        "up-late",
+    }
+
+
+def test_the_last_prune_of_a_dispatchs_uploads_leaves_no_index(store) -> None:
+    multipart, raw = store
+    multipart.register(_SCOPE, "up-1", _KEY, _DISPATCH, "wkr-1", now=1.0)
+
+    multipart.prune(_SCOPE, set(), registered_before=5.0)
+
+    assert not raw.exists(reclaim_multipart_key(_SCOPE))
+    assert not raw.exists(reclaim_multipart_dispatch_key(_SCOPE, "dsp-1"))
+
+
+def test_a_released_dispatch_leaves_no_index_and_keeps_its_records(store) -> None:
+    multipart, raw = store
+    multipart.register(_SCOPE, "up-1", _KEY, _DISPATCH, "wkr-1")
+    multipart.transfer(_SCOPE, "dsp-1", MultipartOwner.upload("dsp-1"))
+
+    multipart.release(_SCOPE, "dsp-1")
+
+    assert not raw.exists(reclaim_multipart_dispatch_key(_SCOPE, "dsp-1"))
+    assert _record(raw, "up-1")["owner"] == {"kind": "upload", "dispatch_id": "dsp-1"}
+
+
 def test_the_content_protocol_a_worker_registered_with_is_read_back(store) -> None:
     multipart, raw = store
     raw.hset(worker_key("wkr-1"), mapping={"id": "wkr-1", "content_protocol": "1"})

@@ -23,7 +23,7 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import BinaryIO
 
 from pydantic import ValidationError
 
@@ -161,13 +161,10 @@ class ArtifactUploader:
         """End custody for a dispatch whose success will not report it."""
         self._custody.release(journal.scope, journal.dispatch_id)
 
-    def submit(
-        self, journal: UploadJournal, task_id: str, success: dict[str, Any]
-    ) -> None:
+    def submit(self, journal: UploadJournal, task_id: str) -> None:
         """Owe the uploads of a dispatch whose success is about to be reported; its
         custody ends if that cannot be recorded."""
         journal.task_id = task_id
-        journal.success = success
         try:
             self._custody.record(journal)
         except BaseException:
@@ -208,7 +205,6 @@ class ArtifactUploader:
             journal = publication.journal
             if (task := journal.tasks.get(settled.task_id)) is None:
                 return
-            task.accepted = True
             if settled.disposition is UploadDisposition.PENDING:
                 if not publication.owned:
                     publication.due[task.task_id] = self._clock() + EVIDENCE_RESEND_SEC

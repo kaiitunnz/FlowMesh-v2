@@ -90,4 +90,4 @@ def _by_scope(
     return grouped
 
 
-__all__ = ["StagedRetirement", "StagedStanding", "StagedVerdict"]
+__all__ = ["Backed", "StagedRetirement", "StagedStanding", "StagedVerdict"]

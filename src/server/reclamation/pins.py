@@ -3,9 +3,12 @@ until the commit naming it is confirmed.
 
 Several assertions may hold one identity at once, each under its own nonce, and each
 releases only its own hold. An acquisition validates every identity of a chunk before
-it changes anything, so a refused chunk leaves no partial hold behind; an identity
-being retired refuses before the protected fast path, since protection does not stop a
-delete already issued.
+it changes anything, so a refused chunk leaves no partial hold behind, and once one
+chunk refuses, the chunks after it are only read, so one refusal names every identity
+that refuses. Retirement is read before protection: protection does not stop a delete
+already issued, and an identity protected only as a pending upload or a tree member
+names no stored bytes, so an identity retired before is verified, or reported, even
+while it is protected.
 """
 
 import itertools
@@ -33,7 +36,7 @@ from ..clients.redis import (
 CHUNK = 256
 
 # KEYS: protected, pins, deleting, history, condemned, unexpanded.
-# ARGV: nonce, locator, mode, n, d1..dn, e1..en, m, manifest1..manifestm.
+# ARGV: nonce, locator, mode, probe, n, d1..dn, e1..en, m, manifest1..manifestm.
 _ACQUIRE = """
 for _, key in ipairs(KEYS) do
   local kind = redis.call('TYPE', key).ok
@@ -41,31 +44,30 @@ for _, key in ipairs(KEYS) do
     return redis.error_reply('WRONGTYPE ' .. key)
   end
 end
-local nonce, locator, mode, n = ARGV[1], ARGV[2], ARGV[3], tonumber(ARGV[4])
+local nonce, locator, mode = ARGV[1], ARGV[2], ARGV[3]
+local probe, n = ARGV[4] == '1', tonumber(ARGV[5])
 local out, refused = {}, false
 for i = 1, n do
-  local d, expected = ARGV[4 + i], ARGV[4 + n + i]
+  local d, expected = ARGV[5 + i], ARGV[5 + n + i]
   local verdict = 'A'
+  local rev = mode ~= 'pending' and redis.call('HGET', KEYS[4], d)
   if mode ~= 'pending' and redis.call('HEXISTS', KEYS[3], d) == 1 then
     verdict, refused = 'R', true
+  elseif mode == 'bind' and rev and rev ~= expected then
+    verdict, refused = 'N:' .. rev, true
+  elseif mode == 'member' and rev then
+    verdict = 'H'
   elseif redis.call('SISMEMBER', KEYS[1], d) == 1 then
     verdict = 'P'
-  elseif mode == 'bind' then
-    local rev = redis.call('HGET', KEYS[4], d)
-    if rev and rev ~= expected then
-      verdict, refused = 'N:' .. rev, true
-    end
-  elseif mode == 'member' and redis.call('HEXISTS', KEYS[4], d) == 1 then
-    verdict = 'H'
   end
   out[i] = verdict
 end
-if refused then
+if refused or probe then
   return out
 end
 for i = 1, n do
   if out[i] ~= 'P' then
-    local d = ARGV[4 + i]
+    local d = ARGV[5 + i]
     redis.call('HDEL', KEYS[5], d)
     local current = redis.call('HGET', KEYS[2], d)
     local holders = current and cjson.decode(current) or {}
@@ -73,9 +75,9 @@ for i = 1, n do
     redis.call('HSET', KEYS[2], d, cjson.encode(holders))
   end
 end
-local m = tonumber(ARGV[5 + 2 * n])
+local m = tonumber(ARGV[6 + 2 * n])
 for j = 1, m do
-  redis.call('SADD', KEYS[6], ARGV[5 + 2 * n + j])
+  redis.call('SADD', KEYS[6], ARGV[6 + 2 * n + j])
 end
 return out
 """
@@ -199,44 +201,55 @@ class PinStore:
 
         ``verified`` gives the retirement revision an identity's backing was verified
         at; ``manifests`` enter the scope's unexpanded set with the hold. A refused
-        chunk changes nothing, and the chunks this call held before it are released.
+        acquisition holds nothing: the chunks held before the first refusal are
+        released, the chunks after it are read without holding, and it reports every
+        identity of every chunk that refuses. An exception may leave earlier chunks
+        held under ``nonce``, which releasing ``nonce`` on ``digests`` ends.
         """
         ordered = list(dict.fromkeys(digests))
         verified = verified or {}
         encoded = json.dumps(locator, sort_keys=True, separators=(",", ":"))
+        keys = _keys(scope)
         held: list[str] = []
         retired: list[str] = []
+        retiring: list[str] = []
+        unverified: dict[str, str] = {}
         chunks = list(batched(ordered, CHUNK)) or [()]
         for index, chunk in enumerate(chunks):
-            extra = manifests if index == len(chunks) - 1 else ()
+            probe = bool(retiring or unverified)
+            extra = manifests if index == len(chunks) - 1 and not probe else ()
             args = [
                 nonce,
                 encoded,
                 mode.value,
+                "1" if probe else "0",
                 str(len(chunk)),
                 *chunk,
                 *(verified.get(d, "") for d in chunk),
                 str(len(extra)),
                 *extra,
             ]
-            keys = _keys(scope)
-            verdicts = list(self._rds.sync.eval(_ACQUIRE, len(keys), *keys, *args))
-            retiring = [d for d, v in zip(chunk, verdicts, strict=True) if v == "R"]
-            unverified = {
-                d: str(v)[2:]
-                for d, v in zip(chunk, verdicts, strict=True)
-                if str(v).startswith("N:")
-            }
-            if retiring or unverified:
-                self.release(scope, held, nonce)
-                return Acquisition(
-                    Verdict.RETIRING if retiring else Verdict.NEEDS_VERIFY,
-                    nonce,
-                    retiring=tuple(retiring),
-                    unverified=unverified,
+            verdicts = [
+                str(v) for v in self._rds.sync.eval(_ACQUIRE, len(keys), *keys, *args)
+            ]
+            for digest, verdict in zip(chunk, verdicts, strict=True):
+                if verdict == "R":
+                    retiring.append(digest)
+                elif verdict.startswith("N:"):
+                    unverified[digest] = verdict[2:]
+            if not (probe or retiring or unverified):
+                held.extend(d for d, v in zip(chunk, verdicts, strict=True) if v != "P")
+                retired.extend(
+                    d for d, v in zip(chunk, verdicts, strict=True) if v == "H"
                 )
-            held.extend(d for d, v in zip(chunk, verdicts, strict=True) if v != "P")
-            retired.extend(d for d, v in zip(chunk, verdicts, strict=True) if v == "H")
+        if retiring or unverified:
+            self.release(scope, held, nonce)
+            return Acquisition(
+                Verdict.RETIRING if retiring else Verdict.NEEDS_VERIFY,
+                nonce,
+                retiring=tuple(retiring),
+                unverified=unverified,
+            )
         return Acquisition(
             Verdict.ACQUIRED, nonce, held=tuple(held), retired=tuple(retired)
         )

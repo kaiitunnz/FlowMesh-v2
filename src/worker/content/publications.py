@@ -2,25 +2,31 @@
 
 A worker reports a success, a checkpoint or a prepared request by naming the objects it
 stored. Control may refuse such a report before binding anything, when a named object
-is being removed from the store or is no longer in it; the worker then stores the
-object again from the copy it kept and reports again, so no task, provider call or
-input resolution runs again to repair it. Every report is repeated on a pace until
-control answers it committed or rejected, since an event the worker sends may be lost
-with the control process that received it.
+is being removed from the store or is no longer in it; the worker waits out a removal
+and reports again, and stores an object that is gone again from the copy it kept, so no
+task, provider call or input resolution runs again to repair it. Every report is
+repeated on a pace until control answers it committed or rejected, since an event the
+worker sends may be lost with the control process that received it. An object control
+asks for that the worker holds no intact copy of cannot be repaired here, so the
+dispatch that reported it is failed instead.
 
 Each object a dispatch stores is kept under the dispatch, as another link to the file it
-was written from or as the bytes written, and the copies go once every publication of
-the dispatch is answered for good and the dispatch has ended. The outbox belongs to one
-registration: what an earlier one reported is lost with its dispatches.
+was written from or as the bytes written. A copy goes once no unanswered publication
+names it and none may name it yet: once the publications naming it are answered for
+good and the dispatch has not stored it again since, or once the dispatch has ended. A
+publication names the objects its report references and the members of each tree whose
+manifest it references. The outbox belongs to one registration: what an earlier one
+reported is lost with its dispatches.
 """
 
+import itertools
 import logging
 import os
 import random
 import shutil
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -28,6 +34,7 @@ from typing import Any, BinaryIO
 from shared.content import ContentReference
 from shared.content.reference import OCTET_STREAM
 from shared.content.store import STREAM_CHUNK_BYTES, FabricObjectStore
+from shared.content.tree import TREE_MEDIA_TYPE, TreeManifestError, iter_members
 from shared.tasks.publication import (
     BUSY_REASON,
     Publication,
@@ -48,13 +55,15 @@ RESEND_SEC = 30.0
 # How soon a publication the lane had no room for is offered again, before control's
 # reservation for it lapses.
 BUSY_SEC = 2.0
-# The pace of reports control could not decide, and of waiting out a removal.
+# The pace of reports control refused or could not decide.
 _RETRY_MIN_SEC = 1.0
 _RETRY_MAX_SEC = 30.0
 _COPY_CHUNK = 1 << 20
 
 type Send = Callable[[str, str, str, dict[str, Any]], None]
 type Upload = Callable[[str, str, Path, str], ContentReference]
+type Fail = Callable[[str, str, str], None]
+"""Fail one task's dispatch, by task, dispatch and error."""
 
 
 @dataclass
@@ -64,16 +73,32 @@ class _Entry:
     task_id: str
     payload: dict[str, Any]
     due: float
+    names: set[str]
     backoff: float = _RETRY_MIN_SEC
     # Objects control asked to be stored again before the next report.
     restore: tuple[str, ...] = ()
 
 
 @dataclass
+class _Kept:
+    scope: str
+    media_type: str
+    size_bytes: int
+    path: Path
+    # When the dispatch last stored it, and when a report last named it, on one count.
+    kept_at: int
+    named_at: int = -1
+
+
+@dataclass
 class _Dispatch:
     entries: dict[tuple[str, str], _Entry] = field(default_factory=dict)
-    kept: dict[str, dict[str, Any]] = field(default_factory=dict)
+    kept: dict[str, _Kept] = field(default_factory=dict)
     ended: bool = False
+
+
+class _Unrestorable(Exception):
+    """No intact copy of an object control asked to be stored again is kept."""
 
 
 class PublicationOutbox:
@@ -85,6 +110,7 @@ class PublicationOutbox:
         registration: Callable[[], str],
         send: Send,
         upload: Upload,
+        fail: Fail,
         logger: logging.Logger | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -92,10 +118,12 @@ class PublicationOutbox:
         self._registration = registration
         self._send = send
         self._upload = upload
+        self._fail = fail
         self._logger = logger or logging.getLogger("publications")
         self._clock = clock
         self._cv = threading.Condition()
         self._dispatches: dict[str, _Dispatch] = {}
+        self._ticks = itertools.count()
         self._stopping = False
         self._thread: threading.Thread | None = None
 
@@ -139,7 +167,9 @@ class PublicationOutbox:
 
     def keeping(self, dispatch_id: str, store: FabricObjectStore) -> FabricObjectStore:
         """Return ``store`` keeping a copy of every object written through it for the
-        dispatch's publications."""
+        dispatch's publications, until the dispatch ends."""
+        with self._cv:
+            self._dispatches.setdefault(dispatch_id, _Dispatch())
         return _KeepingStore(
             store, lambda reference, source: self._keep(dispatch_id, reference, source)
         )
@@ -166,52 +196,59 @@ class PublicationOutbox:
         reference: ContentReference,
         source: BinaryIO | bytes | Path,
     ) -> None:
-        """Keep a copy of an object a dispatch stored, from the file it was written
-        from or its bytes, for as long as a publication may need it stored again."""
+        """Keep a copy of an object a running dispatch stored, from the file it was
+        written from or its bytes, for as long as a publication may need it stored
+        again; a dispatch that has ended keeps nothing more."""
         digest = reference.content_digest
         with self._cv:
-            dispatch = self._dispatches.setdefault(dispatch_id, _Dispatch())
-            if digest in dispatch.kept:
+            dispatch = self._dispatches.get(dispatch_id)
+            if dispatch is None or dispatch.ended:
                 return
-            dispatch.kept[digest] = {
-                "scope": reference.authorization_scope,
-                "media_type": reference.media_type,
-                "size_bytes": reference.size_bytes,
-            }
-        directory = self._root / dispatch_id
-        directory.mkdir(parents=True, exist_ok=True)
+            tick = next(self._ticks)
+            if (kept := dispatch.kept.get(digest)) is not None:
+                kept.kept_at = tick
+                return
+            path = self._root / dispatch_id / f"{digest}.{tick}"
+            kept = dispatch.kept[digest] = _Kept(
+                reference.authorization_scope,
+                reference.media_type,
+                reference.size_bytes,
+                path,
+                tick,
+            )
         try:
+            path.parent.mkdir(parents=True, exist_ok=True)
             if isinstance(source, bytes):
-                (directory / digest).write_bytes(source)
+                path.write_bytes(source)
             elif isinstance(source, Path):
-                self._keep_path(directory, digest, source)
+                self._keep_path(path, source)
             else:
-                self._keep_opened(directory, digest, source)
-        except FileExistsError:
-            return
+                self._keep_opened(path, source)
         except OSError:
             with self._cv:
-                dispatch.kept.pop(digest, None)
+                if dispatch.kept.get(digest) is kept:
+                    del dispatch.kept[digest]
+            path.unlink(missing_ok=True)
             raise
 
     @staticmethod
-    def _keep_path(directory: Path, digest: str, source: Path) -> None:
+    def _keep_path(path: Path, source: Path) -> None:
         try:
-            os.link(source, directory / digest)
+            os.link(source, path)
         except OSError as exc:
             if exc.errno not in UNLINKABLE_ERRNOS:
                 raise
-            shutil.copyfile(source, directory / digest)
+            shutil.copyfile(source, path)
 
     @staticmethod
-    def _keep_opened(directory: Path, digest: str, source: BinaryIO) -> None:
-        with open_dir(directory) as dir_fd:
-            if link_opened(source.fileno(), dir_fd, digest):
+    def _keep_opened(path: Path, source: BinaryIO) -> None:
+        with open_dir(path.parent) as dir_fd:
+            if link_opened(source.fileno(), dir_fd, path.name):
                 return
         position = source.tell()
         source.seek(0)
         try:
-            with open(directory / digest, "xb") as copy:
+            with open(path, "xb") as copy:
                 shutil.copyfileobj(source, copy, _COPY_CHUNK)
         finally:
             source.seek(position)
@@ -227,31 +264,85 @@ class PublicationOutbox:
         )
         if publication is None:
             return
+        named = set(_referenced(payload))
+        key = (publication.kind.value, publication.key)
         with self._cv:
             dispatch = self._dispatches.setdefault(dispatch_id, _Dispatch())
-            dispatch.entries[(publication.kind.value, publication.key)] = _Entry(
+            entry = _Entry(
                 publication,
                 event_type,
                 task_id,
                 payload,
                 self._clock() + RESEND_SEC,
+                named,
+            )
+            replaced = dispatch.entries.get(key)
+            dispatch.entries[key] = entry
+            self._name_locked(dispatch, named)
+            trees = [
+                kept.path
+                for digest in named
+                if (kept := dispatch.kept.get(digest)) is not None
+                and kept.media_type == TREE_MEDIA_TYPE
+            ]
+            doomed = (
+                self._release_locked(dispatch_id, dispatch, replaced.names)
+                if replaced is not None
+                else []
             )
             self._cv.notify_all()
+        _remove(doomed)
+        if not trees:
+            return
+        members = self._members(trees)
+        with self._cv:
+            if self._dispatches.get(dispatch_id) is not dispatch:
+                return
+            if dispatch.entries.get(key) is entry:
+                entry.names |= members
+            self._name_locked(dispatch, members)
+            doomed = self._release_locked(dispatch_id, dispatch, members)
+        _remove(doomed)
+
+    def _members(self, manifests: list[Path]) -> set[str]:
+        """Return the digests of every member the kept manifests name."""
+        members: set[str] = set()
+        for path in manifests:
+            try:
+                with path.open("rb") as stream:
+                    chunks = iter(lambda: stream.read(STREAM_CHUNK_BYTES), b"")
+                    members.update(member.digest for member in iter_members(chunks))
+            except (OSError, TreeManifestError) as exc:
+                self._logger.warning(
+                    "Could not read the kept manifest %s; its members stay kept "
+                    "until its dispatch ends: %s",
+                    path.name,
+                    exc,
+                )
+        return members
+
+    def _name_locked(self, dispatch: _Dispatch, digests: Iterable[str]) -> None:
+        tick = next(self._ticks)
+        for digest in digests:
+            if (kept := dispatch.kept.get(digest)) is not None:
+                kept.named_at = tick
 
     def end(self, dispatch_id: str | None) -> None:
-        """Note that a dispatch stored and reported everything it will; its copies go
-        once its publications are answered."""
+        """Note that a dispatch stored and reported everything it will; the copies no
+        unanswered publication names go."""
         if dispatch_id is None:
             return
         with self._cv:
             if (dispatch := self._dispatches.get(dispatch_id)) is None:
                 return
             dispatch.ended = True
-            self._prune_locked(dispatch_id, dispatch)
+            doomed = self._release_locked(dispatch_id, dispatch, list(dispatch.kept))
+        _remove(doomed)
 
     def answer(self, answer: PublicationAnswer) -> None:
         """Take control's answer about one publication."""
         publication = answer.publication
+        doomed: list[Path] = []
         with self._cv:
             dispatch = self._dispatches.get(publication.dispatch_id)
             entry = (
@@ -272,7 +363,9 @@ class PublicationOutbox:
                             answer.reason,
                         )
                     del dispatch.entries[(publication.kind.value, publication.key)]
-                    self._prune_locked(publication.dispatch_id, dispatch)
+                    doomed = self._release_locked(
+                        publication.dispatch_id, dispatch, entry.names
+                    )
                 case PublicationDisposition.RETRY:
                     entry.due = now + (
                         BUSY_SEC * (1 + random.random())  # nosec B311 - jitter only
@@ -281,11 +374,11 @@ class PublicationOutbox:
                     )
                 case PublicationDisposition.REMATERIALIZE:
                     entry.restore = tuple(answer.digests)
-                    entry.due = now
+                    entry.due = now + self._backoff(entry)
                 case PublicationDisposition.RETRY_RETIREMENT:
-                    entry.restore = tuple(answer.digests)
                     entry.due = now + self._backoff(entry)
             self._cv.notify_all()
+        _remove(doomed)
 
     @staticmethod
     def _backoff(entry: _Entry) -> float:
@@ -293,11 +386,24 @@ class PublicationOutbox:
         entry.backoff = min(_RETRY_MAX_SEC, wait * 2)
         return wait
 
-    def _prune_locked(self, dispatch_id: str, dispatch: _Dispatch) -> None:
-        if dispatch.entries or not dispatch.ended:
-            return
-        del self._dispatches[dispatch_id]
-        remove_below(self._root / dispatch_id)
+    def _release_locked(
+        self, dispatch_id: str, dispatch: _Dispatch, digests: Iterable[str]
+    ) -> list[Path]:
+        """Stop keeping each of ``digests`` no unanswered publication names and none
+        may name yet; returns what to remove once the lock is released."""
+        if dispatch.ended and not dispatch.entries:
+            del self._dispatches[dispatch_id]
+            return [self._root / dispatch_id]
+        doomed: list[Path] = []
+        for digest in digests:
+            kept = dispatch.kept.get(digest)
+            if kept is None or (not dispatch.ended and kept.kept_at > kept.named_at):
+                continue
+            if any(digest in entry.names for entry in dispatch.entries.values()):
+                continue
+            del dispatch.kept[digest]
+            doomed.append(kept.path)
+        return doomed
 
     def _run(self) -> None:
         while True:
@@ -339,51 +445,79 @@ class PublicationOutbox:
             self._logger.debug("could not report a publication again", exc_info=True)
 
     def _restore(self, dispatch_id: str, entry: _Entry) -> bool:
-        """Store again each object control asked for, from the copy kept of it."""
+        """Store again each object control asked for, from the copy kept of it; a
+        store that cannot take it now is retried, and an object no intact copy is kept
+        of fails the dispatch."""
         with self._cv:
             dispatch = self._dispatches.get(dispatch_id)
             kept = dict(dispatch.kept) if dispatch is not None else {}
-        for digest in entry.restore:
-            facts = kept.get(digest)
-            if facts is None:
-                self._logger.error(
-                    "Publication %s of %s names %s, which this worker did not keep",
-                    entry.publication.key,
-                    dispatch_id,
-                    digest,
-                )
-                continue
+        try:
+            for digest in entry.restore:
+                self._restore_one(entry, kept.get(digest), digest)
+        except _Unrestorable as exc:
+            self._logger.error(
+                "Publication %s of %s cannot be repaired, so its dispatch fails: %s",
+                entry.publication.key,
+                dispatch_id,
+                exc,
+            )
             try:
-                stored = self._upload(
-                    entry.task_id,
-                    facts["scope"],
-                    self._root / dispatch_id / digest,
-                    facts["media_type"],
+                self._fail(
+                    entry.task_id, dispatch_id, f"publication_unrepairable: {exc}"
                 )
-            except Exception as exc:
-                self._logger.warning(
-                    "Storing %s again for %s failed; retrying: %s",
-                    digest,
-                    dispatch_id,
-                    exc,
+            except Exception:
+                self._logger.debug(
+                    "could not report the dispatch failed", exc_info=True
                 )
-                with self._cv:
-                    entry.due = self._clock() + self._backoff(entry)
-                return False
-            if stored.content_digest != digest:
-                self._logger.error(
-                    "The copy kept of %s for %s no longer holds its bytes",
-                    digest,
-                    dispatch_id,
-                )
-        self._logger.info(
-            "Stored %d object(s) of publication %s again",
-            len(entry.restore),
-            entry.publication.key,
-        )
+        except Exception as exc:
+            self._logger.warning(
+                "Storing an object of %s again failed; retrying: %s", dispatch_id, exc
+            )
+            with self._cv:
+                entry.due = self._clock() + self._backoff(entry)
+            return False
+        else:
+            self._logger.info(
+                "Stored %d object(s) of publication %s again",
+                len(entry.restore),
+                entry.publication.key,
+            )
         with self._cv:
             entry.restore = ()
         return True
+
+    def _restore_one(self, entry: _Entry, kept: _Kept | None, digest: str) -> None:
+        if kept is None:
+            raise _Unrestorable(f"{digest} was not kept")
+        try:
+            size = kept.path.stat().st_size
+        except FileNotFoundError:
+            raise _Unrestorable(f"the copy kept of {digest} is gone") from None
+        if size != kept.size_bytes:
+            raise _Unrestorable(f"the copy kept of {digest} has {size} bytes")
+        stored = self._upload(entry.task_id, kept.scope, kept.path, kept.media_type)
+        if stored.content_digest != digest:
+            raise _Unrestorable(f"the copy kept of {digest} no longer holds its bytes")
+
+
+def _referenced(payload: Any) -> Iterator[str]:
+    """Yield the digest of every content reference in a report's payload."""
+    match payload:
+        case {"content_digest": str() as digest}:
+            yield digest
+            for value in payload.values():
+                yield from _referenced(value)
+        case dict():
+            for value in payload.values():
+                yield from _referenced(value)
+        case list():
+            for value in payload:
+                yield from _referenced(value)
+
+
+def _remove(paths: list[Path]) -> None:
+    for path in paths:
+        remove_below(path)
 
 
 class _KeepingStore(FabricObjectStore):

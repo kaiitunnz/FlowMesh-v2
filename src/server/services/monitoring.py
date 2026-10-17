@@ -257,10 +257,12 @@ class EventMonitor:
                 target=self._finalizer_loop, name="workflow-completion", daemon=True
             ),
         ]
-        for thread in self._threads:
-            thread.start()
+        # Before any task event is consumed, so an upload reported stored waits for
+        # the staged trees restored with it.
         if self._publications is not None:
             self._publications.start()
+        for thread in self._threads:
+            thread.start()
 
     @property
     def finalizer(self) -> WorkflowFinalizer:

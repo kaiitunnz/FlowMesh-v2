@@ -125,7 +125,7 @@ def _stage(
     for name, data in files.items():
         _stage_file(uploader, journal, task_id, _write(tmp_path, name, data))
     if submit:
-        uploader.submit(journal, "tsk-1", {"artifacts_pending": True})
+        uploader.submit(journal, "tsk-1")
     return journal
 
 
@@ -335,7 +335,7 @@ def test_a_journal_that_cannot_be_written_reports_what_is_owed_unfinishable(
     journal = uploader.begin("dsp-1", "org")
     _stage(uploader, tmp_path, {"a.bin": b"alpha"}, journal=journal, submit=False)
     _stage(uploader, tmp_path, {"b.bin": b"beta"}, "tsk-2", journal, submit=False)
-    uploader.submit(journal, "tsk-1", {"artifacts_pending": True})
+    uploader.submit(journal, "tsk-1")
     custody.full = True
     uploader.start()
 
@@ -362,7 +362,7 @@ def test_a_success_that_cannot_be_recorded_ends_its_custody(tmp_path) -> None:
     journal = _stage(uploader, tmp_path, {"a.bin": b"alpha"}, submit=False)
 
     with pytest.raises(OSError):
-        uploader.submit(journal, "tsk-1", {"artifacts_pending": True})
+        uploader.submit(journal, "tsk-1")
 
     assert not ArtifactCustody(root).publication_dir("org", "dsp-1").exists()
 
@@ -410,7 +410,7 @@ def test_one_unuploadable_member_fails_only_the_tasks_that_own_it(tmp_path) -> N
     )
     gone = journal.tasks["tsk-1"].members[0]
     ArtifactCustody(root).source(journal, gone).unlink()
-    uploader.submit(journal, "tsk-1", {"artifacts_pending": True})
+    uploader.submit(journal, "tsk-1")
     uploader.start()
 
     ports.wait(lambda: len({r[0] for r in ports.reports}) == 2)
@@ -431,7 +431,7 @@ def test_a_failed_task_is_reported_once_its_other_files_are_stored(tmp_path) -> 
         uploader, tmp_path, {"a.bin": b"alpha", "b.bin": b"beta"}, submit=False
     )
     ArtifactCustody(root).source(journal, journal.tasks["tsk-1"].members[0]).unlink()
-    uploader.submit(journal, "tsk-1", {"artifacts_pending": True})
+    uploader.submit(journal, "tsk-1")
     uploader.start()
 
     ports.wait(lambda: ports.reports)
@@ -451,7 +451,7 @@ def test_a_pending_answer_reports_no_failed_task_still_uploading(tmp_path) -> No
         uploader, tmp_path, {"a.bin": b"alpha", "b.bin": b"beta"}, submit=False
     )
     ArtifactCustody(root).source(journal, journal.tasks["tsk-1"].members[0]).unlink()
-    uploader.submit(journal, "tsk-1", {"artifacts_pending": True})
+    uploader.submit(journal, "tsk-1")
     uploader.start()
     ports.wait(lambda: ports.attempts >= 2)
     assert journal.tasks["tsk-1"].failed is not None
@@ -493,7 +493,7 @@ def test_a_member_that_fails_unexpectedly_holds_up_none_of_its_dispatch(
     journal = uploader.begin("dsp-1", "org")
     _stage_file(uploader, journal, "tsk-1", _write(tmp_path, "a.bin", b"poison"))
     _stage_file(uploader, journal, "tsk-2", _write(tmp_path, "b.bin", b"fine"))
-    uploader.submit(journal, "tsk-1", {"artifacts_pending": True})
+    uploader.submit(journal, "tsk-1")
     uploader.start()
 
     ports.wait(lambda: ports.reports)

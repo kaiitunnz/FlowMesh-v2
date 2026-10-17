@@ -3,21 +3,25 @@
 The backfill reads each family of keys that binds content — workflow ledgers, task
 states, artifact catalogs, freed workflows' histories and outcome finalizations — and
 protects every reference they name, decoding each with the codec that wrote it and
-extracting references only through typed fields. It scans each family afresh, a page of
-keys at a time and a large hash a page of fields at a time, and protects each page in
-one transaction, holding no runtime lock and reading nothing the runtime holds in
-memory. Only a family's completion is recorded, never a scan position, so a restarted
-root scans again from the start. A key that does not decode leaves the scope it names,
-or every scope when its scope cannot be read, uncertified for the generation.
+extracting references only through typed fields. One scan of the keyspace classifies
+each key into its family, a page of keys at a time and a large hash a page of fields at
+a time, and protects each page in one transaction, holding no runtime lock and reading
+nothing the runtime holds in memory. A generation's families complete once, and a later
+root reads only those its generation has not completed; only completion is recorded,
+never a scan position, so an interrupted scan starts again from the beginning. A key
+that does not decode leaves the scope it names, or every scope when its scope cannot be
+read, uncertified for the generation.
 """
 
 import json
 import logging
+import re
 import threading
 from collections import defaultdict
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Container, Iterable, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
+from fnmatch import translate
 from functools import cache
 from typing import Any
 
@@ -60,7 +64,7 @@ from .references import reference_paths, references_of
 SCAN_COUNT = 500
 FIELD_COUNT = 256
 FLUSH_IDENTITIES = 1000
-# The pause between pages, and before a family whose scan failed is scanned again.
+# The pause between pages, and before a scan that failed starts again.
 PAGE_PAUSE_SEC = 0.005
 RETRY_PAUSE_SEC = 5.0
 
@@ -88,6 +92,20 @@ _PATTERNS: dict[Family, str] = {
     Family.FINALIZATION: content_finalization_key("*", "*"),
 }
 _HASHES = frozenset({Family.LEDGER, Family.ARTIFACTS, Family.HISTORY})
+
+
+_FAMILY_KEY = re.compile(
+    "|".join(f"(?P<{family.name}>{translate(p)})" for family, p in _PATTERNS.items())
+)
+
+
+def _family_of(key: str, families: Container[Family]) -> Family | None:
+    """The family among ``families`` a key belongs to, matched as a key-pattern scan
+    would match it."""
+    if (match := _FAMILY_KEY.match(key)) is None or match.lastgroup is None:
+        return None
+    family = Family[match.lastgroup]
+    return family if family in families else None
 
 
 class Undecodable(Exception):
@@ -247,87 +265,93 @@ class Backfill:
     def run(
         self, generation: int, stop: threading.Event
     ) -> dict[str, FamilyReport] | None:
-        """Scan every family not yet complete in ``generation``, retrying a failed
+        """Scan for every family not yet complete in ``generation``, retrying a failed
         scan from its start, until all are complete; None when stopped or a later root
         moved the generation on."""
-        reports: dict[str, FamilyReport] = {}
         done = self._coverage.completed(generation)
-        for family in Family:
-            if family.value in done:
-                continue
-            while True:
-                try:
-                    report = self.scan(family, generation, stop)
-                except Exception:
-                    self._logger.warning(
-                        "Content reclamation backfill of %s failed; scanning it again",
-                        family.value,
-                        exc_info=True,
-                    )
-                    if stop.wait(self._retry_pause):
-                        return None
-                    continue
-                if report is None:
-                    return None
-                if not self._coverage.complete(generation, family.value):
-                    self._logger.info(
-                        "Content reclamation backfill stopped: a later root holds the "
-                        "generation past %d",
-                        generation,
-                    )
-                    return None
-                reports[family.value] = report
-                self._logger.info(
-                    "Content reclamation backfill of %s complete: %d keys, %d "
-                    "references, %d trees, %d undecodable",
-                    family.value,
-                    report.keys,
-                    report.references,
-                    report.trees,
-                    report.faults,
+        pending = [family for family in Family if family.value not in done]
+        if not pending:
+            return {}
+        while True:
+            try:
+                reports = self.scan(pending, generation, stop)
+            except Exception:
+                self._logger.warning(
+                    "Content reclamation backfill failed; scanning again",
+                    exc_info=True,
                 )
-                if self._audit is not None:
-                    self._audit.record(
-                        "backfill",
-                        generation=str(generation),
-                        family=family.value,
-                        keys=report.keys,
-                        values=report.values,
-                        references=report.references,
-                        trees=report.trees,
-                        faults=report.faults,
-                    )
-                break
-        return reports
+                if stop.wait(self._retry_pause):
+                    return None
+                continue
+            break
+        if reports is None:
+            return None
+        for family, report in reports.items():
+            if not self._coverage.complete(generation, family.value):
+                self._logger.info(
+                    "Content reclamation backfill stopped: a later root holds the "
+                    "generation past %d",
+                    generation,
+                )
+                return None
+            self._logger.info(
+                "Content reclamation backfill of %s complete: %d keys, %d "
+                "references, %d trees, %d undecodable",
+                family.value,
+                report.keys,
+                report.references,
+                report.trees,
+                report.faults,
+            )
+            if self._audit is not None:
+                self._audit.record(
+                    "backfill",
+                    generation=str(generation),
+                    family=family.value,
+                    keys=report.keys,
+                    values=report.values,
+                    references=report.references,
+                    trees=report.trees,
+                    faults=report.faults,
+                )
+        return {family.value: report for family, report in reports.items()}
 
     def scan(
-        self, family: Family, generation: int, stop: threading.Event
-    ) -> FamilyReport | None:
-        """Scan one family from its start and protect what it binds; None when
-        stopped."""
-        report = FamilyReport()
+        self, families: Sequence[Family], generation: int, stop: threading.Event
+    ) -> dict[Family, FamilyReport] | None:
+        """Scan the keyspace once from its start, protecting what each key of
+        ``families`` binds; None when stopped."""
+        reports = {family: FamilyReport() for family in families}
         cursor = 0
         while True:
-            cursor, keys = self._scan_page(cursor, _PATTERNS[family])
-            batch = _Batch()
-            report.keys += len(keys)
-            if family in _HASHES:
-                for key in keys:
-                    self._scan_hash(family, key, generation, batch, report)
-            elif family is Family.TASK_STATE:
-                self._task_states(keys, generation, batch, report)
-            else:
-                self._finalizations(keys, generation, batch, report)
-            self._flush(family, generation, batch, report)
-            report.pages += 1
+            cursor, keys = self._scan_page(cursor)
+            classified: dict[Family, list[str]] = defaultdict(list)
+            for key in keys:
+                if (family := _family_of(key, reports)) is not None:
+                    classified[family].append(key)
+            for family in families:
+                report = reports[family]
+                report.pages += 1
+                if not (members := classified.get(family)):
+                    continue
+                batch = _Batch()
+                report.keys += len(members)
+                if family in _HASHES:
+                    for key in members:
+                        self._scan_hash(family, key, generation, batch, report)
+                elif family is Family.TASK_STATE:
+                    self._task_states(members, generation, batch, report)
+                else:
+                    self._finalizations(members, generation, batch, report)
+                self._flush(family, generation, batch, report)
             if cursor == 0:
-                return report
+                return reports
             if stop.wait(self._page_pause):
                 return None
 
-    def _scan_page(self, cursor: int, pattern: str) -> tuple[int, list[str]]:
+    def _scan_page(self, cursor: int) -> tuple[int, list[str]]:
         with self._rds.sync.control_pipeline(transaction=False) as pipe:
-            pipe.scan(cursor, match=pattern, count=SCAN_COUNT)
+            pipe.scan(cursor, count=SCAN_COUNT)
             next_cursor, keys = pipe.execute()[0]
         return int(next_cursor), list(keys)
 

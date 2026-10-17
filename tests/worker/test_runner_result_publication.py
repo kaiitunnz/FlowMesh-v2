@@ -411,7 +411,14 @@ def test_a_staged_success_owes_its_upload_before_it_is_reported(
     metadata = _metadata(lifecycle)
     assert metadata[ARTIFACTS_PENDING] is True
     (journal,) = owed[0]
-    assert journal.task_id == "tsk-1" and journal.success == metadata
+    assert journal.task_id == "tsk-1"
+    recorded = json.loads(
+        (
+            custody.publication_dir(journal.scope, journal.dispatch_id) / "journal.json"
+        ).read_text()
+    )
+    assert "success" not in recorded
+    assert "accepted" not in recorded["tasks"]["tsk-1"]
     (member,) = journal.tasks["tsk-1"].members
     assert custody.source(journal, member).read_bytes() == b"weights"
     with pytest.raises(ContentHydrationError):

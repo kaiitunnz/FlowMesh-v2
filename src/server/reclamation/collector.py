@@ -6,8 +6,9 @@ assertion in flight, nor a bound tree awaiting expansion. Condemnation is one sc
 that re-checks all of that, and the scope's certification, atomically, so an object a
 binding names is never condemned. A condemned object stays cancellable: an assertion
 that names it removes it. The collector also reports the multipart uploads the store
-holds open. It deletes nothing and aborts nothing; it records what it found in the
-audit stream, its log and its metrics.
+holds open, and drops the registration of each upload a listing no longer names. It
+deletes nothing and aborts nothing in the store; it records what it found in the audit
+stream, its log and its metrics.
 
 An object younger than ``MIN_AGE_SEC`` is passed over, which paces condemnation behind
 writers still about to bind what they wrote; no decision rests on that age.
@@ -17,8 +18,8 @@ import logging
 import threading
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
-from typing import Any
 
 from opentelemetry.metrics import Meter, NoOpMeter
 
@@ -36,6 +37,7 @@ from ..clients.redis import (
 )
 from .audit import AuditTrail
 from .certification import CoverageStore
+from .multipart import MultipartStore
 from .store_admin import Eligibility, Ineligibility, StoreAdmin, StoredVersion
 
 # How often a sweep runs, how old an object must be before it is condemned, and the
@@ -165,12 +167,14 @@ class AuditCollector:
         logger: logging.Logger,
         audit: AuditTrail | None = None,
         meter: Meter | None = None,
+        multipart: MultipartStore | None = None,
         *,
         min_age_sec: float = MIN_AGE_SEC,
         page_pause_sec: float = PAGE_PAUSE_SEC,
-        clock: Any = time.time,
+        clock: Callable[[], float] = time.time,
     ) -> None:
         self._rds = rds
+        self._multipart = multipart
         self._coverage = coverage
         self._admin = admin
         self._logger = logger
@@ -367,8 +371,11 @@ class AuditCollector:
         assert self._admin is not None
         audit = UploadAudit()
         by_scope: dict[str, int] = defaultdict(int)
+        listed_at = self._clock()
+        open_ids: set[str] = set()
         for page in self._admin.uploads():
             for upload in page:
+                open_ids.add(upload.upload_id)
                 audit.uploads += 1
                 by_scope[upload.scope or ""] += 1
                 if audit.uploads > MAX_SIZED_UPLOADS:
@@ -382,6 +389,9 @@ class AuditCollector:
                 audit.parts += parts
                 audit.bytes += size
         audit.by_scope = dict(by_scope)
+        if self._multipart is not None:
+            for scope in sorted(self._rds.sync.set_members(RECLAIM_SCOPES_KEY)):
+                self._multipart.prune(scope, open_ids, listed_at)
         return audit
 
     def _publish(self, result: SweepAudit) -> None:
