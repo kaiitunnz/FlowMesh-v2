@@ -118,23 +118,7 @@ recorded.
 
 The root server reports the resident fleet per service family — replica count,
 admission slots in use, and claim credit held — alongside the ready-queue depth.
-A deployment with resident capacity disabled reports queue depth alone. The root also
-reports the publication lane's depth, `flowmesh.content.publication_lane`, per `state`:
-`held`, `waiting` or `reserved`.
-
-With `CONTENT_RECLAMATION_ENABLED` the root also reports what its last content-store
-audit found, as gauges set once per sweep:
-
-| Gauge | Unit | Value |
-|-------|------|-------|
-| `flowmesh.content.reclamation.orphans` | `{object}` | Stored versions no binding names |
-| `flowmesh.content.reclamation.orphan_bytes` | `By` | Their bytes |
-| `flowmesh.content.reclamation.young` | `{object}` | Unbound versions too recent to count as orphans |
-| `flowmesh.content.reclamation.young_bytes` | `By` | Their bytes |
-| `flowmesh.content.reclamation.open_uploads` | `{upload}` | Multipart uploads the store holds open |
-| `flowmesh.content.reclamation.open_upload_bytes` | `By` | Bytes of their parts |
-| `flowmesh.content.reclamation.uncertified_scopes` | `{scope}` | Scopes not audited for want of certified coverage |
-| `flowmesh.content.reclamation.eligible` | `1` | `1` when the store is eligible for audit, else `0` |
+A deployment with resident capacity disabled reports queue depth alone.
 
 `GET /api/v1/system/metrics` is unchanged.
 
