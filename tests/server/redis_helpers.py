@@ -16,9 +16,25 @@ def fake_sync_client(server: fakeredis.FakeServer) -> SyncRedisClient:
     return _sync_client(SyncRedisClient, server)
 
 
+def restart_fake_server(server: fakeredis.FakeServer, run_id: str) -> None:
+    """Give ``server`` the run id a restarted Redis would report."""
+    cast(Any, server).fake_run_id = run_id
+
+
+def _info(server: fakeredis.FakeServer) -> Callable[..., dict[str, str]]:
+    """``INFO``, which fakeredis lacks, answering the server's run id."""
+
+    def info(section: str | None = None, *args: Any, **kwargs: Any) -> dict[str, str]:
+        run_id = getattr(server, "fake_run_id", "fake-run")
+        return {"run_id": run_id, "master_replid": f"{run_id}-replid"}
+
+    return info
+
+
 def _sync_client[C: SyncRedisClient](cls: type[C], server: fakeredis.FakeServer) -> C:
     client = object.__new__(cls)
     client._control = fakeredis.FakeRedis(server=server, decode_responses=True)
+    cast(Any, client._control).info = _info(server)
     client._telemetry = client._control
     client.logger = _LOGGER
     return client
@@ -36,6 +52,12 @@ def fake_redis_client(server: fakeredis.FakeServer) -> RedisClient:
         server=server, decode_responses=True
     )
     cast(Any, async_client)._telemetry = cast(Any, async_client)._control
+    sync_info = _info(server)
+
+    async def info(*args: Any, **kwargs: Any) -> dict[str, str]:
+        return sync_info(*args, **kwargs)
+
+    cast(Any, async_client)._control.info = info
     client = RedisClient.__new__(RedisClient)
     client.sync = fake_sync_client(server)
     client.asyncio = async_client

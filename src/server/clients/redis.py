@@ -2,7 +2,7 @@ import json
 import logging
 import socket
 import ssl
-from collections.abc import Awaitable, Iterable
+from collections.abc import Awaitable, Iterable, Mapping, Sequence
 from typing import Any
 from urllib.parse import urlparse, urlunparse
 
@@ -13,7 +13,7 @@ from redis.asyncio.client import PubSub as AsyncPubSub
 from redis.asyncio.connection import SSLConnection as AsyncSSLConnection
 from redis.client import Pipeline, PubSub
 from redis.connection import SSLConnection as SyncSSLConnection
-from redis.typing import EncodableT
+from redis.typing import EncodableT, FieldT
 
 from shared.utils.redact import redact_url
 
@@ -324,6 +324,9 @@ def content_finalization_scope_key(idempotency_key: str) -> str:
     return f"ct:finalization-scope:{idempotency_key}"
 
 
+CONTENT_AUDIT_KEY = "ct:audit"
+
+
 def ssh_connection_key(connection_id: str) -> str:
     return f"ssh:connection:{connection_id}"
 
@@ -468,6 +471,10 @@ def _with_redis_auth(url: str, acl_enabled: bool, username: str, password: str) 
     return urlunparse(parsed._replace(netloc=netloc))
 
 
+def _stream_fields(fields: Mapping[str, str]) -> dict[FieldT, EncodableT]:
+    return {name: value for name, value in fields.items()}
+
+
 class SyncRedisClient:
     def __init__(
         self,
@@ -608,6 +615,40 @@ class SyncRedisClient:
         next_cursor, members = _sync(self._control.sscan(key, cursor, count=count))
         return int(next_cursor), list(members)
 
+    def scan_step(self, cursor: int, count: int) -> tuple[int, list[str]]:
+        """Read one ``SCAN`` step of the control store: the next cursor, 0 once done,
+        and the keys."""
+        next_cursor, keys = _sync(self._control.scan(cursor, count=count))
+        return int(next_cursor), list(keys)
+
+    def scan_hash(
+        self, key: str, cursor: int, count: int
+    ) -> tuple[int, dict[str, str]]:
+        """Read one ``HSCAN`` step: the next cursor, 0 once done, and the fields."""
+        next_cursor, fields = _sync(self._control.hscan(key, cursor, count=count))
+        return int(next_cursor), dict(fields)
+
+    def scan_hashes(
+        self, keys: Sequence[str], count: int
+    ) -> list[tuple[int, dict[str, str]] | Exception]:
+        """Read the first ``HSCAN`` step of each key in one round trip; a key that
+        cannot be scanned answers with its error."""
+        with self._control.pipeline(transaction=False) as pipe:
+            for key in keys:
+                pipe.hscan(key, 0, count=count)
+            replies = pipe.execute(raise_on_error=False)
+        return [
+            reply if isinstance(reply, Exception) else (int(reply[0]), dict(reply[1]))
+            for reply in replies
+        ]
+
+    def server_identity(self) -> str:
+        """The control store's server run and replication history, which change when
+        it restarts or another server takes over."""
+        server = _sync(self._control.info("server"))
+        replication = _sync(self._control.info("replication"))
+        return f"{server.get('run_id', '')}:{replication.get('master_replid', '')}"
+
     def sadd(self, key: str, *members: str) -> int:
         if not members:
             return 0
@@ -664,7 +705,22 @@ class SyncRedisClient:
         self.logger.info("Subscribed to %s", channel)
         return pubsub
 
-    # ---- Streams (telemetry) ----
+    # ---- Streams ----
+    def xadd_control(
+        self,
+        key: str,
+        fields: Mapping[str, str],
+        maxlen: int | None = None,
+        approximate: bool = True,
+    ) -> str:
+        return str(
+            _sync(
+                self._control.xadd(
+                    key, _stream_fields(fields), maxlen=maxlen, approximate=approximate
+                )
+            )
+        )
+
     def xadd_telemetry(
         self,
         key: str,
@@ -868,6 +924,35 @@ class AsyncRedisClient:
         )
         return int(next_cursor), list(members)
 
+    async def scan_step(self, cursor: int, count: int) -> tuple[int, list[str]]:
+        next_cursor, keys = await _awaitable(self._control.scan(cursor, count=count))
+        return int(next_cursor), list(keys)
+
+    async def scan_hash(
+        self, key: str, cursor: int, count: int
+    ) -> tuple[int, dict[str, str]]:
+        next_cursor, fields = await _awaitable(
+            self._control.hscan(key, cursor, count=count)
+        )
+        return int(next_cursor), dict(fields)
+
+    async def scan_hashes(
+        self, keys: Sequence[str], count: int
+    ) -> list[tuple[int, dict[str, str]] | Exception]:
+        async with self._control.pipeline(transaction=False) as pipe:
+            for key in keys:
+                pipe.hscan(key, 0, count=count)
+            replies = await pipe.execute(raise_on_error=False)
+        return [
+            reply if isinstance(reply, Exception) else (int(reply[0]), dict(reply[1]))
+            for reply in replies
+        ]
+
+    async def server_identity(self) -> str:
+        server = await _awaitable(self._control.info("server"))
+        replication = await _awaitable(self._control.info("replication"))
+        return f"{server.get('run_id', '')}:{replication.get('master_replid', '')}"
+
     async def sadd(self, key: str, *members: str) -> int:
         if not members:
             return 0
@@ -922,7 +1007,22 @@ class AsyncRedisClient:
         self.logger.info("Subscribed to %s", channel)
         return pubsub
 
-    # ---- Streams (telemetry) ----
+    # ---- Streams ----
+    async def xadd_control(
+        self,
+        key: str,
+        fields: Mapping[str, str],
+        maxlen: int | None = None,
+        approximate: bool = True,
+    ) -> str:
+        return str(
+            await _awaitable(
+                self._control.xadd(
+                    key, _stream_fields(fields), maxlen=maxlen, approximate=approximate
+                )
+            )
+        )
+
     async def xadd_telemetry(
         self,
         key: str,

@@ -589,9 +589,11 @@ class ContentStoreConfig:
     that has stopped sending, and ``read_attempts`` how many times its request is made.
     ``transfer_window_bytes`` and ``transfer_timeout_sec`` are the window and stall
     deadline the workers' transfers run under, which a node relaying one sizes by.
+    ``content_audit_enabled`` audits the content store for objects no binding names.
     """
 
     hydration_enabled: bool = False
+    content_audit_enabled: bool = True
     grant_ttl_sec: float = 60.0
     access_grant_ttl_sec: float = 900.0
     read_stall_timeout_sec: float = _DEFAULT_READ_STALL_TIMEOUT_SEC
@@ -603,6 +605,7 @@ class ContentStoreConfig:
     def from_env(cls) -> "ContentStoreConfig":
         return cls(
             hydration_enabled=content_hydration_enabled(),
+            content_audit_enabled=parse_bool_env("CONTENT_AUDIT_ENABLED", True),
             grant_ttl_sec=parse_float_env("CONTENT_HYDRATION_GRANT_TTL_SEC", 60.0),
             access_grant_ttl_sec=max(
                 _MIN_ACCESS_GRANT_TTL_SEC,

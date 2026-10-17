@@ -89,6 +89,7 @@ directory `flowmesh stack` runs in.
 | `CONTENT_STORE_UPLOAD_CONCURRENCY` | `4` | Parts one upload sends at once |
 | `CONTENT_STORE_READ_STALL_TIMEOUT_SEC` | `10` | Longest a control-plane store read waits for bytes (seconds) |
 | `CONTENT_STORE_READ_ATTEMPTS` | `2` | Request attempts per control-plane store read |
+| `CONTENT_AUDIT_ENABLED` | `true` | Audit the content store for objects no binding names |
 | `RESIDENT_CAPACITY_ENABLED` | `false` | Serve resident model bindings via admission |
 | `RESIDENT_INFERENCE_SUBSTRATE` | `serve` | Resident replica substrate (`serve` or `dev_model`) |
 | `RESIDENT_ADMISSION_SLOTS` | `8` | Conservative safe admission slots per replica |
