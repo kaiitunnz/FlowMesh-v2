@@ -429,6 +429,7 @@ def _queue_registration(
             workflow_blueprints_key(workflow_id),
             TaskBlueprints(tasks=list(blueprints)).model_dump_json(),
         )
+        queue_protection(pipe, references_of(*blueprints))
 
 
 def _queue_transition(
